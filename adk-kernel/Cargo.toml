@@ -1,0 +1,160 @@
+[package]
+name = "adk-kernel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Agent kernel for ADK-Rust: a resident supervisor with a process model, wake sources, an event bus and a control plane over durable runs"
+repository.workspace = true
+documentation = "https://docs.rs/adk-kernel"
+keywords = ["adk", "agent", "kernel", "durable", "supervisor"]
+categories = ["asynchronous", "development-tools"]
+# Every file under `tests/` is a module of one test binary, so the dependencies link once.
+autotests = false
+
+# Feature set of spec 3.2 §7.1, with `channels` from spec 3.3 §10 K1.
+[features]
+default = ["sqlite", "webhooks", "drivers", "service", "proc"]
+# SQLite backends for the kernel-owned stores, on the pool of `harness.db` with distinct
+# migration tables (spec 3.2 §7.1, §13 Q8). The SQL backends record their steps with
+# `adk_session::migration`'s runners, as adk-session's stores in `harness.db` do.
+sqlite = ["dep:sqlx", "sqlx/sqlite", "adk-session/sqlite"]
+# Shared kernel stores for replicas, opened from the URL of `adk-rust serve --store`
+# (spec 3.2 §7.1, §13 Q8).
+postgres = ["dep:sqlx", "sqlx/postgres", "sqlx/tls-rustls-aws-lc-rs", "adk-session/postgres"]
+redis = ["dep:fred", "adk-session/redis"]
+# The phase-4 backends of the kernel-owned stores (spec 3.2 §7.1, §13 Q8). Each also turns on
+# the same backend of adk-session's run, schedule and governance stores, which a kernel on that
+# backend keeps beside them.
+mongodb = ["dep:mongodb", "adk-session/mongodb"]
+firestore = ["dep:firestore", "adk-session/firestore"]
+neo4j = ["dep:neo4rs", "adk-session/neo4j"]
+# Webhook wake sources through `WebhookIngress` (spec 3.2 §7.4), and the outbound webhook
+# sink over `adk-core`'s signed delivery (spec 3.2 §7.6).
+webhooks = ["adk-core/webhooks", "adk-core/webhook-delivery", "adk-server/webhook-ingress"]
+# Supervised MCP drivers (spec 3.2 §7.7): manifests, the driver store, the supervisor over
+# `adk-tool`'s MCP manager, and the stdio launcher on `adk-sandbox`'s OS enforcers.
+drivers = [
+    "dep:adk-tool",
+    "adk-tool/mcp",
+    "adk-tool/mcp-sampling",
+    "dep:adk-sandbox",
+    "adk-sandbox/sandbox-native",
+    "adk-sandbox/egress-proxy",
+    "dep:toml",
+    "dep:url",
+]
+# launchd, systemd and Windows service installation (spec 3.2 §7.12, §10 W3): the `service`
+# module, with `windows-service` on Windows.
+service = ["dep:windows-service"]
+# The content-free activity ledger with its subject HMACs, and the live `ps`/`top`
+# aggregates' OTel GenAI histograms (spec 3.2 §7.10, §13 Q4).
+proc = ["dep:adk-telemetry", "dep:opentelemetry", "dep:hmac", "dep:hex"]
+# The daily 28-day baselines and observations over `adk-eval`'s ledger statistics (spec 3.2
+# §7.10, §13 Q4). The only edge to `adk-eval`, which pulls `adk-runner`, `adk-session` and
+# `adk-model` into a build.
+proc-baselines = ["proc", "dep:adk-eval"]
+# The chat channel contract (spec 3.3 §10 K1): `ChannelSink`, the channel binding store, the
+# gateway that turns a paired account's message into a turn, and the adapter contract suite.
+channels = []
+# The managed form (spec 3.2 §7.13, §10 M1): `KernelDef` under the `adk.kernel` metadata
+# key of a `ManagedAgentDef`, and one kernel per tenant over its `ManagedStores`.
+managed = ["dep:adk-managed", "drivers"]
+# The `conformance` module: suites for kernel store backends (spec 3.2 §11).
+conformance = ["tokio/rt"]
+# The charter store, the KPI tracker, autonomy records, signals and the site process kinds
+# over the AWP 2.0 types (spec 3.5 §7.1, §7.10, §7.11).
+charter = ["dep:awp-types"]
+
+[dependencies]
+adk-core.workspace = true
+adk-agent = { workspace = true, features = ["ambient"] }
+adk-runner.workspace = true
+adk-session.workspace = true
+adk-server = { workspace = true, features = ["background", "approvals"] }
+adk-eval = { workspace = true, optional = true }
+adk-telemetry = { workspace = true, optional = true }
+adk-tool = { workspace = true, optional = true }
+adk-sandbox = { workspace = true, optional = true }
+adk-managed = { workspace = true, optional = true }
+async-trait.workspace = true
+awp-types = { workspace = true, optional = true }
+# The control plane's router, served on the Unix socket and merged into `ServerBuilder`.
+axum = "0.8"
+chrono.workspace = true
+# Quiet hours in a named time zone, which follow its daylight saving time (spec 3.3 §10 K3).
+chrono-tz = "0.10"
+dirs = "7"
+# The MongoDB, Firestore and Neo4j backends (features `mongodb`, `firestore`, `neo4j`), at the
+# versions adk-session and adk-graph use.
+firestore = { version = "0.48", optional = true }
+fred = { version = "10", optional = true, features = ["i-scripts"] }
+futures.workspace = true
+# The ledger key's random bytes (feature `proc`), and pairing codes and device tokens
+# (spec 3.3 §10 K2).
+getrandom = "0.3"
+hex = { workspace = true, optional = true }
+# The ledger's subject HMACs (feature `proc`).
+hmac = { version = "0.12", optional = true }
+# The control-plane client over the Unix socket, and the named-pipe server on Windows.
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio", "service"] }
+mongodb = { version = "3", optional = true }
+neo4rs = { version = "0.8", optional = true }
+opentelemetry = { workspace = true, optional = true }
+# The control-plane client over HTTP.
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# The named pipe's and the service's names, derived from the kernel home, and digests of
+# crossing fingerprints, so the crossing ledger holds no argument text.
+sha2.workspace = true
+sqlx = { workspace = true, optional = true, features = ["runtime-tokio", "chrono", "json"] }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "time", "rt", "macros", "net", "fs", "signal"] }
+tokio-stream.workspace = true
+tokio-util = { version = "0.7", features = ["rt"] }
+# Driver manifests (spec 3.2 §7.7).
+toml = { workspace = true, optional = true }
+tracing.workspace = true
+# `secret://` references in driver manifests, resolved through the credential broker.
+url = { version = "2.5", optional = true }
+uuid.workspace = true
+
+# The socket address limit, the user's temp directory and uid, for a socket too long for its
+# kernel home (spec 3.3 G18).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# The named pipe's owner-only security descriptor and its client check (spec 3.2 §10 W2,
+# W4), and the Windows service's account and logon right (W3).
+[target.'cfg(windows)'.dependencies]
+windows-service = { version = "0.8.1", optional = true }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authentication_Identity", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Pipes", "Win32_System_Registry", "Win32_System_Threading"] }
+
+[dev-dependencies]
+# Internal dev-deps are path-only (no version) so cargo strips them from the published
+# manifest. The self dependency lets the crate's own tests run the conformance suites.
+adk-kernel = { path = ".", features = ["conformance"] }
+# A project-scoped memory for the partition memory tests.
+adk-memory = { path = "../adk-memory" }
+# ScriptedLlm for the scenario tests on a real DurableWorker.
+adk-model = { path = "../adk-model", default-features = false }
+adk-session = { path = "../adk-session", features = ["sqlite"] }
+proptest = "1.5"
+# The stdio MCP server the driver tests run as their driver (spec 3.2 §7.7).
+rmcp = { version = "3.1", features = ["client", "server", "elicitation"] }
+sqlx = { workspace = true, features = ["runtime-tokio", "sqlite"] }
+tempfile = "3"
+tokio = { workspace = true, features = ["full", "test-util"] }
+# Captures the webhook sink's logs to show they carry no secret.
+tracing-subscriber.workspace = true
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"
+
+[package.metadata.docs.rs]
+all-features = true

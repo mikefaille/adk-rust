@@ -1,7 +1,7 @@
 //! DeepSeek client implementation.
 //!
-//! Supports the DeepSeek V4 models (`deepseek-v4-flash`, `deepseek-v4-pro`,
-//! `deepseek-v4-flash-vision-exp`). The `deepseek-chat` and
+//! Supports the current DeepSeek models (`deepseek-flash`, `deepseek-v4-pro`).
+//! `deepseek-v4-flash`, `deepseek-v4-flash-vision-exp`, `deepseek-chat` and
 //! `deepseek-reasoner` aliases were retired on 2026-07-24.
 
 use super::config::{DeepSeekConfig, ThinkingMode};
@@ -10,14 +10,20 @@ use super::convert::{
 };
 use crate::retry::{RetryConfig, execute_with_retry, is_retryable_model_error};
 use adk_core::{
-    AdkError, ErrorCategory, ErrorComponent, FinishReason, GenericSchemaAdapter, Llm, LlmRequest,
-    LlmResponse, LlmResponseStream, Part, SchemaAdapter,
+    AdkError, ErrorComponent, FinishReason, GenericSchemaAdapter, Llm, LlmRequest, LlmResponse,
+    LlmResponseStream, Part, SchemaAdapter,
 };
 use async_stream::try_stream;
 use async_trait::async_trait;
 use futures::StreamExt;
 use reqwest::Client;
-use serde_json::Value;
+
+/// Stream that ended, or whose connection failed, before a finish reason.
+const INCOMPLETE_STREAM: &str = "model.deepseek.incomplete_stream";
+/// Stream chunk that is not valid JSON or not a chat completion chunk.
+const INVALID_CHUNK: &str = "model.deepseek.invalid_chunk";
+/// Error frame DeepSeek sent inside the stream.
+const STREAM_ERROR: &str = "model.deepseek.stream_error";
 
 /// DeepSeek client for V4 and legacy models.
 ///
@@ -53,11 +59,44 @@ impl DeepSeekClient {
     /// Create a new DeepSeek client.
     pub fn new(config: DeepSeekConfig) -> Result<Self, AdkError> {
         crate::catalog::warn_if_obsolete("deepseek", &config.model);
-        let client = Client::builder()
+        let client = crate::HttpTimeouts::default()
+            .apply(Client::builder())
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| AdkError::model(format!("failed to create HTTP client: {e}")))?;
 
         Ok(Self { client, config, retry_config: RetryConfig::default() })
+    }
+
+    /// Sets the connect and idle timeouts of the HTTP transport, so a stalled stream fails
+    /// with a `Timeout` error instead of holding the run.
+    ///
+    /// See [`HttpTimeouts`](crate::HttpTimeouts) for the defaults.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use std::time::Duration;
+    ///
+    /// use adk_model::deepseek::{DeepSeekClient, DeepSeekConfig};
+    /// use adk_model::HttpTimeouts;
+    ///
+    /// let client = DeepSeekClient::new(DeepSeekConfig::v4_flash("sk-key"))?
+    ///     .with_timeouts(HttpTimeouts::new(Duration::from_secs(10), Duration::from_secs(120)))?;
+    /// # let _ = client;
+    /// # Ok::<(), adk_core::AdkError>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the DeepSeek HTTP client cannot be built.
+    pub fn with_timeouts(mut self, timeouts: crate::HttpTimeouts) -> Result<Self, AdkError> {
+        self.client = timeouts
+            .apply(Client::builder())
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|e| AdkError::model(format!("failed to create HTTP client: {e}")))?;
+        Ok(self)
     }
 
     /// Create a client for `deepseek-v4-pro` (strongest reasoning, thinking enabled).
@@ -65,7 +104,7 @@ impl DeepSeekClient {
         Self::new(DeepSeekConfig::v4_pro(api_key))
     }
 
-    /// Create a client for `deepseek-v4-flash` (fast, cost-efficient).
+    /// Create a client for `deepseek-flash` (fast, cost-efficient, vision-capable).
     pub fn v4_flash(api_key: impl Into<String>) -> Result<Self, AdkError> {
         Self::new(DeepSeekConfig::v4_flash(api_key))
     }
@@ -104,9 +143,32 @@ impl DeepSeekClient {
     }
 
     /// Build a chat completion request from an LLM request.
-    fn build_request(&self, request: &LlmRequest, stream: bool) -> ChatCompletionRequest {
-        let mut messages: Vec<_> =
-            request.contents.iter().map(convert::content_to_message).collect();
+    ///
+    /// # Errors
+    ///
+    /// Returns `model.unsupported_config` when the config sets `seed`, which DeepSeek does not
+    /// accept, or `top_logprobs`, whose results this client does not return.
+    fn build_request(
+        &self,
+        request: &LlmRequest,
+        stream: bool,
+    ) -> Result<ChatCompletionRequest, AdkError> {
+        let config = request.config.as_ref();
+        {
+            use crate::generation_config::{Supports, reject_unsupported};
+            let supports = Supports {
+                stop_sequences: true,
+                seed: false,
+                penalties: true,
+                top_logprobs: false,
+            };
+            reject_unsupported("deepseek", config, supports)?;
+        }
+        // A tool message carries only text, so images a tool returned follow it.
+        let mut messages: Vec<_> = crate::tool_result::with_images(&request.contents)
+            .iter()
+            .flat_map(convert::content_to_messages)
+            .collect();
 
         // DeepSeek's structured-output contract is JSON Output: `response_format`
         // accepts only `{"type": "json_object"}` — there is no `json_schema` mode —
@@ -158,10 +220,23 @@ impl DeepSeekClient {
             }
         };
 
-        // Reasoning effort
-        let reasoning_effort = self.config.reasoning_effort.map(|e| e.to_string());
+        // Reasoning effort. The request's effort wins for this call (spec 3.1 §7.23); the
+        // API serves `low` and `medium` as `high`, so every level is sent as `high`. Thinking
+        // turned off takes no effort.
+        let reasoning_effort = match config.and_then(|c| c.effort) {
+            Some(level) if self.config.thinking == Some(ThinkingMode::Disabled) => {
+                tracing::debug!(
+                    effort = %level,
+                    "deepseek thinking is disabled; the request's effort is ignored"
+                );
+                self.config.reasoning_effort
+            }
+            Some(_) => Some(super::config::ReasoningEffort::High),
+            None => self.config.reasoning_effort,
+        }
+        .map(|e| e.to_string());
 
-        ChatCompletionRequest {
+        Ok(ChatCompletionRequest {
             model: self.config.model.clone(),
             messages,
             temperature,
@@ -172,8 +247,10 @@ impl DeepSeekClient {
             response_format,
             thinking,
             reasoning_effort,
-            stop: None,
-        }
+            stop: config.map(|c| c.stop_sequences.clone()).filter(|stop| !stop.is_empty()),
+            frequency_penalty: config.and_then(|c| c.frequency_penalty),
+            presence_penalty: config.and_then(|c| c.presence_penalty),
+        })
     }
 }
 
@@ -187,6 +264,16 @@ fn mentions_json(messages: &[convert::Message]) -> bool {
 
 #[async_trait]
 impl Llm for DeepSeekClient {
+    // DeepSeek does not state whether thinking counts toward `max_tokens`, so the model's output limit bounds every request.
+    fn max_cost_micro_usd(&self, request: &adk_core::LlmRequest) -> Option<u64> {
+        crate::pricing::PricingCatalog::standard().max_cost_micro_usd(
+            Some("deepseek"),
+            self.name(),
+            request,
+            None,
+        )
+    }
+
     fn name(&self) -> &str {
         &self.config.model
     }
@@ -210,13 +297,18 @@ impl Llm for DeepSeekClient {
     )]
     async fn generate_content(
         &self,
-        request: LlmRequest,
+        mut request: LlmRequest,
         stream: bool,
     ) -> Result<LlmResponseStream, AdkError> {
+        // Native items reach this provider only from the turns its own origin marks.
+        adk_core::history::retain_replayable(
+            &mut request.contents,
+            &adk_core::history::ProviderOrigin::new("deepseek", &self.config.model),
+        );
         let usage_span = adk_telemetry::llm_generate_span("deepseek", &self.config.model, stream);
         let api_url = self.api_url();
         let api_key = self.config.api_key.clone();
-        let chat_request = self.build_request(&request, stream);
+        let chat_request = self.build_request(&request, stream)?;
         let client = self.client.clone();
         let retry_config = self.retry_config.clone();
         let thinking_enabled = self.config.is_thinking_enabled();
@@ -237,7 +329,7 @@ impl Llm for DeepSeekClient {
                         .await
                         .map_err(|e| AdkError::new(
                             ErrorComponent::Model,
-                            ErrorCategory::Unavailable,
+                            crate::http_timeouts::transport_category(&e),
                             "model.deepseek.request",
                             format!("DeepSeek API request failed: {e}"),
                         ).with_provider("deepseek"))?;
@@ -245,23 +337,25 @@ impl Llm for DeepSeekClient {
                     if !response.status().is_success() {
                         let status = response.status();
                         let status_code = status.as_u16();
+                        let retry_after = response
+                            .headers()
+                            .get(reqwest::header::RETRY_AFTER)
+                            .and_then(|value| value.to_str().ok())
+                            .and_then(crate::retry::parse_retry_after);
                         let error_text = response.text().await.unwrap_or_default();
-                        let category = match status_code {
-                            401 => ErrorCategory::Unauthorized,
-                            403 => ErrorCategory::Forbidden,
-                            404 => ErrorCategory::NotFound,
-                            408 => ErrorCategory::Timeout,
-                            429 => ErrorCategory::RateLimited,
-                            503 | 529 => ErrorCategory::Unavailable,
-                            _ if status_code >= 500 => ErrorCategory::Internal,
-                            _ => ErrorCategory::InvalidInput,
-                        };
-                        return Err(AdkError::new(
+                        let error = AdkError::new(
                             ErrorComponent::Model,
-                            category,
+                            crate::retry::category_for_status_code(status_code),
                             "model.deepseek.api_error",
-                            format!("DeepSeek API error (HTTP {status}): {error_text}"),
-                        ).with_upstream_status(status_code).with_provider("deepseek"));
+                            format!(
+                                "DeepSeek API error (HTTP {status}): {}",
+                                adk_core::upstream_excerpt(&error_text)
+                            ),
+                        ).with_upstream_status(status_code).with_provider("deepseek");
+                        return Err(crate::retry::with_retry_after(
+                            crate::error_metadata::from_body(error, &error_text),
+                            retry_after,
+                        ));
                     }
 
                     Ok(response)
@@ -271,29 +365,51 @@ impl Llm for DeepSeekClient {
 
             if stream {
                 let mut byte_stream = response.bytes_stream();
-                let mut buffer = String::new();
+                let mut buffer = Vec::new();
+                let mut finished = false;
                 let mut tool_call_accumulators: std::collections::HashMap<u32, (String, String, String)> =
                     std::collections::HashMap::new();
                 let mut reasoning_buffer = String::new();
-                let mut text_buffer = String::new();
 
-                while let Some(chunk_result) = byte_stream.next().await {
-                    let chunk = chunk_result
-                        .map_err(|e| AdkError::model(format!("stream read error: {e}")))?;
+                'body: while let Some(chunk_result) = byte_stream.next().await {
+                    let chunk = match chunk_result {
+                        Ok(chunk) => chunk,
+                        Err(_) if finished => break,
+                        Err(error) => Err(crate::stream_error::interrupted("deepseek", INCOMPLETE_STREAM, &error))?,
+                    };
 
-                    buffer.push_str(&String::from_utf8_lossy(&chunk));
+                    buffer.extend_from_slice(&chunk);
 
-                    while let Some(line_end) = buffer.find('\n') {
-                        let line = buffer[..line_end].trim().to_string();
-                        buffer = buffer[line_end + 1..].to_string();
+                    while let Some(line) = match crate::sse::take_line(&mut buffer) {
+                        Ok(line) => line,
+                        Err(_) if finished => break 'body,
+                        Err(error) => Err(error)?,
+                    } {
 
+                        if line == "data: [DONE]" && finished {
+                            break 'body;
+                        }
                         if line.is_empty() || line == "data: [DONE]" {
                             continue;
                         }
 
                         if let Some(data) = line.strip_prefix("data: ") {
-                            match serde_json::from_str::<ChatCompletionResponse>(data) {
+                            let value = match serde_json::from_str::<serde_json::Value>(data) {
+                                Ok(value) => value,
+                                Err(_) if finished => continue,
+                                Err(error) => Err(crate::stream_error::undecodable("deepseek", INVALID_CHUNK, &error))?,
+                            };
+                            if let Some(error) = value.get("error").filter(|error| !error.is_null()) {
+                                Err(crate::stream_error::reported("deepseek", STREAM_ERROR, error))?;
+                            }
+                            match serde_json::from_value::<ChatCompletionResponse>(value) {
                                 Ok(chunk_response) => {
+                                    if chunk_response.choices.is_empty() {
+                                        if let Some(usage) = chunk_response.usage.as_ref().and_then(convert::usage) {
+                                            yield LlmResponse { usage_metadata: Some(usage), partial: true, ..Default::default() };
+                                        }
+                                        continue;
+                                    }
                                     if let Some(choice) = chunk_response.choices.first() {
                                         if let Some(delta) = &choice.delta {
                                             // Accumulate reasoning content
@@ -345,13 +461,17 @@ impl Llm for DeepSeekClient {
 
                                         // Check for finish
                                         if choice.finish_reason.is_some() {
+                                            if choice.finish_reason.as_deref() == Some("error") {
+                                                Err(crate::stream_error::reported("deepseek", STREAM_ERROR, &serde_json::Value::Null))?;
+                                            }
+                                            finished = true;
                                             let finish_reason = choice.finish_reason.as_ref().map(|fr| {
                                                 match fr.as_str() {
                                                     "stop" => FinishReason::Stop,
                                                     "length" => FinishReason::MaxTokens,
                                                     "tool_calls" => FinishReason::Stop,
                                                     "content_filter" => FinishReason::Safety,
-                                                    _ => FinishReason::Stop,
+                                                    _ => FinishReason::Other,
                                                 }
                                             });
 
@@ -359,40 +479,36 @@ impl Llm for DeepSeekClient {
                                                 let mut sorted_calls: Vec<_> =
                                                     tool_call_accumulators.drain().collect();
                                                 sorted_calls.sort_by_key(|(idx, _)| *idx);
-                                                let tool_calls: Vec<_> = sorted_calls
+                                                let tool_calls = sorted_calls
                                                     .into_iter()
                                                     .map(|(_, (id, name, args_str))| {
-                                                        let args: Value =
-                                                            serde_json::from_str(&args_str)
-                                                                .unwrap_or(serde_json::json!({}));
+                                                        let args = crate::tool_args::streamed_tool_arguments(
+                                                            "deepseek",
+                                                            &name,
+                                                            &args_str,
+                                                        );
                                                         (id, name, args)
                                                     })
-                                                    .collect();
-                                                let tool_reasoning = if thinking_enabled {
-                                                    Some(std::mem::take(&mut reasoning_buffer))
-                                                } else {
-                                                    None
-                                                };
-                                                yield convert::create_tool_call_response(
+                                                    .collect::<Vec<_>>();
+                                                let tool_reasoning = convert::pending_reasoning(
+                                                    &mut reasoning_buffer,
+                                                    thinking_enabled,
+                                                );
+                                                let mut response = convert::create_tool_call_response(
                                                     tool_calls,
                                                     finish_reason,
                                                     tool_reasoning,
                                                 );
+                                                response.usage_metadata = chunk_response.usage.as_ref().and_then(convert::usage);
+                                                yield response;
                                                 continue;
                                             }
 
-                                            let mut parts = Vec::new();
-                                            if !reasoning_buffer.is_empty() {
-                                                parts.push(Part::Thinking {
-                                                    thinking: std::mem::take(&mut reasoning_buffer),
-                                                    signature: None,
-                                                });
-                                            }
-                                            if !text_buffer.is_empty() {
-                                                parts.push(Part::Text {
-                                                    text: std::mem::take(&mut text_buffer),
-                                                });
-                                            }
+                                            let parts = convert::final_chunk_parts(
+                                                choice.delta.as_ref(),
+                                                &mut reasoning_buffer,
+                                                thinking_enabled,
+                                            );
 
                                             let content = if parts.is_empty() {
                                                 None
@@ -409,17 +525,7 @@ impl Llm for DeepSeekClient {
 
                                             yield LlmResponse {
                                                 content,
-                                                usage_metadata: chunk_response.usage.map(|u| {
-                                                    adk_core::UsageMetadata {
-                                                        prompt_token_count: u.prompt_tokens as i32,
-                                                        candidates_token_count: u.completion_tokens as i32,
-                                                        total_token_count: u.total_tokens as i32,
-                                                        thinking_token_count: u.reasoning_tokens.map(|t| t as i32),
-                                                        cache_read_input_token_count: u.prompt_cache_hit_tokens.map(|t| t as i32),
-                                                        cache_creation_input_token_count: u.prompt_cache_miss_tokens.map(|t| t as i32),
-                                                        ..Default::default()
-                                                    }
-                                                }),
+                                                usage_metadata: chunk_response.usage.as_ref().and_then(convert::usage),
                                                 finish_reason,
                                                 partial: false,
                                                 turn_complete,
@@ -430,7 +536,6 @@ impl Llm for DeepSeekClient {
                                             if let Some(delta) = &choice.delta
                                                 && let Some(text) = &delta.content
                                                     && !text.is_empty() {
-                                                        text_buffer.push_str(text);
                                                         yield LlmResponse {
                                                             content: Some(adk_core::Content {
                                                                 role: "model".to_string(),
@@ -446,28 +551,52 @@ impl Llm for DeepSeekClient {
                                         }
                                     }
                                 }
-                                Err(e) => {
-                                    tracing::warn!("failed to parse DeepSeek chunk: {e} - {data}");
+                                Err(_) if finished => {},
+                                Err(error) => {
+                                    Err(crate::stream_error::undecodable("deepseek", INVALID_CHUNK, &error))?;
                                 }
                             }
                         }
                     }
                 }
+                if !finished {
+                    Err(crate::stream_error::incomplete(
+                        "deepseek",
+                        INCOMPLETE_STREAM,
+                        "the response finished",
+                    ))?;
+                }
             } else {
                 // Non-streaming mode
-                let response_text = response.text().await
-                    .map_err(|e| AdkError::model(format!("failed to read response: {e}")))?;
+                let response_text = response.text().await.map_err(|e| AdkError::new(
+                    ErrorComponent::Model,
+                    crate::http_timeouts::transport_category(&e),
+                    "model.deepseek.request",
+                    format!("failed to read response: {e}"),
+                ).with_provider("deepseek"))?;
 
                 let chat_response: ChatCompletionResponse = serde_json::from_str(&response_text)
                     .map_err(|e| AdkError::model(format!(
-                        "failed to parse response: {e} - {response_text}"
+                        "failed to parse response: {}",
+                        adk_core::json_error_summary(&e)
                     )))?;
 
                 yield convert::from_response(&chat_response);
             }
         };
 
-        Ok(crate::usage_tracking::with_usage_tracking(Box::pin(response_stream), usage_span))
+        let response_stream: LlmResponseStream = Box::pin(response_stream);
+        let response_stream = if stream {
+            crate::usage_tracking::with_terminal_usage(response_stream)
+        } else {
+            response_stream
+        };
+        Ok(crate::usage_tracking::with_priced_usage_tracking(
+            response_stream,
+            usage_span,
+            "deepseek",
+            &self.config.model,
+        ))
     }
 }
 
@@ -497,7 +626,7 @@ mod response_format_tests {
 
     fn request_with(config: Option<GenerateContentConfig>, prompt: &str) -> LlmRequest {
         let mut request =
-            LlmRequest::new("deepseek-v4-flash", vec![Content::new("user").with_text(prompt)]);
+            LlmRequest::new("deepseek-flash", vec![Content::new("user").with_text(prompt)]);
         request.config = config;
         request
     }
@@ -509,7 +638,7 @@ mod response_format_tests {
             "give me the answer as json",
         );
 
-        let built = client().build_request(&request, false);
+        let built = client().build_request(&request, false).expect("request builds");
         let wire = serde_json::to_value(&built).expect("request serializes");
 
         // DeepSeek accepts only `json_object`; there is no `json_schema` mode.
@@ -523,7 +652,7 @@ mod response_format_tests {
     #[test]
     fn no_schema_leaves_the_response_format_unset() {
         let request = request_with(None, "hello");
-        let built = client().build_request(&request, false);
+        let built = client().build_request(&request, false).expect("request builds");
         let wire = serde_json::to_value(&built).expect("request serializes");
 
         assert!(
@@ -541,7 +670,7 @@ mod response_format_tests {
             "summarise the document",
         );
 
-        let built = client().build_request(&request, false);
+        let built = client().build_request(&request, false).expect("request builds");
 
         assert!(
             built.messages.iter().any(|m| m
@@ -559,12 +688,39 @@ mod response_format_tests {
             "reply in json please",
         );
 
-        let built = client().build_request(&request, false);
+        let built = client().build_request(&request, false).expect("request builds");
 
         assert_eq!(
             built.messages.len(),
             1,
             "the prompt already mentions json, so nothing needs to be added"
         );
+    }
+
+    #[test]
+    fn stop_sequences_and_penalties_are_sent_and_seed_is_rejected() {
+        let request = request_with(
+            Some(GenerateContentConfig {
+                stop_sequences: vec!["END".to_string()],
+                presence_penalty: Some(0.5),
+                frequency_penalty: Some(0.25),
+                ..Default::default()
+            }),
+            "hi",
+        );
+        let wire = serde_json::to_value(client().build_request(&request, false).unwrap()).unwrap();
+        assert_eq!(wire["stop"], json!(["END"]));
+        assert_eq!(wire["presence_penalty"], json!(0.5));
+        assert_eq!(wire["frequency_penalty"], json!(0.25));
+
+        for config in [
+            GenerateContentConfig { seed: Some(1), ..Default::default() },
+            GenerateContentConfig { top_logprobs: Some(2), ..Default::default() },
+        ] {
+            let error = client()
+                .build_request(&request_with(Some(config), "hi"), false)
+                .expect_err("the field is unsupported");
+            assert_eq!(error.code, "model.unsupported_config");
+        }
     }
 }

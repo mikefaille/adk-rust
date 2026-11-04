@@ -21,8 +21,25 @@ pub struct ExecutionConfig {
     pub thread_id: String,
     /// Resume from a specific checkpoint
     pub resume_from: Option<String>,
-    /// Recursion limit for cycles
-    pub recursion_limit: usize,
+    /// Answers to pauses, keyed by what paused.
+    ///
+    /// | Key | Who reads the value |
+    /// |-----|---------------------|
+    /// | A continuation key such as `interrupt-1` | The `#[entrypoint]` interrupt site with that key, which returns it instead of suspending |
+    /// | The name of a graph node that paused with a dynamic interrupt | That node, through [`NodeContext::resume_value`], in the step that resumes it |
+    ///
+    /// A graph node's answer is not written to state, so it answers one pause: a
+    /// node that runs again later, such as in the next pass of a loop or on the
+    /// next turn of a [`GraphAgent`](crate::agent::GraphAgent), pauses again.
+    pub resume_values: HashMap<String, Value>,
+    /// How many super-steps one run may take before it fails with
+    /// [`GraphError::RecursionLimitExceeded`](crate::error::GraphError::RecursionLimitExceeded).
+    ///
+    /// `None` uses the graph's own limit, set with
+    /// [`CompiledGraph::with_recursion_limit`](crate::graph::CompiledGraph::with_recursion_limit)
+    /// or [`GraphAgentBuilder::recursion_limit`](crate::agent::GraphAgentBuilder::recursion_limit)
+    /// (100 when neither is set); a value here overrides it for this run.
+    pub recursion_limit: Option<usize>,
     /// Additional configuration
     pub metadata: HashMap<String, Value>,
     /// The invocation this graph run belongs to, when it has one.
@@ -34,6 +51,26 @@ pub struct ExecutionConfig {
     /// [`ExecutionConfig::with_parent_context`] to carry them through; leaving it
     /// unset is standalone mode and is what a graph invoked outside a `Runner` gets.
     pub parent_context: Option<Arc<dyn adk_core::InvocationContext>>,
+    /// When the run writes each super-step's checkpoint. Defaults to
+    /// [`Durability::Sync`](crate::checkpoint::Durability::Sync).
+    pub durability: crate::checkpoint::Durability,
+    /// Cancels a functional-API run.
+    ///
+    /// An `#[entrypoint]` run hands this token to its `TaskContext` and stops when
+    /// it is cancelled: the task running at that moment is abandoned, no later task
+    /// starts, and the run returns
+    /// [`GraphError::Cancelled`](crate::error::GraphError::Cancelled). Unset, the
+    /// run gets a token nobody else holds.
+    #[cfg(feature = "functional")]
+    pub cancellation_token: Option<tokio_util::sync::CancellationToken>,
+    /// Where agent nodes forward their agents' events as the agents produce them.
+    ///
+    /// Set by [`GraphAgent`](crate::agent::GraphAgent), which streams these events
+    /// to its caller, so a runner shows and records them while the graph runs.
+    pub(crate) event_sink: Option<tokio::sync::mpsc::UnboundedSender<adk_core::Event>>,
+    /// The lineage root a subgraph's run keys its governed nodes' records by, derived from
+    /// the parent's, so a fork of the parent finds the records its source wrote.
+    pub(crate) lineage_root: Option<String>,
 }
 
 impl ExecutionConfig {
@@ -42,10 +79,63 @@ impl ExecutionConfig {
         Self {
             thread_id: thread_id.to_string(),
             resume_from: None,
-            recursion_limit: 50,
+            resume_values: HashMap::new(),
+            recursion_limit: None,
             metadata: HashMap::new(),
             parent_context: None,
+            durability: crate::checkpoint::Durability::default(),
+            #[cfg(feature = "functional")]
+            cancellation_token: None,
+            event_sink: None,
+            lineage_root: None,
         }
+    }
+
+    /// Lets the caller cancel a functional-API run with `token`.
+    ///
+    /// See [`ExecutionConfig::cancellation_token`].
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use adk_graph::node::ExecutionConfig;
+    /// use tokio_util::sync::CancellationToken;
+    ///
+    /// let token = CancellationToken::new();
+    /// let config = ExecutionConfig::new("triage-7").with_cancellation_token(token.clone());
+    /// token.cancel();
+    /// assert!(config.cancellation_token.is_some_and(|token| token.is_cancelled()));
+    /// ```
+    #[cfg(feature = "functional")]
+    #[must_use]
+    pub fn with_cancellation_token(mut self, token: tokio_util::sync::CancellationToken) -> Self {
+        self.cancellation_token = Some(token);
+        self
+    }
+
+    /// Forwards agent nodes' events to `sink` as their agents produce them.
+    pub(crate) fn with_event_sink(
+        mut self,
+        sink: tokio::sync::mpsc::UnboundedSender<adk_core::Event>,
+    ) -> Self {
+        self.event_sink = Some(sink);
+        self
+    }
+
+    /// Sets when the run writes each super-step's checkpoint.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use adk_graph::checkpoint::Durability;
+    /// use adk_graph::node::ExecutionConfig;
+    ///
+    /// let config = ExecutionConfig::new("thread").with_durability(Durability::Exit);
+    /// assert_eq!(config.durability, Durability::Exit);
+    /// ```
+    pub fn with_durability(mut self, durability: crate::checkpoint::Durability) -> Self {
+        self.durability = durability;
+        self
     }
 
     /// Carry the invocation this graph run belongs to into its nodes.
@@ -59,15 +149,53 @@ impl ExecutionConfig {
         self
     }
 
-    /// Set the recursion limit
+    /// Overrides the graph's recursion limit for this run.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use adk_graph::node::ExecutionConfig;
+    ///
+    /// let config = ExecutionConfig::new("thread").with_recursion_limit(500);
+    /// assert_eq!(config.recursion_limit, Some(500));
+    /// assert_eq!(ExecutionConfig::new("thread").recursion_limit, None);
+    /// ```
     pub fn with_recursion_limit(mut self, limit: usize) -> Self {
-        self.recursion_limit = limit;
+        self.recursion_limit = Some(limit);
         self
     }
 
     /// Resume from a specific checkpoint
     pub fn with_resume_from(mut self, checkpoint_id: &str) -> Self {
         self.resume_from = Some(checkpoint_id.to_string());
+        self
+    }
+
+    /// Supplies the answer to a pause.
+    ///
+    /// `key` is the key a suspended `#[entrypoint]` run reported, such as
+    /// `interrupt-1`, or the name of a graph node that paused with a dynamic
+    /// interrupt. See [`ExecutionConfig::resume_values`].
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use adk_graph::node::ExecutionConfig;
+    /// use serde_json::json;
+    ///
+    /// // A functional-API interrupt site.
+    /// let config = ExecutionConfig::new("refund-42")
+    ///     .with_resume_from("checkpoint-id")
+    ///     .with_resume_value("interrupt-1", json!({ "approved": true }));
+    /// assert_eq!(config.resume_values.get("interrupt-1"), Some(&json!({ "approved": true })));
+    ///
+    /// // A graph node named `review` that paused.
+    /// let config = ExecutionConfig::new("refund-42").with_resume_value("review", json!("approve"));
+    /// assert_eq!(config.resume_values.get("review"), Some(&json!("approve")));
+    /// ```
+    #[must_use]
+    pub fn with_resume_value(mut self, key: impl Into<String>, value: Value) -> Self {
+        self.resume_values.insert(key.into(), value);
         self
     }
 
@@ -85,6 +213,7 @@ impl Default for ExecutionConfig {
 }
 
 /// Context passed to nodes during execution
+#[derive(Clone)]
 pub struct NodeContext {
     /// Current graph state (read-only view)
     pub state: State,
@@ -99,12 +228,69 @@ pub struct NodeContext {
     children: Option<std::sync::Arc<crate::child::ChildInvoker>>,
     /// The schema of the graph running this node, for a node that projects state.
     parent_schema: Option<std::sync::Arc<crate::state::StateSchema>>,
+    /// ADK configuration supplied through an additive `CompiledGraph` API.
+    run_config: Option<adk_core::RunConfig>,
+    /// The answer to this node's own pause, in the step that resumes it.
+    resume_value: Option<Value>,
+    /// Whether the node runs through the governed bracket, which sends its call once.
+    governed: bool,
 }
 
 impl NodeContext {
     /// Create a new node context
     pub fn new(state: State, config: ExecutionConfig, step: usize) -> Self {
-        Self { state, config, step, progress_handle: None, children: None, parent_schema: None }
+        Self {
+            state,
+            config,
+            step,
+            progress_handle: None,
+            children: None,
+            parent_schema: None,
+            run_config: None,
+            resume_value: None,
+            governed: false,
+        }
+    }
+
+    /// Whether this execution is a governed node's call, which runs once: an action node
+    /// neither retries it nor hides its failure (spec 3.3 §12).
+    pub(crate) fn governed_call(&self) -> bool {
+        self.governed
+    }
+
+    /// Marks this execution as a governed node's call.
+    pub(crate) fn set_governed_call(&mut self) {
+        self.governed = true;
+    }
+
+    /// The answer to this node's pause, when this execution resumes it.
+    ///
+    /// Present only in the step that resumes a node that paused with a dynamic
+    /// interrupt, and only when the caller supplied an answer under the node's
+    /// name with [`ExecutionConfig::with_resume_value`]. A
+    /// [`GraphAgent`](crate::agent::GraphAgent) supplies the turn's text. The
+    /// answer is not written to state, so the next pause asks again.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use adk_graph::node::{NodeContext, NodeOutput};
+    ///
+    /// async fn review(ctx: NodeContext) -> adk_graph::Result<NodeOutput> {
+    ///     match ctx.resume_value().and_then(|answer| answer.as_str()) {
+    ///         Some("approve") => Ok(NodeOutput::new()),
+    ///         Some(_) => Ok(NodeOutput::new().with_goto(["rejected"])),
+    ///         None => Ok(NodeOutput::interrupt("approve this refund?")),
+    ///     }
+    /// }
+    /// ```
+    pub fn resume_value(&self) -> Option<&Value> {
+        self.resume_value.as_ref()
+    }
+
+    /// Attaches the answer to this node's pause.
+    pub(crate) fn set_resume_value(&mut self, value: Value) {
+        self.resume_value = Some(value);
     }
 
     /// The machinery for invoking other nodes, if this context has it.
@@ -119,6 +305,26 @@ impl NodeContext {
     /// Attaches the running graph's schema.
     pub fn set_parent_schema(&mut self, schema: std::sync::Arc<crate::state::StateSchema>) {
         self.parent_schema = Some(schema);
+    }
+
+    /// Attach per-run ADK configuration for an agent node.
+    pub(crate) fn set_run_config(&mut self, run_config: adk_core::RunConfig) {
+        self.run_config = Some(run_config);
+    }
+
+    pub(crate) fn run_config(&self) -> Option<adk_core::RunConfig> {
+        self.run_config.clone()
+    }
+
+    /// Who the run executing this node acts as, and for whom.
+    ///
+    /// `Some` when the graph runs with a [`RunConfig`](adk_core::RunConfig), such as a
+    /// graph agent under a runner, or a call to
+    /// [`CompiledGraph::invoke_with_run_config`](crate::CompiledGraph::invoke_with_run_config).
+    /// Agent nodes give their agents the resolved context through
+    /// [`ReadonlyContext::acting_context`](adk_core::ReadonlyContext::acting_context).
+    pub fn acting(&self) -> Option<&adk_core::ActingConfig> {
+        self.run_config.as_ref().map(|config| &config.acting)
     }
 
     pub(crate) fn child_invoker(&self) -> Option<std::sync::Arc<crate::child::ChildInvoker>> {
@@ -358,6 +564,145 @@ pub trait Node: Send + Sync {
         adk_core::AgentCapabilities::default()
     }
 
+    /// What kind of step this node is, as a workflow observer labels it in
+    /// [`CompiledGraph::shape`](crate::graph::CompiledGraph::shape) (spec 3.3 §12).
+    ///
+    /// Defaults to [`NodeKind::Other`](crate::shape::NodeKind::Other).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use adk_graph::node::{FunctionNode, Node, NodeOutput};
+    /// use adk_graph::shape::NodeKind;
+    ///
+    /// let node = FunctionNode::new("receipt", |_ctx| async { Ok(NodeOutput::new()) });
+    /// assert_eq!(node.kind(), NodeKind::Function);
+    /// ```
+    fn kind(&self) -> crate::shape::NodeKind {
+        crate::shape::NodeKind::Other
+    }
+
+    /// The call this node makes, as an approver sees it and as its record binds it, when
+    /// the node is governed (spec 3.3 §12, §7.1).
+    ///
+    /// The value is shown in full on the decision and its
+    /// [`json_digest`](adk_core::json_digest) is part of the call's action-ledger key, so a
+    /// fork whose call is unchanged is answered from the record. `None`, the default,
+    /// binds the call to the whole state the node reads.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use adk_graph::node::{Node, NodeContext, NodeOutput};
+    /// use serde_json::{Value, json};
+    ///
+    /// struct Charge;
+    ///
+    /// #[async_trait::async_trait]
+    /// impl Node for Charge {
+    ///     fn name(&self) -> &str {
+    ///         "pay"
+    ///     }
+    ///     fn call_args(&self, ctx: &NodeContext) -> Option<Value> {
+    ///         Some(json!({ "amountCents": ctx.get("amountCents").cloned()? }))
+    ///     }
+    ///     async fn execute(&self, _ctx: &NodeContext) -> adk_graph::Result<NodeOutput> {
+    ///         Ok(NodeOutput::new())
+    ///     }
+    /// }
+    /// ```
+    fn call_args(&self, _ctx: &NodeContext) -> Option<Value> {
+        None
+    }
+
+    /// Whether this node acts in `ctx`, asked before a governed node's call is authorized
+    /// (spec 3.3 §12, §7.4).
+    ///
+    /// `Ok(false)` means the node does nothing here, such as an action node whose condition
+    /// is false: a governed node then completes with no writes, and no decision is created
+    /// for a call that would not run. An error means the node cannot act, such as an HTTP
+    /// node whose request cannot be built: a governed node then fails with that error
+    /// without asking anyone. The default is `Ok(true)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns why the node cannot act in `ctx`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use adk_graph::node::{Node, NodeContext, NodeOutput};
+    ///
+    /// struct Refund;
+    ///
+    /// #[async_trait::async_trait]
+    /// impl Node for Refund {
+    ///     fn name(&self) -> &str {
+    ///         "refund"
+    ///     }
+    ///     fn will_act(&self, ctx: &NodeContext) -> adk_graph::Result<bool> {
+    ///         Ok(ctx.get("refund_due").and_then(|due| due.as_bool()).unwrap_or(false))
+    ///     }
+    ///     async fn execute(&self, _ctx: &NodeContext) -> adk_graph::Result<NodeOutput> {
+    ///         Ok(NodeOutput::new())
+    ///     }
+    /// }
+    /// ```
+    fn will_act(&self, _ctx: &NodeContext) -> Result<bool> {
+        Ok(true)
+    }
+
+    /// The graph this node runs, when it is a subgraph, so a workflow observer finds the
+    /// governed nodes inside it (spec 3.3 §12). The default is `None`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use adk_graph::node::{FunctionNode, Node, NodeOutput};
+    ///
+    /// let node = FunctionNode::new("receipt", |_ctx| async { Ok(NodeOutput::new()) });
+    /// assert!(node.subgraph().is_none());
+    /// ```
+    fn subgraph(&self) -> Option<&crate::graph::CompiledGraph> {
+        None
+    }
+
+    /// Runs exactly `args`: an approver's edit of [`Node::call_args`] (spec 3.3 §7.1, §7.5).
+    ///
+    /// Called instead of [`Node::execute`] when an approver edited a governed node's call.
+    /// It must send the call it is given and nothing else.
+    ///
+    /// # Errors
+    ///
+    /// The default returns [`GovernedError::EditUnsupported`](crate::governed::GovernedError::EditUnsupported):
+    /// the node cannot run an edited call, so the edited call is refused and nothing runs.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use adk_graph::node::{Node, NodeContext, NodeOutput};
+    /// use serde_json::Value;
+    ///
+    /// struct Charge;
+    ///
+    /// #[async_trait::async_trait]
+    /// impl Node for Charge {
+    ///     fn name(&self) -> &str {
+    ///         "pay"
+    ///     }
+    ///     async fn execute(&self, _ctx: &NodeContext) -> adk_graph::Result<NodeOutput> {
+    ///         Ok(NodeOutput::new())
+    ///     }
+    ///     async fn run_call(&self, _ctx: &NodeContext, args: Value) -> adk_graph::Result<NodeOutput> {
+    ///         Ok(NodeOutput::new().with_update("charged", args["amountCents"].clone()))
+    ///     }
+    /// }
+    /// ```
+    async fn run_call(&self, _ctx: &NodeContext, _args: Value) -> Result<NodeOutput> {
+        Err(crate::governed::GovernedError::EditUnsupported { node: self.name().to_string() }
+            .into())
+    }
+
     /// Execute the node and return state updates
     async fn execute(&self, ctx: &NodeContext) -> Result<NodeOutput>;
 
@@ -455,20 +800,14 @@ impl Node for FunctionNode {
         &self.name
     }
 
+    fn kind(&self) -> crate::shape::NodeKind {
+        crate::shape::NodeKind::Function
+    }
+
     async fn execute(&self, ctx: &NodeContext) -> Result<NodeOutput> {
         // The closure takes an owned context, so everything the executor attached
-        // has to be carried across or the node silently loses it.
-        let mut ctx_owned = NodeContext::new(ctx.state.clone(), ctx.config.clone(), ctx.step);
-        if let Some(handle) = ctx.progress_handle() {
-            ctx_owned.set_progress_handle(handle.clone());
-        }
-        if let Some(invoker) = ctx.child_invoker() {
-            ctx_owned.set_child_invoker(invoker);
-        }
-        if let Some(schema) = ctx.parent_schema() {
-            ctx_owned.set_parent_schema(schema);
-        }
-        (self.func)(ctx_owned).await
+        // is carried across by cloning it.
+        (self.func)(ctx.clone()).await
     }
 }
 
@@ -612,7 +951,9 @@ fn default_output_mapper(events: &[adk_core::Event]) -> HashMap<String, Value> {
 
     // Collect text from events
     let mut messages = Vec::new();
+    let mut text_deltas = adk_core::EventTextDeltas::default();
     for event in events {
+        let event = text_deltas.push(event);
         if let Some(content) = event.content() {
             let text = content.parts.iter().filter_map(|p| p.text()).collect::<Vec<_>>().join("");
 
@@ -646,6 +987,10 @@ impl Node for AgentNode {
         self.agent.capabilities()
     }
 
+    fn kind(&self) -> crate::shape::NodeKind {
+        crate::shape::NodeKind::ModelStep
+    }
+
     async fn execute(&self, ctx: &NodeContext) -> Result<NodeOutput> {
         use futures::StreamExt;
 
@@ -658,17 +1003,46 @@ impl Node for AgentNode {
             content,
             self.agent.clone(),
             ctx.config.parent_context.clone(),
+            ctx.run_config(),
+            ctx.state.clone(),
         ));
 
         // Run the agent and collect events
+        let branch = adk_core::ReadonlyContext::branch(invocation_ctx.as_ref()).to_string();
         let stream = self.agent.run(invocation_ctx).await.map_err(|e| {
-            crate::error::GraphError::NodeExecutionFailed {
-                node: self.name.clone(),
-                message: e.to_string(),
-            }
+            crate::error::GraphError::AgentFailed { node: self.name.clone(), source: Box::new(e) }
         })?;
 
-        let events: Vec<adk_core::Event> = stream.filter_map(|r| async { r.ok() }).collect().await;
+        // The first error the agent yields fails the node, as on the streaming
+        // path, so a model failure is not a successful node with no answer: a
+        // retry policy applies, and the nodes after it do not run.
+        let mut stream = stream;
+        let mut events: Vec<adk_core::Event> = Vec::new();
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(event) => {
+                    forward_agent_event(&ctx.config, &branch, &event);
+                    events.push(event);
+                }
+                Err(e) => {
+                    return Err(crate::error::GraphError::AgentFailed {
+                        node: self.name.clone(),
+                        source: Box::new(e),
+                    });
+                }
+            }
+        }
+
+        if let Some(request) =
+            events.iter().find_map(|event| event.actions.tool_confirmation.clone())
+        {
+            return Ok(NodeOutput::new().with_interrupt(
+                crate::interrupt::GraphToolConfirmationPause::pending_interrupt(
+                    self.name.clone(),
+                    request,
+                ),
+            ));
+        }
 
         // Map events to state updates
         let updates = (self.output_mapper)(&events);
@@ -709,14 +1083,17 @@ impl Node for AgentNode {
                 content,
                 agent.clone(),
                 parent_context,
+                ctx.run_config(),
+                ctx.state.clone(),
             ));
 
+            let branch = adk_core::ReadonlyContext::branch(invocation_ctx.as_ref()).to_string();
             let stream = match agent.run(invocation_ctx).await {
                 Ok(s) => s,
                 Err(e) => {
-                    yield Err(crate::error::GraphError::NodeExecutionFailed {
+                    yield Err(crate::error::GraphError::AgentFailed {
                         node: name.clone(),
-                        message: e.to_string(),
+                        source: Box::new(e),
                     });
                     return;
                 }
@@ -724,12 +1101,25 @@ impl Node for AgentNode {
 
             tokio::pin!(stream);
             let mut all_events = Vec::new();
+            let mut text_deltas = adk_core::EventTextDeltas::default();
 
             while let Some(result) = stream.next().await {
                 match result {
                     Ok(event) => {
+                        forward_agent_event(&ctx.config, &branch, &event);
+                        if let Some(request) = event.actions.tool_confirmation.clone() {
+                            yield Ok(StreamEvent::node_interrupt(
+                                &name,
+                                crate::interrupt::GraphToolConfirmationPause::KIND,
+                                Some(crate::interrupt::GraphToolConfirmationPause::pending_data(
+                                    name.clone(),
+                                    request,
+                                )),
+                            ));
+                            return;
+                        }
                         // Emit streaming event immediately
-                        if let Some(content) = event.content() {
+                        if let Some(content) = text_deltas.push(&event).content() {
                             let text: String = content.parts.iter().filter_map(|p| p.text()).collect();
                             if !text.is_empty() {
                                 yield Ok(StreamEvent::Message {
@@ -742,9 +1132,9 @@ impl Node for AgentNode {
                         all_events.push(event);
                     }
                     Err(e) => {
-                        yield Err(crate::error::GraphError::NodeExecutionFailed {
+                        yield Err(crate::error::GraphError::AgentFailed {
                             node: name.clone(),
-                            message: e.to_string(),
+                            source: Box::new(e),
                         });
                         return;
                     }
@@ -771,6 +1161,27 @@ impl Node for AgentNode {
     }
 }
 
+/// Sends an agent node's event to the run's event sink, when it has one, on the
+/// node's `branch` unless the agent set one.
+///
+/// A confirmation request is not forwarded: the graph reports the pause itself,
+/// with the checkpoint to resume from, so the caller sees the request once. A
+/// transfer the agent asks for names an agent of the node's own tree, not the
+/// caller's, so the forwarded event does not carry it.
+fn forward_agent_event(config: &ExecutionConfig, branch: &str, event: &adk_core::Event) {
+    if let Some(sink) = &config.event_sink
+        && event.actions.tool_confirmation.is_none()
+    {
+        let mut event = event.clone();
+        if event.branch.is_empty() {
+            event.branch = branch.to_string();
+        }
+        event.actions.transfer_to_agent = None;
+        // The receiver is gone only once the run has finished reporting.
+        let _ = sink.send(event);
+    }
+}
+
 /// Full InvocationContext implementation for running agents within graph nodes
 struct GraphInvocationContext {
     invocation_id: String,
@@ -792,25 +1203,34 @@ struct GraphInvocationContext {
 }
 
 /// Identity used when a graph runs with no parent invocation.
-const STANDALONE_USER_ID: &str = "graph_user";
+pub(crate) const STANDALONE_USER_ID: &str = "graph_user";
 /// Application name used when a graph runs with no parent invocation.
-const STANDALONE_APP_NAME: &str = "graph_app";
+pub(crate) const STANDALONE_APP_NAME: &str = "graph_app";
 
 impl GraphInvocationContext {
+    /// `thread_id` identifies the session only in standalone mode; with a parent,
+    /// the agent sees the parent's session, invocation, and identity.
     fn with_parent(
-        session_id: String,
+        thread_id: String,
         user_content: adk_core::Content,
         agent: Arc<dyn adk_core::Agent>,
         parent: Option<Arc<dyn adk_core::InvocationContext>>,
+        explicit_run_config: Option<adk_core::RunConfig>,
+        graph_state: State,
     ) -> Self {
-        let invocation_id = uuid::Uuid::new_v4().to_string();
-        let session = Arc::new(GraphSession::new(session_id));
+        // The node's events belong to the caller's invocation, as a workflow
+        // sub-agent's do, so a runner records them under it.
+        let invocation_id = parent.as_ref().map_or_else(
+            || uuid::Uuid::new_v4().to_string(),
+            |parent| parent.invocation_id().to_string(),
+        );
+        let session = Arc::new(GraphSession::new(thread_id, parent.clone(), graph_state));
         // Add user content to history
         session.append_content(user_content.clone());
 
         // A node runs on its own branch below the caller's, so events it produces are
         // attributable and do not read as the parent agent's own turn.
-        let (user_id, app_name, branch, run_config) = match parent.as_ref() {
+        let (user_id, app_name, branch, inherited_run_config) = match parent.as_ref() {
             Some(parent) => (
                 parent.user_id().to_string(),
                 parent.app_name().to_string(),
@@ -833,7 +1253,7 @@ impl GraphInvocationContext {
             user_content,
             agent,
             session,
-            run_config,
+            run_config: explicit_run_config.unwrap_or(inherited_run_config),
             ended: std::sync::atomic::AtomicBool::new(false),
             parent,
             user_id,
@@ -862,7 +1282,7 @@ impl adk_core::ReadonlyContext for GraphInvocationContext {
     }
 
     fn session_id(&self) -> &str {
-        &self.session.id
+        adk_core::Session::id(self.session.as_ref())
     }
 
     fn branch(&self) -> &str {
@@ -871,6 +1291,14 @@ impl adk_core::ReadonlyContext for GraphInvocationContext {
 
     fn user_content(&self) -> &adk_core::Content {
         &self.user_content
+    }
+
+    fn acting_context(&self) -> adk_core::ActingContext {
+        self.run_config.acting_context_for(&self.app_name, self.agent.name(), &self.user_id)
+    }
+
+    fn is_authenticated(&self) -> bool {
+        self.parent.as_ref().is_some_and(|parent| parent.is_authenticated())
     }
 }
 
@@ -947,16 +1375,34 @@ impl adk_core::InvocationContext for GraphInvocationContext {
     }
 }
 
-/// Minimal Session implementation for graph execution
+/// The session an agent node's agent sees.
+///
+/// With a parent invocation it is a view of the caller's session: the same id,
+/// app, and user, and the session's state, read live, with the graph's state
+/// layered on top, so an instruction template resolves both. Its conversation is
+/// the node's own: the input the node's mapper built and what the agent adds.
+/// Writes through [`adk_core::State::set`] stay in the view. Standalone, the
+/// session is the graph's thread.
 struct GraphSession {
-    id: String,
+    /// The thread id, the session id when there is no parent.
+    thread_id: String,
+    parent: Option<Arc<dyn adk_core::InvocationContext>>,
     state: GraphState,
     history: std::sync::RwLock<Vec<adk_core::Content>>,
 }
 
 impl GraphSession {
-    fn new(id: String) -> Self {
-        Self { id, state: GraphState::new(), history: std::sync::RwLock::new(Vec::new()) }
+    fn new(
+        thread_id: String,
+        parent: Option<Arc<dyn adk_core::InvocationContext>>,
+        graph_state: State,
+    ) -> Self {
+        Self {
+            thread_id,
+            state: GraphState::new(parent.clone(), graph_state),
+            parent,
+            history: std::sync::RwLock::new(Vec::new()),
+        }
     }
 
     fn append_content(&self, content: adk_core::Content) {
@@ -968,15 +1414,15 @@ impl GraphSession {
 
 impl adk_core::Session for GraphSession {
     fn id(&self) -> &str {
-        &self.id
+        self.parent.as_ref().map_or(self.thread_id.as_str(), |parent| parent.session().id())
     }
 
     fn app_name(&self) -> &str {
-        "graph_app"
+        self.parent.as_ref().map_or(STANDALONE_APP_NAME, |parent| parent.session().app_name())
     }
 
     fn user_id(&self) -> &str {
-        "graph_user"
+        self.parent.as_ref().map_or(STANDALONE_USER_ID, |parent| parent.session().user_id())
     }
 
     fn state(&self) -> &dyn adk_core::State {
@@ -992,20 +1438,29 @@ impl adk_core::Session for GraphSession {
     }
 }
 
-/// Minimal State implementation for graph execution
+/// Session state for an agent node: its own writes, over the graph's state, over
+/// the caller's session state.
 struct GraphState {
+    parent: Option<Arc<dyn adk_core::InvocationContext>>,
+    graph: State,
     data: std::sync::RwLock<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 impl GraphState {
-    fn new() -> Self {
-        Self { data: std::sync::RwLock::new(std::collections::HashMap::new()) }
+    fn new(parent: Option<Arc<dyn adk_core::InvocationContext>>, graph: State) -> Self {
+        Self { parent, graph, data: std::sync::RwLock::new(std::collections::HashMap::new()) }
     }
 }
 
 impl adk_core::State for GraphState {
     fn get(&self, key: &str) -> Option<serde_json::Value> {
-        self.data.read().ok()?.get(key).cloned()
+        if let Some(value) = self.data.read().ok().and_then(|data| data.get(key).cloned()) {
+            return Some(value);
+        }
+        if let Some(value) = self.graph.get(key) {
+            return Some(value.clone());
+        }
+        self.parent.as_ref().and_then(|parent| parent.session().state().get(key))
     }
 
     fn set(&mut self, key: String, value: serde_json::Value) {
@@ -1019,7 +1474,13 @@ impl adk_core::State for GraphState {
     }
 
     fn all(&self) -> std::collections::HashMap<String, serde_json::Value> {
-        self.data.read().ok().map(|d| d.clone()).unwrap_or_default()
+        let mut all =
+            self.parent.as_ref().map(|parent| parent.session().state().all()).unwrap_or_default();
+        all.extend(self.graph.iter().map(|(key, value)| (key.clone(), value.clone())));
+        if let Ok(data) = self.data.read() {
+            all.extend(data.iter().map(|(key, value)| (key.clone(), value.clone())));
+        }
+        all
     }
 }
 
@@ -1049,6 +1510,28 @@ mod tests {
 
         assert!(output.updates.is_empty());
         assert!(output.interrupt.is_none());
+    }
+
+    #[test]
+    fn default_output_mapper_does_not_repeat_a_complete_snapshot() {
+        let mut partial = adk_core::Event::new("invocation");
+        partial.llm_response.partial = true;
+        partial.set_content(adk_core::Content::new("model").with_text("Hello"));
+        let mut terminal = partial.clone();
+        terminal.llm_response.partial = false;
+        terminal.llm_response.provider_metadata =
+            Some(serde_json::json!({"content_complete": true}));
+        terminal.set_content(adk_core::Content::new("model").with_text("Hello world"));
+
+        let updates = default_output_mapper(&[partial, terminal]);
+
+        assert_eq!(
+            updates.get("messages"),
+            Some(&serde_json::json!([
+                {"role": "assistant", "content": "Hello"},
+                {"role": "assistant", "content": " world"},
+            ]))
+        );
     }
 
     #[test]

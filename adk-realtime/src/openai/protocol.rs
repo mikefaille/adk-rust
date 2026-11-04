@@ -196,10 +196,17 @@ pub(crate) fn convert_config_to_openai(config: &crate::config::RealtimeConfig) -
     // Provider-specific overrides: merge `extra` object keys into the session
     // (caller values win). This is the supported escape hatch for GA fields the
     // typed config doesn't model — e.g. `reasoning`, `speed`, `prompt`.
+    // `language_code` is never emitted: the pinned language lives in the
+    // typed `RealtimeConfig::language` field, which this projection does
+    // not read, and a legacy `extra.language_code` must not leak into an
+    // OpenAI session either.
     if let Some(Value::Object(extra)) = &config.extra
         && let Value::Object(session) = &mut session_config
     {
         for (key, value) in extra {
+            if key == "language_code" {
+                continue;
+            }
             session.insert(key.clone(), value.clone());
         }
     }
@@ -428,6 +435,19 @@ pub(crate) fn translate_client_message(role: &str, parts: Vec<adk_core::types::P
 mod tests {
     use super::*;
     use adk_core::types::Part;
+
+    #[test]
+    fn openai_session_never_emits_language_code() {
+        // Neither the typed language field nor a legacy `extra` key may
+        // reach an OpenAI session update.
+        let mut config =
+            crate::config::RealtimeConfig::default().try_with_language("fr-CA").unwrap();
+        config.extra = Some(json!({ "language_code": "fr-CA", "speed": 1.1 }));
+        let session = convert_config_to_openai(&config);
+        assert!(session.get("language_code").is_none(), "{session}");
+        assert!(session.get("language").is_none(), "{session}");
+        assert_eq!(session["speed"], json!(1.1), "other extras still merge: {session}");
+    }
 
     #[test]
     fn test_openai_translate_text_only() {

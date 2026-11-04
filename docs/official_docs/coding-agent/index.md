@@ -1,5 +1,10 @@
 # Coding Agent
 
+> **Note:** the [harness](../harness/index.md) supersedes this section's `CodingAgent` in 3.1:
+> the same agent with modes, approvals, durable goals and team members on one governed path.
+> `adk_agent::coding` is frozen, deprecated from 3.2.0 and removed in 4.0.0; see
+> [Migrating from `CodingAgent`](../migration/coding-agent-to-harness.md).
+
 Build agents that **work on a codebase**: read and edit files, run commands and
 tests in a sandbox, plan multi-step work, iterate toward a goal autonomously, and
 orchestrate parallel reviewers — all native to ADK-Rust, on any model provider.
@@ -25,21 +30,20 @@ This is assembled from a few focused pieces rather than a monolithic framework:
   route". The agent explores, edits, runs tests, and reports.
 - **Autonomous goal mode** — give a goal + a verifiable success condition (a
   command that must exit 0); the agent loops *plan → act → verify*, self-correcting
-  until it passes or a budget runs out. Durable and resumable. (Codex/Hermes
-  `/goal` style.)
+  until it passes or a budget runs out. Durable and resumable.
 - **Ultra-review workflows** — implement, then fan out to parallel
   correctness/edge-case/style reviewers, synthesize their verdicts, and revise
-  until they approve. (Claude Code `ultracode`/`ultrareview` style.)
+  until they approve.
 
 ## Install
 
 ```toml
 # The harness (pulls in the dev tools) + a model provider
-adk-agent = { version = "2.1.0", features = ["coding"] }
-adk-devtools = "2.1.0"
-adk-model = { version = "2.1.0", features = ["gemini"] }
-adk-runner = "2.1.0"
-adk-session = "2.1.0"
+adk-agent = { version = "3.0.0", features = ["coding"] }
+adk-devtools = "3.0.0"
+adk-model = { version = "3.0.0", features = ["gemini"] }
+adk-runner = "3.0.0"
+adk-session = "3.0.0"
 ```
 
 The dev tools are sandbox-first and have no heavy dependencies, so the footprint
@@ -55,11 +59,11 @@ use adk_session::{CreateRequest, InMemorySessionService, SessionService};
 use adk_core::{Content, SessionId, UserId};
 use std::sync::Arc;
 
-# async fn run(model: std::sync::Arc<dyn adk_core::Llm>) -> anyhow::Result<()> {
+async fn run(model: Arc<dyn adk_core::Llm>) -> anyhow::Result<()> {
 // One call builds a coding agent over a confined workspace.
 let coding = CodingAgent::builder()
     .model(model)
-    .workspace(Workspace::new("./my-repo"))
+    .workspace(Workspace::new("./my-repo").allow_bash(true)) // bash is opt-in
     .build()?;
 
 let sessions: Arc<dyn SessionService> = Arc::new(InMemorySessionService::new());
@@ -79,7 +83,8 @@ let mut events = runner
          Content::new("user").with_text("Add a function add(a,b) to add.py and run it."))
     .await?;
 // stream `events`: FunctionCall / FunctionResponse / Text …
-# Ok(()) }
+Ok(())
+}
 ```
 
 Prefer the terminal? `adk-rust code "make the failing test pass"` does the same —

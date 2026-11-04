@@ -54,6 +54,7 @@ pub use config::{AcpServerConfig, AcpServerConfigBuilder, TransportConfig};
 pub use error::{AcpServerError, ErrorResponse};
 pub use handler::AcpSessionHandler;
 pub use modes::{SessionControls, config_state_key};
+pub use permission::{StandingOffer, StandingPermissions};
 pub use streamer::ResponseStreamer;
 pub use transport::{StdioTransport, Transport};
 
@@ -138,7 +139,8 @@ impl AcpServer {
 
             let result = transport.serve(handler.clone(), serve_shutdown).await;
 
-            // Drain sessions on shutdown
+            // The transport drained running prompts on shutdown; release what is left,
+            // including after the client closed the connection.
             handler_for_drain.drain_sessions(shutdown_timeout).await;
 
             info!("ACP server stopped");

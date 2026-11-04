@@ -222,12 +222,12 @@ impl PostgresMemoryService {
         CREATE INDEX IF NOT EXISTS idx_memory_app_user_project \
             ON memory_entries(app_name, user_id, project_id);";
 
-    /// Advisory lock key derived from the registry table name.
+    /// Advisory lock key that [`migrate`](Self::migrate) holds while it runs.
     ///
-    /// This is a fixed `i64` used with `pg_advisory_lock` /
-    /// `pg_advisory_unlock` to prevent concurrent migration races.
-    /// The value is a compile-time FNV-1a hash of the registry table name.
-    const ADVISORY_LOCK_KEY: i64 = {
+    /// Concurrent instances take this `pg_advisory_lock` key so only one migrates at a
+    /// time. The value is an FNV-1a hash of the registry table name, and `pg_locks` shows
+    /// it with the high 32 bits in `classid` and the low 32 bits in `objid`.
+    pub const ADVISORY_LOCK_KEY: i64 = {
         let bytes = Self::REGISTRY_TABLE.as_bytes();
         let mut hash: u64 = 0xcbf29ce484222325;
         let mut i = 0;
@@ -335,10 +335,10 @@ impl PostgresMemoryService {
     /// up to 4000 dimensions.
     ///
     /// Migrations are protected by a PostgreSQL advisory lock to prevent
-    /// concurrent migration races from multiple application instances.
+    /// concurrent migration races from multiple application instances. The
+    /// lock, every migration statement, and the unlock run on one connection,
+    /// which is closed afterwards instead of returning to the pool.
     pub async fn migrate(&self) -> Result<()> {
-        let pool = &self.pool;
-
         // Build the v1 SQL dynamically (parameterized by dims + index type)
         let v1_sql = self.build_v1_migration_sql()?;
         let v2_sql = Self::V2_MIGRATION_SQL;
@@ -348,32 +348,53 @@ impl PostgresMemoryService {
             (2, "add project_id column and composite index", v2_sql),
         ];
 
-        // Acquire advisory lock to prevent concurrent migration races
-        sqlx::query(&format!("SELECT pg_advisory_lock({})", Self::ADVISORY_LOCK_KEY))
-            .execute(pool)
+        let mut conn =
+            self.pool.acquire().await.map_err(|e| {
+                adk_core::AdkError::memory(format!("database connection failed: {e}"))
+            })?;
+        // A session-level advisory lock belongs to this connection. Closing it on
+        // drop releases the lock even when this future is cancelled, rather than
+        // leaving it held by an idle pooled connection.
+        conn.close_on_drop();
+
+        sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(Self::ADVISORY_LOCK_KEY)
+            .execute(&mut *conn)
             .await
             .map_err(|e| {
                 adk_core::AdkError::memory(format!("advisory lock acquisition failed: {e}"))
             })?;
 
-        let result = pg_runner::run_sql_migrations(pool, Self::REGISTRY_TABLE, steps, || async {
-            let row = sqlx::query(
-                "SELECT EXISTS(\
-                     SELECT 1 FROM information_schema.tables \
-                     WHERE table_name = 'memory_entries'\
-                 ) AS exists_flag",
-            )
-            .fetch_one(pool)
-            .await
-            .map_err(|e| adk_core::AdkError::memory(format!("baseline detection failed: {e}")))?;
-            let exists: bool = row.try_get("exists_flag").unwrap_or(false);
-            Ok(exists)
-        })
+        let result = pg_runner::run_sql_migrations_on_connection(
+            &mut conn,
+            Self::REGISTRY_TABLE,
+            steps,
+            |conn| {
+                Box::pin(async move {
+                    let row = sqlx::query(
+                        "SELECT EXISTS(\
+                             SELECT 1 FROM information_schema.tables \
+                             WHERE table_schema = current_schema() \
+                               AND table_name = 'memory_entries'\
+                         ) AS exists_flag",
+                    )
+                    .fetch_one(conn)
+                    .await
+                    .map_err(|e| {
+                        adk_core::AdkError::memory(format!("baseline detection failed: {e}"))
+                    })?;
+                    let exists: bool = row.try_get("exists_flag").unwrap_or(false);
+                    Ok(exists)
+                })
+            },
+        )
         .await;
 
-        // Release advisory lock regardless of migration outcome
-        let _ = sqlx::query(&format!("SELECT pg_advisory_unlock({})", Self::ADVISORY_LOCK_KEY))
-            .execute(pool)
+        // Released explicitly so the next instance proceeds without waiting for
+        // the connection to close; closing the connection releases it regardless.
+        let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(Self::ADVISORY_LOCK_KEY)
+            .execute(&mut *conn)
             .await;
 
         result
@@ -381,6 +402,12 @@ impl PostgresMemoryService {
 
     /// Returns the highest applied migration version, or 0 if no registry
     /// exists or the registry is empty.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the registry cannot be read for any reason other
+    /// than the table being absent, such as a lost connection or a missing
+    /// privilege.
     pub async fn schema_version(&self) -> Result<i64> {
         pg_runner::sql_schema_version(&self.pool, Self::REGISTRY_TABLE).await
     }
@@ -502,7 +529,8 @@ impl MemoryService for PostgresMemoryService {
                             LIMIT $4
                             "#
                         );
-                        sqlx::query(&sql)
+                        // Only the validated numeric embedding dimension changes SQL structure.
+                        sqlx::query(sqlx::AssertSqlSafe(sql))
                             .bind(&req.app_name)
                             .bind(&req.user_id)
                             .bind(&query_vec)
@@ -525,7 +553,8 @@ impl MemoryService for PostgresMemoryService {
                             LIMIT $4
                             "#
                         );
-                        sqlx::query(&sql)
+                        // Only the validated numeric embedding dimension changes SQL structure.
+                        sqlx::query(sqlx::AssertSqlSafe(sql))
                             .bind(&req.app_name)
                             .bind(&req.user_id)
                             .bind(&query_vec)
@@ -629,12 +658,14 @@ impl MemoryService for PostgresMemoryService {
             rows.iter()
                 .filter(|row| {
                     if let Some(threshold) = min_score {
-                        let score: f32 = row
-                            .try_get::<f32, _>("distance")
-                            .map(|d| 1.0 - d)
-                            .or_else(|_| row.try_get::<f32, _>("rank_score"))
+                        // pgvector's distance operators return `float8` and `ts_rank`
+                        // returns `float4`; sqlx refuses to read either as the other.
+                        let score = row
+                            .try_get::<f64, _>("distance")
+                            .map(|distance| 1.0 - distance)
+                            .or_else(|_| row.try_get::<f32, _>("rank_score").map(f64::from))
                             .unwrap_or(0.0);
-                        score >= threshold
+                        score >= f64::from(threshold)
                     } else {
                         true
                     }
@@ -691,6 +722,37 @@ impl MemoryService for PostgresMemoryService {
                 MemoryEntry { content, author, timestamp }
             })
             .collect())
+    }
+
+    #[instrument(skip_all, fields(app_name = %app_name, user_id = %user_id))]
+    async fn export_user(&self, app_name: &str, user_id: &str) -> Result<Vec<UserMemory>> {
+        let rows = sqlx::query(
+            "SELECT session_id, project_id, content, author, timestamp FROM memory_entries \
+             WHERE app_name = $1 AND user_id = $2 ORDER BY timestamp, id",
+        )
+        .bind(app_name)
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| adk_core::AdkError::memory(format!("export_user failed: {e}")))?;
+        rows.into_iter()
+            .map(|row| {
+                let content: serde_json::Value = row.get("content");
+                // Entries added without a session are stored with an empty session id.
+                let session_id: String = row.get("session_id");
+                Ok(UserMemory {
+                    entry: MemoryEntry {
+                        content: serde_json::from_value(content).map_err(|e| {
+                            adk_core::AdkError::memory(format!("stored content is corrupt: {e}"))
+                        })?,
+                        author: row.get("author"),
+                        timestamp: row.get("timestamp"),
+                    },
+                    session_id: (!session_id.is_empty()).then_some(session_id),
+                    project_id: row.get("project_id"),
+                })
+            })
+            .collect()
     }
 
     #[instrument(skip_all, fields(app_name = %app_name, user_id = %user_id))]

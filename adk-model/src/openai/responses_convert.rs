@@ -5,27 +5,30 @@
 
 use crate::attachment;
 use adk_core::{
-    AdkError, Content, ErrorCategory, ErrorComponent, FinishReason, LlmRequest, LlmResponse, Part,
-    UsageMetadata,
+    AdkError, CitationMetadata, CitationSource, Content, ErrorCategory, ErrorComponent,
+    FinishReason, LlmRequest, LlmResponse, Part, UsageMetadata,
 };
 use async_openai::types::responses::{
-    ApplyPatchToolCallItemParam, ApplyPatchToolCallOutputItemParam, ConversationParam,
+    Annotation, ApplyPatchToolCallItemParam, ApplyPatchToolCallOutputItemParam, ConversationParam,
     CreateResponse, CreateResponseArgs, EasyInputContent, EasyInputMessage, FunctionCallOutput,
     FunctionCallOutputItemParam, FunctionShellCallItemParam, FunctionShellCallOutputItemParam,
-    FunctionTool, FunctionToolCall, IncludeEnum, InputContent, InputImageContent, InputItem,
-    InputParam, Item, OutputItem, OutputMessageContent, Prompt,
-    PromptCacheRetention as OaiPromptCacheRetention, Reasoning,
-    ReasoningEffort as OaiReasoningEffort, ReasoningSummary as OaiReasoningSummary, Response,
-    ResponseUsage, Role, ServiceTier as OaiServiceTier, Status, SummaryPart, Tool, Truncation,
+    FunctionTool, FunctionToolCall, IncludeEnum, InputContent, InputFileContent, InputImageContent,
+    InputItem, InputParam, Item, MessageItem, MessagePhase, OutputItem, OutputMessageContent,
+    Prompt, PromptCacheRetention as OaiPromptCacheRetention, Reasoning,
+    ReasoningEffort as OaiReasoningEffort, ReasoningItemContent,
+    ReasoningSummary as OaiReasoningSummary, Response, ResponseTextParam, Role,
+    ServiceTier as OaiServiceTier, Status, SummaryPart, TextResponseFormatConfiguration, Tool,
+    Truncation,
 };
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 
 use super::config::{OpenAIReasoningEffort, ReasoningSummary};
+use super::responses_client::wire::Response as Projection;
 
 /// Convert a list of ADK `Content` items to Responses API `InputItem` list.
 pub fn contents_to_input_items(contents: &[Content]) -> Vec<InputItem> {
-    contents.iter().flat_map(content_to_input_items).collect()
+    crate::tool_result::with_images(contents).iter().flat_map(content_to_input_items).collect()
 }
 
 /// Returns true when the request includes any OpenAI-native tool declarations.
@@ -63,6 +66,7 @@ fn request_uses_computer_use_tool(request: &LlmRequest) -> bool {
 fn content_to_input_items(content: &Content) -> Vec<InputItem> {
     let role = content.role.as_str();
     let mut items = Vec::new();
+    let mut reasoning_items = 0;
 
     for part in &content.parts {
         match part {
@@ -118,57 +122,66 @@ fn content_to_input_items(content: &Content) -> Vec<InputItem> {
                 )));
             }
 
-            Part::InlineData { mime_type, data, .. } => {
-                if mime_type.starts_with("image/") {
-                    let data_uri =
-                        format!("data:{mime_type};base64,{}", attachment::encode_base64(data));
-                    let image_content = InputContent::InputImage(InputImageContent {
-                        image_url: Some(data_uri),
+            Part::InlineData { mime_type, data, uri, .. } => {
+                let data = if mime_type.starts_with("image/") {
+                    InputContent::InputImage(InputImageContent {
+                        image_url: Some(format!(
+                            "data:{mime_type};base64,{}",
+                            attachment::encode_base64(data)
+                        )),
                         detail: Default::default(),
                         file_id: None,
-                    });
-                    // Wrap in an EasyMessage with content list
-                    let msg_role = match role {
-                        "model" | "assistant" => Role::Assistant,
-                        _ => Role::User,
-                    };
-                    items.push(InputItem::EasyMessage(EasyInputMessage {
-                        role: msg_role,
-                        content: EasyInputContent::ContentList(vec![image_content]),
+                    })
+                } else if mime_type == "application/pdf" {
+                    InputContent::InputFile(InputFileContent {
+                        file_data: Some(format!(
+                            "data:{mime_type};base64,{}",
+                            attachment::encode_base64(data)
+                        )),
+                        filename: Some(attachment::pdf_filename(uri.as_deref())),
                         ..Default::default()
-                    }));
-                }
-                // Non-image inline data is not directly supported by Responses API;
-                // skip silently.
-            }
-
-            Part::Thinking { thinking, .. } => {
-                // Include thinking text as a text message in the input
+                    })
+                } else {
+                    continue;
+                };
                 let msg_role = match role {
                     "model" | "assistant" => Role::Assistant,
                     _ => Role::User,
                 };
                 items.push(InputItem::EasyMessage(EasyInputMessage {
                     role: msg_role,
-                    content: EasyInputContent::Text(thinking.clone()),
+                    content: EasyInputContent::ContentList(vec![data]),
                     ..Default::default()
                 }));
             }
+
+            // Reasoning goes back only as the reasoning items the history keeps beside the
+            // thinking text; as a message it would become an answer the model never gave.
+            Part::Thinking { .. } => {}
 
             Part::FileData { .. } => {
                 // FileData is not directly mapped to Responses API input items.
                 // Could be extended in the future.
             }
-            Part::ServerToolCall { server_tool_call } => {
-                if let Ok(item) = serde_json::from_value::<Item>(server_tool_call.clone()) {
-                    items.push(InputItem::Item(item));
+            // Native items replay only from the model's own turns, and a native message only
+            // as the assistant's: in any other turn, or with a user, system or developer role,
+            // it would be input the model never produced, carrying instructions.
+            Part::ServerToolCall { server_tool_call: payload }
+            | Part::ServerToolResponse { server_tool_response: payload }
+                if matches!(role, "model" | "assistant") =>
+            {
+                match serde_json::from_value::<Item>(payload.clone()) {
+                    Ok(Item::Message(MessageItem::Input(_))) | Err(_) => {}
+                    // The history keeps reasoning items after the turn's outputs, and the API
+                    // takes each one ahead of the output it produced, as it returned them.
+                    Ok(item @ Item::Reasoning(_)) => {
+                        items.insert(reasoning_items, InputItem::Item(item));
+                        reasoning_items += 1;
+                    }
+                    Ok(item) => items.push(InputItem::Item(item)),
                 }
             }
-            Part::ServerToolResponse { server_tool_response } => {
-                if let Ok(item) = serde_json::from_value::<Item>(server_tool_response.clone()) {
-                    items.push(InputItem::Item(item));
-                }
-            }
+            Part::ServerToolCall { .. } | Part::ServerToolResponse { .. } => {}
             Part::EmbeddedResource { resource } => match resource {
                 // Text resource: include the text payload as a message.
                 adk_core::EmbeddedResource::Text(text) => {
@@ -230,9 +243,15 @@ fn content_to_input_items(content: &Content) -> Vec<InputItem> {
 /// (`image_generation`, `mcp`, `shell`, etc.), the extension value is deserialized directly.
 /// If the type is not recognized (e.g., `tool_search`, `skill`), the tool falls back to
 /// being treated as a regular function tool.
+///
+/// Function tools are sent with `strict: false`, since ADK schemas may keep optional
+/// properties that strict mode rejects. A native declaration's explicit boolean `strict`
+/// is kept, including on the function-tool fallback.
 pub fn convert_tools(tools: &HashMap<String, serde_json::Value>) -> Result<Vec<Tool>, AdkError> {
+    let mut tools = tools.iter().collect::<Vec<_>>();
+    tools.sort_unstable_by_key(|(name, _)| *name);
     tools
-        .iter()
+        .into_iter()
         .map(|(name, decl)| {
             if let Some(provider_tool) = decl.get("x-adk-openai-tool") {
                 convert_native_tool(name, decl, provider_tool)
@@ -245,7 +264,7 @@ pub fn convert_tools(tools: &HashMap<String, serde_json::Value>) -> Result<Vec<T
                     name: name.clone(),
                     description,
                     parameters,
-                    strict: None,
+                    strict: Some(false),
                     defer_loading: None,
                 }))
             }
@@ -282,7 +301,10 @@ fn convert_native_tool(
                 name: name.to_string(),
                 description,
                 parameters,
-                strict: None,
+                strict: provider_tool
+                    .get("strict")
+                    .and_then(serde_json::Value::as_bool)
+                    .or(Some(false)),
                 defer_loading: None,
             }))
         }
@@ -321,6 +343,12 @@ pub fn build_create_response(
     reasoning_summary: Option<ReasoningSummary>,
 ) -> Result<CreateResponse, AdkError> {
     let config = request.config.as_ref();
+    {
+        use crate::generation_config::{Supports, reject_unsupported};
+        let supports =
+            Supports { stop_sequences: false, seed: false, penalties: false, top_logprobs: true };
+        reject_unsupported("openai-responses", config, supports)?;
+    }
 
     // 1. Separate system content from non-system content
     let mut system_texts = Vec::new();
@@ -371,7 +399,7 @@ pub fn build_create_response(
 
     let tools = if tools_vec.is_empty() { None } else { Some(tools_vec) };
 
-    let include = openai_ext
+    let mut include = openai_ext
         .and_then(|o| o.get("include"))
         .map(|value| {
             serde_json::from_value::<Vec<IncludeEnum>>(value.clone()).map_err(|error| {
@@ -385,6 +413,14 @@ pub fn build_create_response(
             })
         })
         .transpose()?;
+    // Log probabilities come back only when the output text includes them.
+    let top_logprobs = config.and_then(|c| c.top_logprobs);
+    if top_logprobs.is_some() {
+        let include = include.get_or_insert_with(Vec::new);
+        if !include.contains(&IncludeEnum::MessageOutputTextLogprobs) {
+            include.push(IncludeEnum::MessageOutputTextLogprobs);
+        }
+    }
 
     let max_tool_calls = openai_ext
         .and_then(|o| o.get("max_tool_calls"))
@@ -407,8 +443,9 @@ pub fn build_create_response(
     let top_p = config.and_then(|c| c.top_p);
     let max_output_tokens = config.and_then(|c| c.max_output_tokens).map(|v| v as u32);
 
-    // 6. Build reasoning field
-    let mut effective_effort = reasoning_effort;
+    // 6. Build reasoning field; the request's effort wins over the client's (spec 3.1 §7.23).
+    let mut effective_effort =
+        super::config::request_reasoning_effort(model, reasoning_effort, request);
     let mut effective_summary = reasoning_summary;
 
     // 8. Read extensions["openai"]["reasoning"] → override config-level reasoning
@@ -443,11 +480,12 @@ pub fn build_create_response(
         None
     };
 
-    // 7. Read extensions["openai"]["previous_response_id"]
+    // 7. Read extensions["openai"]["previous_response_id"] and ["store"]
     let previous_response_id = openai_ext
         .and_then(|o| o.get("previous_response_id"))
         .and_then(|v| v.as_str())
         .map(String::from);
+    let store = openai_ext.and_then(|o| o.get("store")).and_then(|v| v.as_bool());
 
     // 10. Read extensions["openai"]["background"] and auto-enable for deep research models
     let explicit_background =
@@ -510,9 +548,21 @@ pub fn build_create_response(
             _ => None,
         });
 
+    // 16. response_schema → text.format json_schema, as Chat Completions sends response_format
+    let text = config.and_then(|c| c.response_schema.as_ref()).map(|schema| ResponseTextParam {
+        format: TextResponseFormatConfiguration::JsonSchema(super::convert::json_schema_format(
+            &request.model,
+            schema,
+        )),
+        verbosity: None,
+    });
+
     // Build the CreateResponse using the builder
     let mut builder = CreateResponseArgs::default();
     builder.model(model.to_string()).input(input);
+    if let Some(text) = text {
+        builder.text(text);
+    }
 
     if let Some(inst) = instructions {
         builder.instructions(inst);
@@ -525,6 +575,9 @@ pub fn build_create_response(
     }
     if let Some(max_tool_calls) = max_tool_calls {
         builder.max_tool_calls(max_tool_calls);
+    }
+    if let Some(top_logprobs) = top_logprobs {
+        builder.top_logprobs(top_logprobs);
     }
     if let Some(temp) = temperature {
         builder.temperature(temp);
@@ -543,6 +596,9 @@ pub fn build_create_response(
     }
     if let Some(prev_id) = previous_response_id {
         builder.previous_response_id(prev_id);
+    }
+    if let Some(store) = store {
+        builder.store(store);
     }
     if let Some(bg) = background {
         builder.background(bg);
@@ -580,38 +636,117 @@ pub fn build_create_response(
 /// collects all parts into a single `Content`, and maps usage, finish reason,
 /// and provider metadata.
 pub fn from_response(response: &Response) -> LlmResponse {
-    let parts: Vec<Part> = response.output.iter().flat_map(output_item_to_parts).collect();
+    from_projection(&Projection::from(response))
+}
 
-    let content =
-        if parts.is_empty() { None } else { Some(Content { role: "model".to_string(), parts }) };
+/// A background response that is still queued or running: its `response_id` and `status` in
+/// `provider_metadata["openai"]`, no content, and the turn left open for polling.
+pub(super) fn from_pending_projection(response: &Projection) -> LlmResponse {
+    LlmResponse {
+        provider_metadata: projection_metadata(response),
+        partial: false,
+        turn_complete: false,
+        ..Default::default()
+    }
+}
 
-    let usage_metadata = response.usage.as_ref().map(convert_usage);
-    let finish_reason = map_finish_reason(response);
-    let provider_metadata = build_provider_metadata(response);
+pub(super) fn from_projection(response: &Projection) -> LlmResponse {
+    let terminal_error = super::responses_client::wire::validate(response).err();
+    let content = if terminal_error.is_none() { output_parts(&response.output) } else { None };
+
+    let usage_metadata = response.usage.as_ref().and_then(convert_usage).map(|usage| {
+        UsageMetadata { builtin_tool_uses: builtin_tool_uses(&response.output), ..usage }
+    });
+    let finish_reason = terminal_error.is_none().then(|| map_finish_reason(response)).flatten();
+    let provider_metadata = projection_metadata(response);
+    let mut citation_sources = Vec::new();
+    let mut offset = 0usize;
+    for item in &response.output {
+        let OutputItem::Message(message) = item else { continue };
+        if message.phase == Some(MessagePhase::Commentary) {
+            continue;
+        }
+        for content in &message.content {
+            let text = match content {
+                OutputMessageContent::OutputText(text) => text,
+                OutputMessageContent::Refusal(refusal) => {
+                    offset += refusal.refusal.chars().count();
+                    continue;
+                }
+            };
+            let length = text.text.chars().count();
+            for annotation in &text.annotations {
+                let Annotation::UrlCitation(citation) = annotation else { continue };
+                let Ok(value) = serde_json::to_value(citation) else { continue };
+                let index = |name: &str| {
+                    value
+                        .get(name)
+                        .and_then(serde_json::Value::as_u64)
+                        .and_then(|value| usize::try_from(value).ok())
+                        .filter(|value| *value <= length)
+                        .and_then(|value| offset.checked_add(value))
+                        .and_then(|value| i32::try_from(value).ok())
+                };
+                citation_sources.push(CitationSource {
+                    uri: value.get("url").and_then(serde_json::Value::as_str).map(str::to_owned),
+                    title: value
+                        .get("title")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned),
+                    start_index: index("start_index"),
+                    end_index: index("end_index"),
+                    license: None,
+                    publication_date: None,
+                });
+            }
+            offset += length;
+        }
+    }
+    let citation_metadata =
+        (!citation_sources.is_empty()).then_some(CitationMetadata { citation_sources });
 
     LlmResponse {
         content,
         usage_metadata,
         finish_reason,
-        citation_metadata: None,
+        citation_metadata,
         partial: false,
         turn_complete: true,
         interrupted: false,
-        error_code: None,
-        error_message: None,
+        error_code: terminal_error.as_ref().map(|error| error.code.to_owned()),
+        error_message: terminal_error.map(|error| error.message),
         provider_metadata,
         interaction_id: None,
+        model: None,
+        provider: None,
     }
+}
+
+/// Converts output items to model content, or `None` when they carry no parts.
+pub(super) fn output_parts(output: &[OutputItem]) -> Option<Content> {
+    let parts = output.iter().flat_map(output_item_to_parts).collect::<Vec<_>>();
+    (!parts.is_empty()).then(|| Content { role: "model".to_string(), parts })
 }
 
 /// Convert a single `OutputItem` to zero or more ADK `Part`s.
 ///
-/// - `Message` → `Part::Text` for each non-empty text content
+/// - `Message` → `Part::Text` for each non-empty text or refusal
 /// - `Reasoning` → `Part::Thinking` with concatenated summary text
 /// - `FunctionCall` → `Part::FunctionCall` with parsed JSON args
 /// - Other variants (WebSearchCall, FileSearchCall, etc.) → empty vec (handled in provider_metadata)
 fn output_item_to_parts(item: &OutputItem) -> Vec<Part> {
     match item {
+        // Preserve commentary as a native message in canonical history. It is not
+        // answer text and must retain its phase when sent back to the provider.
+        OutputItem::Message(msg) if msg.phase == Some(MessagePhase::Commentary) => {
+            response_item_part(
+                Item::Message(
+                    bridge_response_item(msg)
+                        .expect("output messages have an input representation"),
+                ),
+                false,
+            )
+        }
         OutputItem::Message(msg) => msg
             .content
             .iter()
@@ -619,11 +754,14 @@ fn output_item_to_parts(item: &OutputItem) -> Vec<Part> {
                 OutputMessageContent::OutputText(t) if !t.text.is_empty() => {
                     Some(Part::Text { text: t.text.clone() })
                 }
+                OutputMessageContent::Refusal(r) if !r.refusal.is_empty() => {
+                    Some(Part::Text { text: r.refusal.clone() })
+                }
                 _ => None,
             })
             .collect(),
         OutputItem::Reasoning(reasoning) => {
-            let concatenated: String = reasoning
+            let mut concatenated: String = reasoning
                 .summary
                 .iter()
                 .map(|sp| match sp {
@@ -631,6 +769,18 @@ fn output_item_to_parts(item: &OutputItem) -> Vec<Part> {
                 })
                 .collect::<Vec<_>>()
                 .join("");
+            if concatenated.is_empty() {
+                concatenated = reasoning
+                    .content
+                    .as_deref()
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|content| match content {
+                        ReasoningItemContent::ReasoningText(text) => text.text.as_str(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+            }
 
             if concatenated.is_empty() {
                 vec![]
@@ -639,8 +789,9 @@ fn output_item_to_parts(item: &OutputItem) -> Vec<Part> {
             }
         }
         OutputItem::FunctionCall(fc) => {
-            let args: serde_json::Value =
-                serde_json::from_str(&fc.arguments).unwrap_or(serde_json::json!({}));
+            let encoded = serde_json::Value::String(fc.arguments.clone());
+            let args =
+                crate::tool_args::tool_call_arguments("openai-responses", &fc.name, Some(&encoded));
             vec![Part::FunctionCall {
                 name: fc.name.clone(),
                 args,
@@ -717,7 +868,7 @@ where
     serde_json::to_value(output).ok().and_then(|value| serde_json::from_value(value).ok())
 }
 
-fn reasoning_history_parts(response: &Response) -> Vec<serde_json::Value> {
+fn reasoning_history_parts(response: &Projection) -> Vec<serde_json::Value> {
     response
         .output
         .iter()
@@ -731,20 +882,50 @@ fn reasoning_history_parts(response: &Response) -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// Convert Responses API usage to ADK `UsageMetadata`.
-fn convert_usage(usage: &ResponseUsage) -> UsageMetadata {
-    UsageMetadata {
-        prompt_token_count: usage.input_tokens as i32,
-        candidates_token_count: usage.output_tokens as i32,
-        total_token_count: (usage.input_tokens + usage.output_tokens) as i32,
-        cache_read_input_token_count: Some(usage.input_tokens_details.cached_tokens as i32),
-        thinking_token_count: Some(usage.output_tokens_details.reasoning_tokens as i32),
-        ..Default::default()
+/// Hosted tool calls the provider ran while producing `output`, one use per item.
+///
+/// Computer, shell and apply-patch calls are executed by the client, not the
+/// provider, so they are not counted here.
+fn builtin_tool_uses(output: &[OutputItem]) -> Vec<adk_core::BuiltinToolUse> {
+    let mut counts = std::collections::BTreeMap::<&str, u32>::new();
+    for item in output {
+        let kind = match item {
+            OutputItem::WebSearchCall(_) => "web_search",
+            OutputItem::FileSearchCall(_) => "file_search",
+            OutputItem::CodeInterpreterCall(_) => "code_execution",
+            OutputItem::ImageGenerationCall(_) => "image_generation",
+            OutputItem::McpCall(_) => "mcp",
+            _ => continue,
+        };
+        *counts.entry(kind).or_default() += 1;
     }
+    counts.into_iter().map(|(kind, count)| adk_core::BuiltinToolUse::new(kind, count)).collect()
+}
+
+/// Convert a Responses API `usage` object to ADK `UsageMetadata`, keeping the object as
+/// received. A `null` or missing count is unknown: zero for the totals, `None` for the
+/// breakdowns.
+fn convert_usage(usage: &serde_json::Value) -> Option<UsageMetadata> {
+    use crate::usage_json::count;
+    if !usage.is_object() {
+        return None;
+    }
+    let input = count(usage, "/input_tokens").unwrap_or_default();
+    let output = count(usage, "/output_tokens").unwrap_or_default();
+    Some(UsageMetadata {
+        prompt_token_count: input,
+        candidates_token_count: output,
+        total_token_count: count(usage, "/total_tokens")
+            .unwrap_or_else(|| input.saturating_add(output)),
+        cache_read_input_token_count: count(usage, "/input_tokens_details/cached_tokens"),
+        thinking_token_count: count(usage, "/output_tokens_details/reasoning_tokens"),
+        provider_usage: Some(usage.clone()),
+        ..Default::default()
+    })
 }
 
 /// Map response status to ADK `FinishReason`.
-fn map_finish_reason(response: &Response) -> Option<FinishReason> {
+fn map_finish_reason(response: &Projection) -> Option<FinishReason> {
     match &response.status {
         Status::Completed => Some(FinishReason::Stop),
         Status::Incomplete => {
@@ -754,13 +935,12 @@ fn map_finish_reason(response: &Response) -> Option<FinishReason> {
                 } else if details.reason.contains("content_filter") {
                     Some(FinishReason::Safety)
                 } else {
-                    Some(FinishReason::Stop)
+                    None
                 }
             } else {
-                Some(FinishReason::Stop)
+                None
             }
         }
-        Status::Failed => Some(FinishReason::Stop),
         _ => None,
     }
 }
@@ -826,7 +1006,12 @@ fn extract_tool_search_selected(
 /// Always includes `response_id` and `status`. Optionally includes `service_tier`,
 /// `encrypted_content` from reasoning items, and `built_in_tool_outputs` from web search,
 /// file search, code interpreter, image generation, MCP, shell, and skill calls.
+#[cfg(test)]
 fn build_provider_metadata(response: &Response) -> Option<serde_json::Value> {
+    projection_metadata(&Projection::from(response))
+}
+
+fn projection_metadata(response: &Projection) -> Option<serde_json::Value> {
     let mut openai = serde_json::Map::new();
     openai.insert("response_id".to_string(), serde_json::Value::String(response.id.clone()));
 
@@ -843,14 +1028,7 @@ fn build_provider_metadata(response: &Response) -> Option<serde_json::Value> {
 
     // Include service_tier if present
     if let Some(tier) = &response.service_tier {
-        let tier_str = match tier {
-            OaiServiceTier::Auto => "auto",
-            OaiServiceTier::Default => "default",
-            OaiServiceTier::Flex => "flex",
-            OaiServiceTier::Scale => "scale",
-            OaiServiceTier::Priority => "priority",
-        };
-        openai.insert("service_tier".to_string(), serde_json::Value::String(tier_str.to_string()));
+        openai.insert("service_tier".to_string(), tier.clone());
     }
 
     // Extract phase from output messages if present.
@@ -928,6 +1106,25 @@ fn build_provider_metadata(response: &Response) -> Option<serde_json::Value> {
         );
     }
 
+    let logprobs: Vec<serde_json::Value> = response
+        .output
+        .iter()
+        .filter_map(|item| match item {
+            OutputItem::Message(message) => Some(&message.content),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|content| match content {
+            OutputMessageContent::OutputText(text) => text.logprobs.as_ref(),
+            OutputMessageContent::Refusal(_) => None,
+        })
+        .flatten()
+        .filter_map(|logprob| serde_json::to_value(logprob).ok())
+        .collect();
+    if !logprobs.is_empty() {
+        openai.insert("logprobs".to_string(), serde_json::Value::Array(logprobs));
+    }
+
     let history_parts = reasoning_history_parts(response);
     if !history_parts.is_empty() {
         openai.insert(
@@ -950,6 +1147,24 @@ mod tests {
     };
 
     #[test]
+    fn pdf_inline_data_uses_input_file() {
+        let content = Content {
+            role: "user".into(),
+            parts: vec![Part::inline_data("application/pdf", b"%PDF".to_vec())],
+        };
+        let items = serde_json::to_value(contents_to_input_items(&[content])).unwrap();
+        assert_eq!(items[0]["role"], "user");
+        assert_eq!(
+            items[0]["content"],
+            serde_json::json!([{
+                "type": "input_file",
+                "filename": "document.pdf",
+                "file_data": "data:application/pdf;base64,JVBERg=="
+            }])
+        );
+    }
+
+    #[test]
     fn test_convert_tools_supports_native_openai_tool_declarations() {
         let mut tools = HashMap::new();
         tools.insert(
@@ -965,6 +1180,120 @@ mod tests {
         assert_eq!(converted.len(), 1);
         let value = serde_json::to_value(&converted[0]).expect("tool should serialize");
         assert_eq!(value["type"], "local_shell");
+    }
+
+    #[test]
+    fn ordinary_functions_disable_strict_defaults() {
+        let tools = HashMap::from([(
+            "lookup".to_string(),
+            serde_json::json!({"description": "Find a record"}),
+        )]);
+
+        let converted = convert_tools(&tools).expect("tool conversion should succeed");
+        let value = serde_json::to_value(&converted[0]).expect("tool should serialize");
+        assert_eq!(value["type"], "function");
+        assert_eq!(value["name"], "lookup");
+        assert_eq!(value["description"], "Find a record");
+        assert_eq!(value["strict"], false);
+    }
+
+    #[test]
+    fn optional_parameters_remain_optional() {
+        let parameters = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "limit": {"type": "integer"}
+            },
+            "required": ["query"]
+        });
+        let tools = HashMap::from([(
+            "search".to_string(),
+            serde_json::json!({"parameters": parameters.clone()}),
+        )]);
+
+        let converted = convert_tools(&tools).expect("tool conversion should succeed");
+        let value = serde_json::to_value(&converted[0]).expect("tool should serialize");
+        assert_eq!(value["strict"], false);
+        assert_eq!(value["parameters"], parameters);
+    }
+
+    #[test]
+    fn native_functions_keep_explicit_strictness() {
+        for strict in [true, false] {
+            let tools = HashMap::from([(
+                "native".to_string(),
+                serde_json::json!({
+                    "x-adk-openai-tool": {
+                        "type": "function",
+                        "name": "native",
+                        "parameters": {"type": "object", "properties": {}},
+                        "strict": strict
+                    }
+                }),
+            )]);
+
+            let converted = convert_tools(&tools).expect("native tool should convert");
+            let value = serde_json::to_value(&converted[0]).expect("tool should serialize");
+            assert_eq!(value["type"], "function");
+            assert_eq!(value["strict"], strict);
+        }
+    }
+
+    #[test]
+    fn fallback_functions_disable_strict_defaults() {
+        let tools = HashMap::from([(
+            "lookup".to_string(),
+            serde_json::json!({
+                "parameters": {"type": "object", "properties": {}},
+                "x-adk-openai-tool": {"type": "unsupported_tool"}
+            }),
+        )]);
+
+        let converted = convert_tools(&tools).expect("fallback tool should convert");
+        let value = serde_json::to_value(&converted[0]).expect("tool should serialize");
+        assert_eq!(value["type"], "function");
+        assert_eq!(value["strict"], false);
+        assert_eq!(value["parameters"]["type"], "object");
+    }
+
+    #[test]
+    fn fallback_functions_keep_explicit_strictness() {
+        let tools = HashMap::from([(
+            "lookup".to_string(),
+            serde_json::json!({
+                "parameters": {"type": "object", "properties": {}},
+                "x-adk-openai-tool": {"type": "unsupported_tool", "strict": true}
+            }),
+        )]);
+
+        let converted = convert_tools(&tools).expect("fallback tool should convert");
+        let value = serde_json::to_value(&converted[0]).expect("tool should serialize");
+        assert_eq!(value["type"], "function");
+        assert_eq!(value["strict"], true);
+    }
+
+    #[test]
+    fn convert_tools_has_deterministic_name_order() {
+        for _ in 0..32 {
+            let tools = HashMap::from([
+                ("zeta".to_string(), serde_json::json!({})),
+                ("alpha".to_string(), serde_json::json!({})),
+                ("middle".to_string(), serde_json::json!({})),
+            ]);
+            let names = convert_tools(&tools)
+                .expect("tool conversion should succeed")
+                .into_iter()
+                .map(|tool| {
+                    serde_json::to_value(tool).expect("tool should serialize")["name"]
+                        .as_str()
+                        .expect("function tool should have a name")
+                        .to_string()
+                })
+                .collect::<Vec<_>>();
+
+            assert_eq!(names, ["alpha", "middle", "zeta"]);
+        }
     }
 
     #[test]
@@ -990,6 +1319,36 @@ mod tests {
             }
             other => panic!("expected web_search_call item, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn function_tool_arguments_share_compatible_normalization() {
+        let empty = output_item_to_parts(&OutputItem::FunctionCall(FunctionToolCall {
+            call_id: "call_empty".to_string(),
+            name: "no_args".to_string(),
+            arguments: "null".to_string(),
+            namespace: None,
+            id: None,
+            status: None,
+        }));
+        assert!(matches!(
+            &empty[0],
+            Part::FunctionCall { args, .. } if args == &serde_json::json!({})
+        ));
+
+        // Truncated arguments are marked, never run with substituted arguments.
+        let truncated = output_item_to_parts(&OutputItem::FunctionCall(FunctionToolCall {
+            call_id: "call_invalid".to_string(),
+            name: "bash".to_string(),
+            arguments: r#"{"command":"#.to_string(),
+            namespace: None,
+            id: None,
+            status: None,
+        }));
+        assert!(matches!(
+            truncated.as_slice(),
+            [Part::FunctionCall { args, .. }] if adk_core::invalid_tool_arguments_reason(args).is_some()
+        ));
     }
 
     #[test]
@@ -1060,7 +1419,7 @@ mod tests {
             "openai_web_search".to_string(),
             serde_json::json!({
                 "x-adk-openai-tool": {
-                    "type": "web_search_2025_08_26"
+                    "type": "web_search"
                 }
             }),
         );
@@ -1360,7 +1719,7 @@ mod tests {
             "openai".to_string(),
             serde_json::json!({
                 "built_in_tools": [
-                    { "type": "web_search_2025_08_26" },
+                    { "type": "web_search" },
                     { "type": "image_generation", "size": "1024x1024", "quality": "high" }
                 ]
             }),
@@ -1414,7 +1773,7 @@ mod tests {
                 "prompt_cache_retention": "24h",
                 "service_tier": "priority",
                 "built_in_tools": [
-                    { "type": "web_search_2025_08_26" }
+                    { "type": "web_search" }
                 ]
             }),
         );
@@ -1469,6 +1828,56 @@ mod tests {
         let metadata = llm_response.provider_metadata.expect("metadata should exist");
         assert_eq!(metadata["openai"]["response_id"], "resp_status_test");
         assert_eq!(metadata["openai"]["status"], "completed");
+    }
+
+    #[test]
+    fn test_from_response_maps_url_citations() {
+        let response: Response = serde_json::from_value(serde_json::json!({
+            "id": "resp_citation_test",
+            "object": "response",
+            "created_at": 0,
+            "model": "gpt-5.4",
+            "status": "completed",
+            "output": [{
+                "type": "message",
+                "id": "msg_citation_test",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{
+                    "type": "output_text",
+                    "text": "OpenAI",
+                    "annotations": [{
+                        "type": "url_citation",
+                        "start_index": 0,
+                        "end_index": 6,
+                        "title": "OpenAI",
+                        "url": "https://openai.com"
+                    }]
+                }]
+            }],
+            "usage": {
+                "input_tokens": 10,
+                "input_tokens_details": { "cached_tokens": 0 },
+                "output_tokens": 5,
+                "output_tokens_details": { "reasoning_tokens": 0 },
+                "total_tokens": 15
+            }
+        }))
+        .expect("response should deserialize");
+
+        let llm_response = from_response(&response);
+        let citations = llm_response.citation_metadata.expect("citation metadata should exist");
+        assert_eq!(
+            citations.citation_sources,
+            vec![adk_core::CitationSource {
+                uri: Some("https://openai.com".to_string()),
+                title: Some("OpenAI".to_string()),
+                start_index: Some(0),
+                end_index: Some(6),
+                license: None,
+                publication_date: None,
+            }]
+        );
     }
 
     #[test]
@@ -1770,6 +2179,11 @@ mod tests {
             let llm_response = from_response(&response);
             let metadata = llm_response.provider_metadata.expect("metadata should exist");
             assert_eq!(metadata["openai"]["status"], status_str);
+            assert_eq!(llm_response.error_code.is_none(), status_str == "completed");
+            if status_str != "completed" {
+                assert!(llm_response.finish_reason.is_none());
+                assert!(llm_response.content.is_none());
+            }
         }
     }
 
@@ -1810,5 +2224,106 @@ mod tests {
         assert_eq!(selected.len(), 2);
         assert_eq!(selected[0], "tool_a");
         assert_eq!(selected[1], "tool_b");
+    }
+
+    #[test]
+    fn response_schema_becomes_strict_text_format() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"]
+        });
+        let mut request =
+            LlmRequest::new("gpt-5.6-terra", vec![Content::new("user").with_text("hi")]);
+        request.config =
+            Some(GenerateContentConfig { response_schema: Some(schema), ..Default::default() });
+
+        let body = serde_json::to_value(
+            build_create_response("gpt-5.6-terra", &request, None, None).expect("request builds"),
+        )
+        .expect("request serializes");
+
+        assert_eq!(
+            body["text"]["format"],
+            serde_json::json!({
+                "type": "json_schema",
+                "name": "gpt_5_6_terra",
+                "strict": true,
+                "schema": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"],
+                    "additionalProperties": false
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn thinking_is_replayed_only_as_its_reasoning_item() {
+        let reasoning = serde_json::json!({
+            "type": "reasoning",
+            "id": "rs_1",
+            "summary": [{"type": "summary_text", "text": "Check both cities."}]
+        });
+        let model_turn = Content {
+            role: "model".to_string(),
+            parts: vec![
+                Part::Thinking { thinking: "Check both cities.".to_string(), signature: None },
+                Part::FunctionCall {
+                    name: "get_weather".to_string(),
+                    args: serde_json::json!({"city": "Paris"}),
+                    id: Some("call_1".to_string()),
+                    thought_signature: None,
+                },
+                Part::ServerToolCall { server_tool_call: reasoning },
+            ],
+        };
+
+        let items = serde_json::to_value(contents_to_input_items(&[model_turn])).unwrap();
+
+        let types: Vec<&str> = items
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["type"].as_str().unwrap_or("message"))
+            .collect();
+        assert_eq!(types, vec!["reasoning", "function_call"]);
+    }
+
+    #[test]
+    fn responses_rejects_fields_it_has_no_place_for_and_sends_logprobs() {
+        let request_with = |config: GenerateContentConfig| {
+            let mut request =
+                LlmRequest::new("gpt-5.6-terra", vec![Content::new("user").with_text("hi")]);
+            request.config = Some(config);
+            request
+        };
+        for config in [
+            GenerateContentConfig { stop_sequences: vec!["7".to_string()], ..Default::default() },
+            GenerateContentConfig { seed: Some(1), ..Default::default() },
+            GenerateContentConfig { presence_penalty: Some(0.5), ..Default::default() },
+            GenerateContentConfig { frequency_penalty: Some(0.5), ..Default::default() },
+        ] {
+            let error = build_create_response("gpt-5.6-terra", &request_with(config), None, None)
+                .expect_err("the Responses API has no such field");
+            assert_eq!(error.code, "model.unsupported_config");
+        }
+
+        let body = serde_json::to_value(
+            build_create_response(
+                "gpt-5.6-terra",
+                &request_with(GenerateContentConfig {
+                    top_logprobs: Some(3),
+                    ..Default::default()
+                }),
+                None,
+                None,
+            )
+            .expect("top_logprobs is supported"),
+        )
+        .unwrap();
+        assert_eq!(body["top_logprobs"], 3);
+        assert_eq!(body["include"], serde_json::json!(["message.output_text.logprobs"]));
     }
 }

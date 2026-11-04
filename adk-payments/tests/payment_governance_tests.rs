@@ -1,0 +1,1004 @@
+//! Payment policies run on every checkout creation and completion.
+//!
+//! `PaymentPolicySet`, `AmountThresholdGuardrail`, and `MerchantAllowlistGuardrail` were
+//! defined but never evaluated by the kernel or the payment tools, so a checkout of any
+//! amount at any merchant went through. Completed checkouts were not recorded against a
+//! spend budget either.
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+
+use adk_core::audit_log::{AuditDecision, AuditRecordOutcome, AuditTrail, InMemoryAuditRecorder};
+use adk_core::{
+    AdkError, ApprovalScope, ApprovalStore, ArgPredicate, CallbackContext, Content,
+    DeclarativePolicy, EventActions, InMemoryApprovalStore, InMemorySpendLedger, MemoryEntry,
+    PolicyRule, ReadonlyContext, ReservationId, Result, RunConfig, SpendError, SpendKey,
+    SpendLedger, SpendLimits, SpendPeriod, Tool, ToolApproval, ToolConfirmationDecision,
+    ToolConfirmationHandler, ToolConfirmationRequest, ToolContext,
+};
+use adk_payments::domain::{
+    Cart, CartLine, CommerceActor, CommerceActorRole, CommerceMode, MerchantRef, Money,
+    ProtocolDescriptor, ProtocolExtensions, TransactionId, TransactionRecord,
+};
+use adk_payments::guardrail::PaymentPolicyFinding;
+use adk_payments::guardrail::{
+    AmountThresholdGuardrail, MerchantAllowlistGuardrail, PaymentPolicySet,
+};
+use adk_payments::kernel::{
+    CancelCheckoutCommand, CommerceContext, CompleteCheckoutCommand, CreateCheckoutCommand,
+    GovernedCheckoutService, ListUnresolvedTransactionsRequest, MerchantCheckoutService,
+    OrderUpdateCommand, PAYMENT_APPROVAL_DENIED_CODE, PAYMENT_APPROVAL_EDITED_CODE,
+    PAYMENT_APPROVAL_REQUIRED_CODE, PAYMENT_POLICY_DENIED_CODE, PaymentApproval, PaymentApprover,
+    PaymentCaller, PaymentDecision, TransactionLookup, TransactionStore, UpdateCheckoutCommand,
+};
+use adk_payments::tools::PaymentToolsetBuilder;
+use async_trait::async_trait;
+use serde_json::{Value, json};
+
+// ---------------------------------------------------------------------------
+// Fixtures
+// ---------------------------------------------------------------------------
+
+/// A tool context for agent `shopper` in app `store`, holding every checkout scope.
+struct Caller {
+    run_config: RunConfig,
+    actions: Mutex<EventActions>,
+    content: Content,
+}
+
+impl Caller {
+    fn new(run_config: RunConfig) -> Arc<Self> {
+        Arc::new(Self {
+            run_config,
+            actions: Mutex::new(EventActions::default()),
+            content: Content::new("user"),
+        })
+    }
+}
+
+#[async_trait]
+impl ReadonlyContext for Caller {
+    fn invocation_id(&self) -> &str {
+        "inv-1"
+    }
+    fn agent_name(&self) -> &str {
+        "shopper"
+    }
+    fn user_id(&self) -> &str {
+        "alice"
+    }
+    fn app_name(&self) -> &str {
+        "store"
+    }
+    fn session_id(&self) -> &str {
+        "session-1"
+    }
+    fn branch(&self) -> &str {
+        ""
+    }
+    fn user_content(&self) -> &Content {
+        &self.content
+    }
+}
+
+#[async_trait]
+impl CallbackContext for Caller {
+    fn artifacts(&self) -> Option<Arc<dyn adk_core::Artifacts>> {
+        None
+    }
+}
+
+#[async_trait]
+impl ToolContext for Caller {
+    fn function_call_id(&self) -> &str {
+        "call-1"
+    }
+    fn actions(&self) -> EventActions {
+        self.actions.lock().unwrap().clone()
+    }
+    fn set_actions(&self, actions: EventActions) {
+        *self.actions.lock().unwrap() = actions;
+    }
+    async fn search_memory(&self, _query: &str) -> Result<Vec<MemoryEntry>> {
+        Ok(Vec::new())
+    }
+    fn run_config(&self) -> Option<&RunConfig> {
+        Some(&self.run_config)
+    }
+    fn user_scopes(&self) -> Vec<String> {
+        vec!["payments:checkout:create".to_string(), "payments:checkout:complete".to_string()]
+    }
+}
+
+/// Stores created checkouts and counts completions; fails completions when `fail` is set.
+#[derive(Default)]
+struct MemoryKernel {
+    records: Mutex<HashMap<String, TransactionRecord>>,
+    last_created: Mutex<Option<String>>,
+    completions: AtomicUsize,
+    fail_completion: bool,
+}
+
+fn unused<T>() -> Result<T> {
+    Err(AdkError::tool("not used by this test"))
+}
+
+#[async_trait]
+impl MerchantCheckoutService for MemoryKernel {
+    async fn create_checkout(&self, command: CreateCheckoutCommand) -> Result<TransactionRecord> {
+        let context = command.context;
+        let mut record = TransactionRecord::new(
+            context.transaction_id.clone(),
+            context.actor,
+            context.merchant_of_record,
+            context.mode,
+            command.cart,
+            chrono::Utc::now(),
+        );
+        record.session_identity = context.session_identity;
+        let id = context.transaction_id.as_str().to_string();
+        self.records.lock().unwrap().insert(id.clone(), record.clone());
+        *self.last_created.lock().unwrap() = Some(id);
+        Ok(record)
+    }
+    async fn update_checkout(&self, _command: UpdateCheckoutCommand) -> Result<TransactionRecord> {
+        unused()
+    }
+    async fn get_checkout(&self, lookup: TransactionLookup) -> Result<Option<TransactionRecord>> {
+        Ok(self.records.lock().unwrap().get(lookup.transaction_id.as_str()).cloned())
+    }
+    async fn complete_checkout(
+        &self,
+        command: CompleteCheckoutCommand,
+    ) -> Result<TransactionRecord> {
+        self.completions.fetch_add(1, Ordering::SeqCst);
+        if self.fail_completion {
+            return Err(AdkError::tool("processor declined"));
+        }
+        self.records
+            .lock()
+            .unwrap()
+            .get(command.context.transaction_id.as_str())
+            .cloned()
+            .ok_or_else(|| AdkError::tool("unknown checkout"))
+    }
+    async fn cancel_checkout(&self, _command: CancelCheckoutCommand) -> Result<TransactionRecord> {
+        unused()
+    }
+    async fn apply_order_update(&self, _command: OrderUpdateCommand) -> Result<TransactionRecord> {
+        unused()
+    }
+}
+
+#[async_trait]
+impl TransactionStore for MemoryKernel {
+    async fn upsert(&self, _record: TransactionRecord) -> Result<()> {
+        unused()
+    }
+    async fn get(&self, _lookup: TransactionLookup) -> Result<Option<TransactionRecord>> {
+        unused()
+    }
+    async fn list_unresolved(
+        &self,
+        _request: ListUnresolvedTransactionsRequest,
+    ) -> Result<Vec<TransactionRecord>> {
+        unused()
+    }
+}
+
+/// A ledger whose backing store is down.
+#[derive(Debug)]
+struct UnreachableLedger;
+
+#[async_trait]
+impl SpendLedger for UnreachableLedger {
+    async fn reserve(&self, _key: &SpendKey, _amount: u64) -> Result<ReservationId> {
+        Err(SpendError::Unavailable("connection refused".to_string()).into())
+    }
+    async fn commit(&self, id: ReservationId, _actual: u64) -> Result<()> {
+        Err(SpendError::UnknownReservation(id).into())
+    }
+    async fn release(&self, id: ReservationId) -> Result<()> {
+        Err(SpendError::UnknownReservation(id).into())
+    }
+    async fn spent(&self, _key: &SpendKey, _period: SpendPeriod) -> Result<u64> {
+        Err(SpendError::Unavailable("connection refused".to_string()).into())
+    }
+}
+
+/// Answers every confirmation with `decision` and records the requests.
+#[derive(Debug)]
+struct FixedHandler {
+    decision: ToolConfirmationDecision,
+    requests: Mutex<Vec<ToolConfirmationRequest>>,
+}
+
+#[async_trait]
+impl ToolConfirmationHandler for FixedHandler {
+    async fn decide(&self, request: &ToolConfirmationRequest) -> Result<ToolConfirmationDecision> {
+        self.requests.lock().unwrap().push(request.clone());
+        Ok(self.decision)
+    }
+}
+
+/// Answers every confirmation with `approval` through `decide_approval` (spec 3.1 §10 C3).
+#[derive(Debug)]
+struct EditingHandler {
+    approval: ToolApproval,
+    requests: Mutex<Vec<ToolConfirmationRequest>>,
+}
+
+#[async_trait]
+impl ToolConfirmationHandler for EditingHandler {
+    async fn decide(&self, _request: &ToolConfirmationRequest) -> Result<ToolConfirmationDecision> {
+        Ok(self.approval.decision)
+    }
+
+    async fn decide_approval(&self, request: &ToolConfirmationRequest) -> Result<ToolApproval> {
+        self.requests.lock().unwrap().push(request.clone());
+        Ok(self.approval.clone())
+    }
+}
+
+fn usd(cents: i64) -> Money {
+    Money::new("USD", cents, 2)
+}
+
+fn create_args(merchant: &str, total: Money) -> Value {
+    json!({ "merchantId": merchant, "merchantName": "Merchant", "cart": cart(total) })
+}
+
+fn cart(total: Money) -> Value {
+    serde_json::to_value(Cart {
+        cart_id: None,
+        lines: vec![CartLine {
+            line_id: "line-1".to_string(),
+            merchant_sku: None,
+            title: "Widget".to_string(),
+            quantity: 1,
+            unit_price: total.clone(),
+            total_price: total.clone(),
+            product_class: None,
+            extensions: ProtocolExtensions::default(),
+        }],
+        subtotal: Some(total.clone()),
+        adjustments: Vec::new(),
+        total,
+        affiliate_attribution: None,
+        extensions: ProtocolExtensions::default(),
+    })
+    .unwrap()
+}
+
+struct Shop {
+    kernel: Arc<MemoryKernel>,
+    create: Arc<dyn Tool>,
+    complete: Arc<dyn Tool>,
+}
+
+impl Shop {
+    fn new(kernel: MemoryKernel, policies: PaymentPolicySet) -> Self {
+        let kernel = Arc::new(kernel);
+        let tools = PaymentToolsetBuilder::new(kernel.clone(), kernel.clone())
+            .with_payment_policies(policies)
+            .build()
+            .tools();
+        let find = |name: &str| tools.iter().find(|tool| tool.name() == name).unwrap().clone();
+        Self {
+            create: find("payments_checkout_create"),
+            complete: find("payments_checkout_complete"),
+            kernel,
+        }
+    }
+
+    async fn create(&self, caller: &Arc<Caller>, merchant: &str, total: Money) -> Result<Value> {
+        self.create.execute(caller.clone(), create_args(merchant, total)).await
+    }
+
+    /// The total of every checkout the backend created, in cents.
+    fn created_totals(&self) -> Vec<i64> {
+        let mut totals: Vec<i64> = self
+            .kernel
+            .records
+            .lock()
+            .unwrap()
+            .values()
+            .map(|record| record.cart.total.amount_minor)
+            .collect();
+        totals.sort_unstable();
+        totals
+    }
+
+    async fn complete_last(&self, caller: &Arc<Caller>) -> Result<Value> {
+        let id = self.kernel.last_created.lock().unwrap().clone().expect("a checkout exists");
+        self.complete.execute(caller.clone(), json!({ "transactionId": id })).await
+    }
+
+    /// Creates a checkout at `merchant-1` and completes it.
+    async fn buy(&self, caller: &Arc<Caller>, total: Money) -> Result<Value> {
+        self.create(caller, "merchant-1", total).await?;
+        self.complete_last(caller).await
+    }
+}
+
+fn daily_ledger(max_micro_usd: u64) -> Arc<InMemorySpendLedger> {
+    Arc::new(InMemorySpendLedger::new(
+        SpendLimits::new().limit(SpendKey::org("store").per(SpendPeriod::Day), max_micro_usd),
+    ))
+}
+
+async fn spent(ledger: &InMemorySpendLedger, key: SpendKey) -> u64 {
+    ledger.spent(&key, SpendPeriod::Day).await.unwrap()
+}
+
+// ---------------------------------------------------------------------------
+// Policy outcomes through the payment tools
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_payment_over_the_hard_limit_is_denied() {
+    let shop = Shop::new(
+        MemoryKernel::default(),
+        PaymentPolicySet::new()
+            .with(AmountThresholdGuardrail::new(None, Some(10_000)).with_currency("USD", 2)),
+    );
+    let caller = Caller::new(RunConfig::default());
+
+    let error = shop.create(&caller, "merchant-1", usd(15_000)).await.unwrap_err();
+
+    assert_eq!(error.code, PAYMENT_POLICY_DENIED_CODE, "{error}");
+    assert!(error.message.contains("hard limit"), "{error}");
+    assert!(shop.kernel.records.lock().unwrap().is_empty(), "the backend must not be reached");
+}
+
+#[tokio::test]
+async fn a_merchant_outside_the_allowlist_is_denied() {
+    let shop = Shop::new(
+        MemoryKernel::default(),
+        PaymentPolicySet::new().with(MerchantAllowlistGuardrail::new(["merchant-allowed"])),
+    );
+    let caller = Caller::new(RunConfig::default());
+
+    let error = shop.create(&caller, "merchant-1", usd(500)).await.unwrap_err();
+
+    assert_eq!(error.code, PAYMENT_POLICY_DENIED_CODE, "{error}");
+    assert!(error.message.contains("merchant_allowlist"), "{error}");
+    shop.create(&caller, "merchant-allowed", usd(500)).await.expect("listed merchant passes");
+}
+
+#[tokio::test]
+async fn completion_is_judged_on_the_stored_checkout() {
+    // The checkout passes at creation; the policy changes before it is completed.
+    let kernel = Arc::new(MemoryKernel::default());
+    let lenient = GovernedCheckoutService::new(kernel.clone(), PaymentPolicySet::new());
+    let strict = GovernedCheckoutService::new(
+        kernel.clone(),
+        PaymentPolicySet::new().with(AmountThresholdGuardrail::new(None, Some(1_000))),
+    );
+    let context = CommerceContext {
+        transaction_id: TransactionId::from("tx-1"),
+        session_identity: None,
+        actor: CommerceActor {
+            actor_id: "shopper".to_string(),
+            role: CommerceActorRole::AgentSurface,
+            display_name: None,
+            tenant_id: None,
+            extensions: ProtocolExtensions::default(),
+        },
+        merchant_of_record: MerchantRef {
+            merchant_id: "merchant-1".to_string(),
+            legal_name: "Merchant".to_string(),
+            display_name: None,
+            statement_descriptor: None,
+            country_code: None,
+            website: None,
+            extensions: ProtocolExtensions::default(),
+        },
+        payment_processor: None,
+        mode: CommerceMode::HumanPresent,
+        protocol: ProtocolDescriptor::acp("2026-01-30"),
+        extensions: ProtocolExtensions::default(),
+    };
+    lenient
+        .create_checkout(CreateCheckoutCommand {
+            context: context.clone(),
+            cart: serde_json::from_value(cart(usd(5_000))).unwrap(),
+            fulfillment: None,
+        })
+        .await
+        .unwrap();
+
+    let error = strict
+        .complete_checkout(CompleteCheckoutCommand {
+            context,
+            selected_payment_method: None,
+            extensions: ProtocolExtensions::default(),
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code, PAYMENT_POLICY_DENIED_CODE, "{error}");
+    assert_eq!(kernel.completions.load(Ordering::SeqCst), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Escalations reach the tool confirmation flow
+// ---------------------------------------------------------------------------
+
+fn review_above_fifty_dollars() -> PaymentPolicySet {
+    PaymentPolicySet::new()
+        .with(AmountThresholdGuardrail::new(Some(5_000), None).with_currency("USD", 2))
+}
+
+#[tokio::test]
+async fn an_escalation_without_a_decision_requests_confirmation() {
+    let shop = Shop::new(MemoryKernel::default(), review_above_fifty_dollars());
+    let caller = Caller::new(RunConfig::default());
+
+    let error = shop.create(&caller, "merchant-1", usd(7_500)).await.unwrap_err();
+
+    assert_eq!(error.code, PAYMENT_APPROVAL_REQUIRED_CODE, "{error}");
+    let request = caller.actions().tool_confirmation.expect("the event asks for confirmation");
+    assert_eq!(request.tool_name, "payments_checkout_create");
+    assert_eq!(request.function_call_id.as_deref(), Some("call-1"));
+    assert!(shop.kernel.records.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn the_confirmation_handler_decides_an_escalation() {
+    let approving = Arc::new(FixedHandler {
+        decision: ToolConfirmationDecision::Approve,
+        requests: Mutex::new(Vec::new()),
+    });
+    let shop = Shop::new(MemoryKernel::default(), review_above_fifty_dollars());
+    let caller =
+        Caller::new(RunConfig::builder().tool_confirmation_handler(approving.clone()).build());
+    shop.create(&caller, "merchant-1", usd(7_500)).await.expect("the handler approves");
+    assert_eq!(approving.requests.lock().unwrap().len(), 1);
+
+    let denying = Arc::new(FixedHandler {
+        decision: ToolConfirmationDecision::Deny,
+        requests: Mutex::new(Vec::new()),
+    });
+    let caller = Caller::new(RunConfig::builder().tool_confirmation_handler(denying).build());
+    let error = shop.create(&caller, "merchant-1", usd(7_500)).await.unwrap_err();
+    assert_eq!(error.code, PAYMENT_APPROVAL_DENIED_CODE, "{error}");
+}
+
+#[tokio::test]
+async fn a_static_decision_for_the_call_approves_an_escalation() {
+    let shop = Shop::new(MemoryKernel::default(), review_above_fifty_dollars());
+    let caller = Caller::new(
+        RunConfig::builder()
+            .tool_confirmation_decisions(HashMap::from([(
+                "call-1".to_string(),
+                ToolConfirmationDecision::Approve,
+            )]))
+            .build(),
+    );
+    shop.create(&caller, "merchant-1", usd(7_500)).await.expect("the call was approved");
+}
+
+fn store_scope() -> ApprovalScope {
+    ApprovalScope::new("store", "alice", "session-1")
+}
+
+#[tokio::test]
+async fn an_escalation_without_a_decision_is_recorded_in_the_approval_store() {
+    let shop = Shop::new(MemoryKernel::default(), review_above_fifty_dollars());
+    let store = Arc::new(InMemoryApprovalStore::new());
+    let caller = Caller::new(RunConfig::builder().approval_store(store.clone()).build());
+
+    let error = shop.create(&caller, "merchant-1", usd(7_500)).await.unwrap_err();
+
+    assert_eq!(error.code, PAYMENT_APPROVAL_REQUIRED_CODE, "{error}");
+    let held = caller.actions().tool_confirmation.expect("the event asks for confirmation");
+    let pending = store.pending(&store_scope()).await.unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].fingerprint, held.fingerprint());
+    assert_eq!(pending[0].request, held);
+    assert!(held.origin.is_some(), "the request names the tool's origin");
+}
+
+#[tokio::test]
+async fn an_approval_store_decision_approves_an_escalation_once() {
+    let shop = Shop::new(MemoryKernel::default(), review_above_fifty_dollars());
+    let store = Arc::new(InMemoryApprovalStore::new());
+    let caller = Caller::new(RunConfig::builder().approval_store(store.clone()).build());
+    shop.create(&caller, "merchant-1", usd(7_500)).await.unwrap_err();
+    let held = caller.actions().tool_confirmation.unwrap();
+
+    store.decide(&store_scope(), &held.fingerprint(), ToolApproval::approve()).await.unwrap();
+    shop.create(&caller, "merchant-1", usd(7_500)).await.expect("the approver approved");
+    assert_eq!(shop.kernel.records.lock().unwrap().len(), 1);
+    assert!(store.pending(&store_scope()).await.unwrap().is_empty());
+
+    // The approval was consumed, so the same payment again needs a new one.
+    let error = shop.create(&caller, "merchant-1", usd(7_500)).await.unwrap_err();
+    assert_eq!(error.code, PAYMENT_APPROVAL_REQUIRED_CODE, "{error}");
+}
+
+#[tokio::test]
+async fn an_approval_store_denial_refuses_an_escalation() {
+    let shop = Shop::new(MemoryKernel::default(), review_above_fifty_dollars());
+    let store = Arc::new(InMemoryApprovalStore::new());
+    let caller = Caller::new(RunConfig::builder().approval_store(store.clone()).build());
+    shop.create(&caller, "merchant-1", usd(7_500)).await.unwrap_err();
+    let held = caller.actions().tool_confirmation.unwrap();
+
+    store.decide(&store_scope(), &held.fingerprint(), ToolApproval::deny()).await.unwrap();
+    let error = shop.create(&caller, "merchant-1", usd(7_500)).await.unwrap_err();
+    assert_eq!(error.code, PAYMENT_APPROVAL_DENIED_CODE, "{error}");
+    assert!(shop.kernel.records.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_fingerprint_approval_approves_an_escalation() {
+    let shop = Shop::new(MemoryKernel::default(), review_above_fifty_dollars());
+    let probe = Caller::new(RunConfig::default());
+    shop.create(&probe, "merchant-1", usd(7_500)).await.unwrap_err();
+    let fingerprint = probe.actions().tool_confirmation.unwrap().fingerprint();
+
+    let caller = Caller::new(
+        RunConfig::builder().tool_approval(fingerprint, ToolApproval::approve()).build(),
+    );
+    shop.create(&caller, "merchant-1", usd(7_500)).await.expect("the fingerprint is approved");
+}
+
+#[tokio::test]
+async fn an_approval_for_another_agent_does_not_approve_an_escalation() {
+    let shop = Shop::new(MemoryKernel::default(), review_above_fifty_dollars());
+    let store = Arc::new(InMemoryApprovalStore::new());
+    let caller = Caller::new(RunConfig::builder().approval_store(store.clone()).build());
+    shop.create(&caller, "merchant-1", usd(7_500)).await.unwrap_err();
+    let held = caller.actions().tool_confirmation.unwrap();
+
+    let other_agent = held.clone().with_acting_context(adk_core::ActingContext::new(
+        adk_core::AgentPrincipal::derived("store", "another-agent"),
+    ));
+    store
+        .decide(&store_scope(), &other_agent.fingerprint(), ToolApproval::approve())
+        .await
+        .unwrap();
+
+    let error = shop.create(&caller, "merchant-1", usd(7_500)).await.unwrap_err();
+    assert_eq!(error.code, PAYMENT_APPROVAL_REQUIRED_CODE, "{error}");
+    assert!(shop.kernel.records.lock().unwrap().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Edited approvals and approver messages (spec 3.1 §10 C3)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn an_approval_that_edits_the_cart_pays_the_edited_cart_once() {
+    let shop = Shop::new(MemoryKernel::default(), review_above_fifty_dollars());
+    let store = Arc::new(InMemoryApprovalStore::new());
+    let caller = Caller::new(RunConfig::builder().approval_store(store.clone()).build());
+    shop.create(&caller, "merchant-1", usd(7_500)).await.unwrap_err();
+    let held = caller.actions().tool_confirmation.unwrap();
+
+    // The approver brings the amount under the review threshold.
+    let edited = ToolApproval::approve()
+        .with_edited_args(create_args("merchant-1", usd(4_000)))
+        .with_message("approved at 40 USD");
+    store.decide(&store_scope(), &held.fingerprint(), edited).await.unwrap();
+    let response = shop.create(&caller, "merchant-1", usd(7_500)).await.expect("paid as edited");
+
+    assert_eq!(response["status"], "ok", "{response}");
+    assert_eq!(shop.created_totals(), vec![4_000], "the edited cart is paid, once");
+    assert!(store.pending(&store_scope()).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn an_edited_approval_still_over_the_threshold_pays_once_without_asking_again() {
+    let shop = Shop::new(MemoryKernel::default(), review_above_fifty_dollars());
+    let store = Arc::new(InMemoryApprovalStore::new());
+    let caller = Caller::new(RunConfig::builder().approval_store(store.clone()).build());
+    shop.create(&caller, "merchant-1", usd(7_500)).await.unwrap_err();
+    let held = caller.actions().tool_confirmation.unwrap();
+
+    // 60 USD still escalates; the approval that edited the cart answers that escalation.
+    let edited = ToolApproval::approve().with_edited_args(create_args("merchant-1", usd(6_000)));
+    store.decide(&store_scope(), &held.fingerprint(), edited).await.unwrap();
+    shop.create(&caller, "merchant-1", usd(7_500)).await.expect("paid as edited");
+
+    assert_eq!(shop.created_totals(), vec![6_000]);
+    assert!(store.pending(&store_scope()).await.unwrap().is_empty(), "no second hold");
+}
+
+#[tokio::test]
+async fn a_handler_that_edits_the_amount_pays_the_edited_amount() {
+    let editing = Arc::new(EditingHandler {
+        approval: ToolApproval::approve()
+            .with_edited_args(create_args("merchant-1", usd(4_500)))
+            .with_message("reduced to 45 USD"),
+        requests: Mutex::new(Vec::new()),
+    });
+    let shop = Shop::new(MemoryKernel::default(), review_above_fifty_dollars());
+    let caller =
+        Caller::new(RunConfig::builder().tool_confirmation_handler(editing.clone()).build());
+
+    shop.create(&caller, "merchant-1", usd(7_500)).await.expect("the handler approved an edit");
+
+    assert_eq!(shop.created_totals(), vec![4_500]);
+    assert_eq!(editing.requests.lock().unwrap().len(), 1, "the handler decided once");
+}
+
+#[tokio::test]
+async fn edited_arguments_the_run_policy_denies_pay_nothing() {
+    let shop = Shop::new(MemoryKernel::default(), review_above_fifty_dollars());
+    let store = Arc::new(InMemoryApprovalStore::new());
+    let policy = DeclarativePolicy::builder()
+        .rule(
+            PolicyRule::deny("payments_*", "merchant-2 is blocked")
+                .when(ArgPredicate::equals("/merchantId", json!("merchant-2"))),
+        )
+        .allow("payments_*")
+        .build();
+    let caller = Caller::new(
+        RunConfig::builder().approval_store(store.clone()).tool_policy(Arc::new(policy)).build(),
+    );
+    shop.create(&caller, "merchant-1", usd(7_500)).await.unwrap_err();
+    let held = caller.actions().tool_confirmation.unwrap();
+
+    let edited = ToolApproval::approve().with_edited_args(create_args("merchant-2", usd(4_000)));
+    store.decide(&store_scope(), &held.fingerprint(), edited).await.unwrap();
+    let error = shop.create(&caller, "merchant-1", usd(7_500)).await.unwrap_err();
+
+    assert_eq!(error.code, "payments.policy.edited_args_denied", "{error}");
+    assert!(error.message.contains("merchant-2 is blocked"), "{error}");
+    assert!(shop.kernel.records.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn an_approver_message_is_reported_with_a_denial_and_recorded_with_an_approval() {
+    let recorder = Arc::new(InMemoryAuditRecorder::new());
+    let trail = AuditTrail::new(recorder.clone());
+    let shop = Shop::new(MemoryKernel::default(), review_above_fifty_dollars());
+    let store = Arc::new(InMemoryApprovalStore::new());
+    let caller = Caller::new(
+        RunConfig::builder().approval_store(store.clone()).audit(trail.clone()).build(),
+    );
+    shop.create(&caller, "merchant-1", usd(7_500)).await.unwrap_err();
+    let held = caller.actions().tool_confirmation.unwrap();
+
+    let denial = ToolApproval::deny().with_message("not this quarter");
+    store.decide(&store_scope(), &held.fingerprint(), denial).await.unwrap();
+    let error = shop.create(&caller, "merchant-1", usd(7_500)).await.unwrap_err();
+    assert_eq!(error.code, PAYMENT_APPROVAL_DENIED_CODE, "{error}");
+    assert!(error.message.contains("not this quarter"), "{error}");
+    assert_eq!(error.details.metadata["approverMessage"], json!("not this quarter"));
+    let rejected = recorder
+        .records()
+        .into_iter()
+        .find(|record| record.decision == Some(AuditDecision::Rejected))
+        .expect("the refusal is audited");
+    assert_eq!(rejected.ext["approverMessage"], json!("not this quarter"));
+
+    shop.create(&caller, "merchant-1", usd(7_500)).await.unwrap_err();
+    let held = caller.actions().tool_confirmation.unwrap();
+    let edited = ToolApproval::approve()
+        .with_edited_args(create_args("merchant-1", usd(4_000)))
+        .with_message("approved at 40 USD");
+    store.decide(&store_scope(), &held.fingerprint(), edited).await.unwrap();
+    shop.create(&caller, "merchant-1", usd(7_500)).await.expect("paid as edited");
+
+    let approved = recorder
+        .records()
+        .into_iter()
+        .find(|record| record.decision == Some(AuditDecision::Approved))
+        .expect("the edited approval is audited");
+    assert_eq!(approved.outcome, Some(AuditRecordOutcome::NotRun), "not run as proposed");
+    assert_eq!(approved.ext["approverMessage"], json!("approved at 40 USD"));
+    assert_eq!(
+        approved.ext["editedArgsDigest"],
+        json!(trail.digest(&create_args("merchant-1", usd(4_000))))
+    );
+    assert!(
+        recorder.records().iter().any(|record| record.decision == Some(AuditDecision::Allowed)),
+        "the re-issued payment is audited as allowed"
+    );
+}
+
+/// Approves every escalation with substituted arguments, outside any tool call.
+struct EditingApprover(Value);
+
+#[async_trait]
+impl PaymentApprover for EditingApprover {
+    async fn approve(
+        &self,
+        _record: &TransactionRecord,
+        _findings: &[PaymentPolicyFinding],
+    ) -> Result<PaymentApproval> {
+        Ok(PaymentApproval::Approved)
+    }
+
+    async fn decide(
+        &self,
+        _record: &TransactionRecord,
+        _findings: &[PaymentPolicyFinding],
+    ) -> Result<PaymentDecision> {
+        Ok(PaymentDecision::new(PaymentApproval::Approved).with_edited_args(self.0.clone()))
+    }
+}
+
+#[tokio::test]
+async fn the_governed_service_reports_an_edited_approval_for_the_caller_to_re_issue() {
+    let kernel = Arc::new(MemoryKernel::default());
+    let service = GovernedCheckoutService::new(kernel.clone(), review_above_fifty_dollars());
+    let caller = PaymentCaller::new()
+        .with_org("store")
+        .with_agent("shopper")
+        .with_approver(Arc::new(EditingApprover(json!({ "amount": 40 }))));
+    let command = CreateCheckoutCommand {
+        context: CommerceContext {
+            transaction_id: TransactionId::from("tx-1"),
+            session_identity: None,
+            actor: CommerceActor {
+                actor_id: "shopper".to_string(),
+                role: CommerceActorRole::AgentSurface,
+                display_name: None,
+                tenant_id: None,
+                extensions: ProtocolExtensions::default(),
+            },
+            merchant_of_record: MerchantRef {
+                merchant_id: "merchant-1".to_string(),
+                legal_name: "Merchant".to_string(),
+                display_name: None,
+                statement_descriptor: None,
+                country_code: None,
+                website: None,
+                extensions: ProtocolExtensions::default(),
+            },
+            payment_processor: None,
+            mode: CommerceMode::HumanPresent,
+            protocol: ProtocolDescriptor::new("test", None),
+            extensions: ProtocolExtensions::default(),
+        },
+        cart: serde_json::from_value(cart(usd(7_500))).unwrap(),
+        fulfillment: None,
+    };
+
+    let error = service.create_checkout_as(command, &caller).await.unwrap_err();
+
+    assert_eq!(error.code, PAYMENT_APPROVAL_EDITED_CODE, "{error}");
+    assert_eq!(error.details.metadata["editedArgs"], json!({ "amount": 40 }));
+    assert!(kernel.records.lock().unwrap().is_empty(), "nothing is paid as proposed");
+}
+
+// ---------------------------------------------------------------------------
+// Spend ledger
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_daily_spend_cap_spans_two_checkouts() {
+    let ledger = daily_ledger(100_000_000);
+    let shop = Shop::new(MemoryKernel::default(), PaymentPolicySet::new());
+    let caller = Caller::new(RunConfig::builder().spend_ledger(ledger.clone()).build());
+
+    shop.buy(&caller, usd(6_000)).await.expect("60 USD fits under the 100 USD cap");
+    assert_eq!(
+        spent(
+            &ledger,
+            SpendKey::org("store")
+                .with_agent("urn:adk:agent:store/shopper")
+                .with_vendor("merchant-1")
+        )
+        .await,
+        60_000_000
+    );
+
+    let error = shop.buy(&caller, usd(5_000)).await.unwrap_err();
+    assert_eq!(error.code, PAYMENT_POLICY_DENIED_CODE, "{error}");
+    assert!(error.message.contains("spend limit exceeded"), "{error}");
+    assert_eq!(shop.kernel.completions.load(Ordering::SeqCst), 1);
+    assert_eq!(spent(&ledger, SpendKey::org("store")).await, 60_000_000);
+}
+
+#[tokio::test]
+async fn a_failed_completion_releases_its_hold() {
+    let ledger = daily_ledger(100_000_000);
+    let shop = Shop::new(
+        MemoryKernel { fail_completion: true, ..MemoryKernel::default() },
+        PaymentPolicySet::new(),
+    );
+    let caller = Caller::new(RunConfig::builder().spend_ledger(ledger.clone()).build());
+
+    let error = shop.buy(&caller, usd(9_000)).await.unwrap_err();
+
+    assert!(error.message.contains("processor declined"), "{error}");
+    assert_eq!(spent(&ledger, SpendKey::org("store")).await, 0);
+    ledger
+        .reserve(&SpendKey::org("store"), 100_000_000)
+        .await
+        .expect("the released hold leaves the whole cap");
+}
+
+#[tokio::test]
+async fn an_unreachable_ledger_fails_closed() {
+    let shop = Shop::new(MemoryKernel::default(), PaymentPolicySet::new());
+    let caller =
+        Caller::new(RunConfig::builder().spend_ledger(Arc::new(UnreachableLedger)).build());
+
+    let error = shop.buy(&caller, usd(100)).await.unwrap_err();
+
+    assert_eq!(error.code, PAYMENT_POLICY_DENIED_CODE, "{error}");
+    assert!(error.message.contains("unreachable"), "{error}");
+    assert_eq!(shop.kernel.completions.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn an_explicit_spend_guardrail_without_a_ledger_fails_closed() {
+    let shop = Shop::new(
+        MemoryKernel::default(),
+        PaymentPolicySet::new().with(adk_payments::guardrail::SpendLimitGuardrail::new()),
+    );
+    let caller = Caller::new(RunConfig::default());
+
+    let error = shop.buy(&caller, usd(100)).await.unwrap_err();
+
+    assert_eq!(error.code, PAYMENT_POLICY_DENIED_CODE, "{error}");
+    assert_eq!(shop.kernel.completions.load(Ordering::SeqCst), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Audit
+// ---------------------------------------------------------------------------
+
+/// An audit sink whose storage is down.
+struct DownSink;
+
+#[async_trait]
+impl adk_auth::AuditSink for DownSink {
+    async fn log(
+        &self,
+        _event: adk_auth::AuditEvent,
+    ) -> std::result::Result<(), adk_auth::AuthError> {
+        Err(adk_auth::AuthError::AuditError("disk full".to_string()))
+    }
+}
+
+#[tokio::test]
+async fn an_audit_write_failure_blocks_a_governed_completion() {
+    let kernel = Arc::new(MemoryKernel::default());
+    let ledger = daily_ledger(100_000_000);
+    let lenient = GovernedCheckoutService::new(kernel.clone(), PaymentPolicySet::new());
+    let audited = GovernedCheckoutService::new(kernel.clone(), PaymentPolicySet::new())
+        .with_spend_ledger(ledger.clone())
+        .with_auditor(adk_payments::auth::PaymentAuditor::new(Arc::new(DownSink)));
+    let caller = adk_payments::kernel::PaymentCaller::new().with_org("store").with_agent("shopper");
+    let context = CommerceContext {
+        transaction_id: TransactionId::from("tx-audit"),
+        session_identity: None,
+        actor: CommerceActor {
+            actor_id: "shopper".to_string(),
+            role: CommerceActorRole::AgentSurface,
+            display_name: None,
+            tenant_id: None,
+            extensions: ProtocolExtensions::default(),
+        },
+        merchant_of_record: MerchantRef {
+            merchant_id: "merchant-1".to_string(),
+            legal_name: "Merchant".to_string(),
+            display_name: None,
+            statement_descriptor: None,
+            country_code: None,
+            website: None,
+            extensions: ProtocolExtensions::default(),
+        },
+        payment_processor: None,
+        mode: CommerceMode::HumanPresent,
+        protocol: ProtocolDescriptor::acp("2026-01-30"),
+        extensions: ProtocolExtensions::default(),
+    };
+    lenient
+        .create_checkout(CreateCheckoutCommand {
+            context: context.clone(),
+            cart: serde_json::from_value(cart(usd(2_000))).unwrap(),
+            fulfillment: None,
+        })
+        .await
+        .unwrap();
+
+    let error = audited
+        .complete_checkout_as(
+            CompleteCheckoutCommand {
+                context,
+                selected_payment_method: None,
+                extensions: ProtocolExtensions::default(),
+            },
+            &caller,
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code, "payments.auth.audit_failed", "{error}");
+    assert_eq!(kernel.completions.load(Ordering::SeqCst), 0);
+    assert_eq!(spent(&ledger, SpendKey::org("store")).await, 0);
+    ledger.reserve(&SpendKey::org("store"), 100_000_000).await.expect("the hold was released");
+}
+
+// ---------------------------------------------------------------------------
+// The run's audit trail
+// ---------------------------------------------------------------------------
+
+/// Fails every write, as an unreachable audit store does.
+struct BrokenRecorder;
+
+#[async_trait]
+impl adk_core::audit_log::AuditRecorder for BrokenRecorder {
+    fn digest(&self, value: &Value) -> String {
+        adk_core::json_digest(value)
+    }
+
+    async fn record(&self, _draft: adk_core::audit_log::AuditRecordDraft) -> Result<()> {
+        Err(AdkError::session("audit store unreachable"))
+    }
+}
+
+fn audited_run(recorder: Arc<dyn adk_core::audit_log::AuditRecorder>) -> RunConfig {
+    RunConfig::builder().audit(adk_core::audit_log::AuditTrail::new(recorder)).build()
+}
+
+#[tokio::test]
+async fn the_payment_tools_record_each_decision_and_outcome_in_the_run_audit_trail() {
+    use adk_core::audit_log::{AuditDecision, AuditRecordKind, AuditRecordOutcome};
+
+    let shop = Shop::new(
+        MemoryKernel::default(),
+        PaymentPolicySet::new().with(MerchantAllowlistGuardrail::new(["merchant-1"])),
+    );
+    let recorder = adk_core::audit_log::InMemoryAuditRecorder::new();
+    let caller = Caller::new(audited_run(Arc::new(recorder.clone())));
+
+    shop.buy(&caller, usd(2_000)).await.unwrap();
+    shop.create(&caller, "merchant-2", usd(500)).await.unwrap_err();
+
+    let records = recorder.records();
+    let summary: Vec<_> =
+        records.iter().map(|r| (r.action.as_str(), r.decision, r.outcome)).collect();
+    assert_eq!(
+        summary,
+        vec![
+            ("payment.create_checkout", Some(AuditDecision::Allowed), None),
+            ("payment.create_checkout", None, Some(AuditRecordOutcome::Succeeded)),
+            ("payment.complete_checkout", Some(AuditDecision::Allowed), None),
+            ("payment.complete_checkout", None, Some(AuditRecordOutcome::Succeeded)),
+            (
+                "payment.create_checkout",
+                Some(AuditDecision::Denied),
+                Some(AuditRecordOutcome::NotRun)
+            ),
+        ]
+    );
+    for record in &records {
+        assert_eq!(record.kind, AuditRecordKind::Payment);
+        assert_eq!(record.policy_ref.as_deref(), Some("payment_policy"));
+        assert_eq!(
+            record.actor.agent.as_ref().map(|id| id.as_str()),
+            Some("urn:adk:agent:store/shopper")
+        );
+        assert_eq!(
+            record.actor.on_behalf_of,
+            Some(adk_core::principal::SubjectRef::human("alice"))
+        );
+        let digest = record.args_digest.as_deref().unwrap_or_default();
+        assert!(digest.starts_with("fnv1a128:"), "the cart is digested: {digest}");
+        assert!(!serde_json::to_string(&record.ext).unwrap().contains("Widget"));
+    }
+    assert_eq!(records[2].ext["amountMinor"], json!(2_000));
+    assert_eq!(records[4].ext["guardrails"], json!(["merchant_allowlist"]));
+}
+
+#[tokio::test]
+async fn an_unrecordable_payment_never_reaches_the_backend() {
+    let shop = Shop::new(MemoryKernel::default(), PaymentPolicySet::new());
+    let caller = Caller::new(audited_run(Arc::new(BrokenRecorder)));
+
+    let error = shop.create(&caller, "merchant-1", usd(500)).await.unwrap_err();
+
+    assert_eq!(error.code, "audit.record_failed", "{error}");
+    assert!(shop.kernel.records.lock().unwrap().is_empty(), "the backend must not be reached");
+}

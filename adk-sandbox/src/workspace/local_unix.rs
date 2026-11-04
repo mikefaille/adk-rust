@@ -2,6 +2,20 @@
 //!
 //! Provisions workspaces as temporary directories on the local filesystem,
 //! executes commands via child processes, and snapshots via tar archives.
+//!
+//! ## Isolation
+//!
+//! Commands run as ordinary host processes with the workspace as their working
+//! directory. They are **not** confined to the workspace: the filesystem and
+//! network are the host's. What the session does enforce:
+//!
+//! | Control | Behaviour |
+//! |---------|-----------|
+//! | Environment | Cleared, then only `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TZ`, `TMPDIR`, and `TERM` are passed through, so host credentials in other variables never reach the command |
+//! | Output | stdout and stderr are read while the command runs and capped at 1 MiB each; the excess is drained and a truncation notice appended |
+//! | Stdin | Connected to `/dev/null` |
+//! | Lifetime | Each command runs in its own process group, which is killed on timeout and again when the command exits, so background jobs do not outlive it |
+//! | File operations | `read_file`, `write_file`, `list_dir`, `apply_patch` headers, and the working directory resolve inside the workspace, following symlinks only within it; a hard-linked file is replaced on write, not truncated |
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -12,10 +26,11 @@ use tokio::sync::RwLock;
 
 use super::client::SandboxClient;
 use super::manifest::{Manifest, ManifestEntry};
-use super::path_safety::validate_relative_path;
+use super::path_safety::{patch_target_paths, resolve_in_root, write_in_root};
 use super::session::SandboxSession;
 use super::types::{DirEntry, EntryType, ExecOutput, SessionHandle, SnapshotId};
 use crate::SandboxError;
+use crate::child_io::{collect_output, note_truncation, truncate_utf8};
 
 /// SandboxClient implementation using local filesystem directories.
 ///
@@ -63,11 +78,23 @@ impl LocalUnixClient {
 /// Default command timeout (120 seconds).
 const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// Host variables a workspace command inherits; every other variable is cleared.
+///
+/// `PATH` finds tools, locale and terminal settings keep their output stable, and `HOME` and
+/// `TMPDIR` give them somewhere for caches. Credentials such as API keys are not listed.
+const INHERITED_ENV_KEYS: &[&str] =
+    &["PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "TERM"];
+
+/// Maximum bytes retained from each of stdout and stderr (1 MiB).
+const MAX_OUTPUT_BYTES: usize = 1_024 * 1_024;
+
 /// A live sandbox session backed by a local Unix filesystem directory.
 ///
 /// Provides workspace operations (exec, read, write, list, patch) against
 /// a local directory. Commands are executed via child processes with
-/// configurable timeouts.
+/// configurable timeouts, a cleared environment, capped output, and
+/// process-group cleanup; see the [module documentation](self) for what is and
+/// is not isolated.
 ///
 /// # Example
 ///
@@ -113,70 +140,71 @@ impl SandboxSession for LocalUnixSession {
         working_dir: Option<&str>,
     ) -> Result<ExecOutput, SandboxError> {
         let cwd = match working_dir {
-            Some(dir) => {
-                validate_relative_path(dir)?;
-                self.workspace_dir.join(dir)
-            }
+            Some(dir) => resolve_in_root(&self.workspace_dir, dir)?,
             None => self.workspace_dir.clone(),
         };
 
-        let start = std::time::Instant::now();
-
-        let mut child = tokio::process::Command::new("sh")
-            .arg("-c")
-            .arg(command)
-            .current_dir(&cwd)
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c").arg(command).current_dir(&cwd).env_clear();
+        for key in INHERITED_ENV_KEYS {
+            if let Some(value) = std::env::var_os(key) {
+                cmd.env(key, value);
+            }
+        }
+        cmd.stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        // Killing `sh` alone on timeout left its children running; the group takes them too.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.as_std_mut().process_group(0);
+        }
+
+        let start = std::time::Instant::now();
+        let child = cmd
             .spawn()
             .map_err(|e| SandboxError::ExecutionFailed(format!("failed to spawn command: {e}")))?;
 
-        // Take stdout/stderr handles before waiting so we can still kill on timeout
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
+        // The pipes are drained while the command runs. Reading them only after `wait`
+        // deadlocked any command that wrote more than a pipe buffer, which then surfaced as a
+        // timeout.
+        let captured = collect_output(child, None, self.command_timeout, MAX_OUTPUT_BYTES)
+            .await
+            .map_err(|e| SandboxError::ExecutionFailed(format!("command execution failed: {e}")))?;
+        let duration = start.elapsed();
 
-        match tokio::time::timeout(self.command_timeout, child.wait()).await {
-            Ok(Ok(status)) => {
-                let duration = start.elapsed();
-                let stdout_bytes = if let Some(mut out) = stdout {
-                    use tokio::io::AsyncReadExt;
-                    let mut buf = Vec::new();
-                    let _ = out.read_to_end(&mut buf).await;
-                    buf
-                } else {
-                    Vec::new()
-                };
-                let stderr_bytes = if let Some(mut err) = stderr {
-                    use tokio::io::AsyncReadExt;
-                    let mut buf = Vec::new();
-                    let _ = err.read_to_end(&mut buf).await;
-                    buf
-                } else {
-                    Vec::new()
-                };
+        match captured {
+            Some(captured) => {
+                if captured.stdout_truncated || captured.stderr_truncated {
+                    tracing::warn!(
+                        max_output_bytes = MAX_OUTPUT_BYTES,
+                        stdout.truncated = captured.stdout_truncated,
+                        stderr.truncated = captured.stderr_truncated,
+                        "workspace command output exceeded the cap and was truncated"
+                    );
+                }
                 Ok(ExecOutput::new(
-                    String::from_utf8_lossy(&stdout_bytes).into_owned(),
-                    String::from_utf8_lossy(&stderr_bytes).into_owned(),
-                    status.code().unwrap_or(-1),
+                    note_truncation(
+                        truncate_utf8(captured.stdout, MAX_OUTPUT_BYTES),
+                        captured.stdout_truncated,
+                    ),
+                    note_truncation(
+                        truncate_utf8(captured.stderr, MAX_OUTPUT_BYTES),
+                        captured.stderr_truncated,
+                    ),
+                    captured.status.code().unwrap_or(-1),
                     duration,
                     false,
                 ))
             }
-            Ok(Err(e)) => {
-                Err(SandboxError::ExecutionFailed(format!("command execution failed: {e}")))
-            }
-            Err(_) => {
-                // Timeout: kill the process
-                let _ = child.kill().await;
-                let duration = start.elapsed();
-                Ok(ExecOutput::new("", "", -1, duration, true))
-            }
+            None => Ok(ExecOutput::new("", "", -1, duration, true)),
         }
     }
 
     async fn read_file(&self, path: &str) -> Result<Vec<u8>, SandboxError> {
-        validate_relative_path(path)?;
-        let full_path = self.workspace_dir.join(path);
+        let full_path = resolve_in_root(&self.workspace_dir, path)?;
         tokio::fs::read(&full_path).await.map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 SandboxError::ExecutionFailed(format!("file not found: {path}"))
@@ -187,23 +215,11 @@ impl SandboxSession for LocalUnixSession {
     }
 
     async fn write_file(&self, path: &str, content: &[u8]) -> Result<(), SandboxError> {
-        validate_relative_path(path)?;
-        let full_path = self.workspace_dir.join(path);
-        if let Some(parent) = full_path.parent() {
-            tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                SandboxError::ExecutionFailed(format!(
-                    "failed to create parent directories for '{path}': {e}"
-                ))
-            })?;
-        }
-        tokio::fs::write(&full_path, content).await.map_err(|e| {
-            SandboxError::ExecutionFailed(format!("failed to write file '{path}': {e}"))
-        })
+        write_in_root(&self.workspace_dir, path, content).await
     }
 
     async fn list_dir(&self, path: &str) -> Result<Vec<DirEntry>, SandboxError> {
-        validate_relative_path(path)?;
-        let full_path = self.workspace_dir.join(path);
+        let full_path = resolve_in_root(&self.workspace_dir, path)?;
         let mut entries = Vec::new();
         let mut read_dir = tokio::fs::read_dir(&full_path).await.map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -229,6 +245,12 @@ impl SandboxSession for LocalUnixSession {
     }
 
     async fn apply_patch(&self, patch: &str) -> Result<(), SandboxError> {
+        // `patch` opens whatever its headers name, relative to its working directory and
+        // through symlinks, so every name must resolve inside the workspace first.
+        for name in patch_target_paths(patch) {
+            resolve_in_root(&self.workspace_dir, name)?;
+        }
+
         // Write patch to a temp file in the workspace
         let patch_file = self.workspace_dir.join(".adk_patch_tmp");
         tokio::fs::write(&patch_file, patch).await.map_err(|e| {
@@ -288,8 +310,7 @@ impl SandboxClient for LocalUnixClient {
         for entry in &manifest.entries {
             match entry {
                 ManifestEntry::File { path, content } => {
-                    validate_relative_path(path)?;
-                    let target = workspace_path.join(path);
+                    let target = resolve_in_root(&workspace_path, path)?;
                     if let Some(parent) = target.parent() {
                         tokio::fs::create_dir_all(parent).await.map_err(|e| {
                             SandboxError::ProvisionFailed {
@@ -309,8 +330,7 @@ impl SandboxClient for LocalUnixClient {
                 }
 
                 ManifestEntry::Directory { path } => {
-                    validate_relative_path(path)?;
-                    let target = workspace_path.join(path);
+                    let target = resolve_in_root(&workspace_path, path)?;
                     tokio::fs::create_dir_all(&target).await.map_err(|e| {
                         SandboxError::ProvisionFailed {
                             resource: path.clone(),
@@ -321,8 +341,7 @@ impl SandboxClient for LocalUnixClient {
                 }
 
                 ManifestEntry::GitRepo { url, branch, path } => {
-                    validate_relative_path(path)?;
-                    let target = workspace_path.join(path);
+                    let target = resolve_in_root(&workspace_path, path)?;
 
                     // Clone the repository
                     let mut cmd = tokio::process::Command::new("git");
@@ -877,6 +896,86 @@ mod tests {
         assert_eq!(output.exit_code, -1);
     }
 
+    /// Only the allowlisted host variables, plus what `sh` sets itself, reach a command.
+    #[tokio::test]
+    async fn session_exec_command_environment_is_an_allowlist() {
+        let temp = tempfile::tempdir().unwrap();
+        let session = LocalUnixSession::new(temp.path().to_path_buf(), Duration::from_secs(10));
+
+        let output = session.exec_command("env", None).await.unwrap();
+        assert_eq!(output.exit_code, 0, "stderr: {}", output.stderr);
+
+        const SHELL_SET: &[&str] = &["PWD", "OLDPWD", "SHLVL", "_"];
+        let visible: Vec<&str> = output
+            .stdout
+            .lines()
+            .filter_map(|line| line.split_once('=').map(|(key, _)| key))
+            .filter(|key| {
+                !key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            })
+            .collect();
+        for key in &visible {
+            assert!(
+                INHERITED_ENV_KEYS.contains(key) || SHELL_SET.contains(key),
+                "host variable {key} leaked into the workspace command: {visible:?}"
+            );
+        }
+        // Set by cargo and nextest on every test process, so it is a parent-only marker.
+        if std::env::var_os("CARGO_MANIFEST_DIR").is_some() {
+            assert!(!output.stdout.contains("CARGO_MANIFEST_DIR="), "{}", output.stdout);
+        }
+    }
+
+    /// Output larger than a pipe buffer completes, and is capped rather than buffered whole.
+    #[tokio::test]
+    async fn session_exec_command_large_output_completes_and_is_capped() {
+        let temp = tempfile::tempdir().unwrap();
+        let session = LocalUnixSession::new(temp.path().to_path_buf(), Duration::from_secs(30));
+
+        let output =
+            session.exec_command("head -c 2097152 /dev/zero | tr '\\0' x", None).await.unwrap();
+
+        assert!(!output.timed_out, "a large write deadlocked and was reported as a timeout");
+        assert_eq!(output.exit_code, 0, "stderr: {}", output.stderr);
+        assert!(output.stdout.starts_with("xxxx"));
+        assert!(output.stdout.contains("truncated"), "the cut must be announced");
+        assert!(
+            output.stdout.len() <= MAX_OUTPUT_BYTES + 128,
+            "retained {} bytes, more than the cap",
+            output.stdout.len()
+        );
+    }
+
+    /// A timeout kills the command's children, not only `sh`.
+    #[tokio::test]
+    async fn session_exec_command_timeout_kills_children() {
+        let temp = tempfile::tempdir().unwrap();
+        let session = LocalUnixSession::new(temp.path().to_path_buf(), Duration::from_millis(200));
+
+        let output = session.exec_command("(sleep 1; touch survivor) & wait", None).await.unwrap();
+        assert!(output.timed_out);
+
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+        assert!(!temp.path().join("survivor").exists(), "a child of sh outlived the timeout");
+    }
+
+    /// Background jobs end with the command that started them.
+    #[tokio::test]
+    async fn session_exec_command_exit_kills_background_jobs() {
+        let temp = tempfile::tempdir().unwrap();
+        let session = LocalUnixSession::new(temp.path().to_path_buf(), Duration::from_secs(10));
+
+        let output = session
+            .exec_command("nohup sh -c 'sleep 1; touch survivor' >/dev/null 2>&1 &", None)
+            .await
+            .unwrap();
+        assert!(!output.timed_out);
+        assert_eq!(output.exit_code, 0);
+
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+        assert!(!temp.path().join("survivor").exists(), "a background job outlived the command");
+    }
+
     #[tokio::test]
     async fn session_exec_command_invalid_working_dir() {
         let (_client, _handle, session) = create_test_session().await;
@@ -1077,5 +1176,101 @@ mod tests {
         session.write_file("binary.dat", content).await.unwrap();
         let read_back = session.read_file("binary.dat").await.unwrap();
         assert_eq!(read_back, content);
+    }
+
+    /// A workspace with a directory `outside` next to it, for escape attempts.
+    #[cfg(unix)]
+    async fn workspace_beside_outside() -> (tempfile::TempDir, LocalUnixSession, PathBuf) {
+        let base = tempfile::tempdir().unwrap();
+        let workspace = base.path().join("workspace");
+        let outside = base.path().join("outside");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("victim.txt"), "original\n").unwrap();
+        let session = LocalUnixSession::new(workspace, Duration::from_secs(10));
+        (base, session, outside)
+    }
+
+    #[cfg(unix)]
+    fn assert_traversal(result: Result<impl std::fmt::Debug, SandboxError>) {
+        match result {
+            Err(SandboxError::PathTraversal { .. }) => {}
+            other => panic!("expected PathTraversal, got: {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apply_patch_rejects_a_header_outside_the_workspace() {
+        let (_base, session, outside) = workspace_beside_outside().await;
+        let patch = "--- ../outside/victim.txt\n+++ ../outside/victim.txt\n@@ -1 +1 @@\n-original\n+ESCAPED\n";
+
+        assert_traversal(session.apply_patch(patch).await);
+        assert_eq!(std::fs::read_to_string(outside.join("victim.txt")).unwrap(), "original\n");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apply_patch_rejects_a_symlinked_directory_out_of_the_workspace() {
+        let (_base, session, outside) = workspace_beside_outside().await;
+        std::os::unix::fs::symlink(&outside, session.workspace_dir.join("link")).unwrap();
+        let patch = "--- link/victim.txt\n+++ link/victim.txt\n@@ -1 +1 @@\n-original\n+ESCAPED\n";
+
+        assert_traversal(session.apply_patch(patch).await);
+        assert_eq!(std::fs::read_to_string(outside.join("victim.txt")).unwrap(), "original\n");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn file_operations_do_not_follow_symlinks_out_of_the_workspace() {
+        let (_base, session, outside) = workspace_beside_outside().await;
+        let workspace = session.workspace_dir.clone();
+        std::os::unix::fs::symlink(&outside, workspace.join("link")).unwrap();
+        std::os::unix::fs::symlink(outside.join("victim.txt"), workspace.join("victim.txt"))
+            .unwrap();
+        std::os::unix::fs::symlink(outside.join("missing.txt"), workspace.join("dangling.txt"))
+            .unwrap();
+
+        assert_traversal(session.write_file("link/escaped.txt", b"x").await);
+        assert_traversal(session.write_file("victim.txt", b"x").await);
+        assert_traversal(session.write_file("dangling.txt", b"x").await);
+        assert_traversal(session.read_file("victim.txt").await);
+        assert_traversal(session.read_file("link/victim.txt").await);
+        assert_traversal(session.list_dir("link").await);
+        assert_traversal(session.exec_command("pwd", Some("link")).await);
+        assert!(!outside.join("escaped.txt").exists());
+        assert!(!outside.join("missing.txt").exists());
+        assert_eq!(std::fs::read_to_string(outside.join("victim.txt")).unwrap(), "original\n");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlink_inside_the_workspace_is_followed() {
+        let (_base, session, _outside) = workspace_beside_outside().await;
+        let workspace = session.workspace_dir.clone();
+        std::fs::create_dir_all(workspace.join("real")).unwrap();
+        std::os::unix::fs::symlink(workspace.join("real"), workspace.join("alias")).unwrap();
+
+        session.write_file("alias/file.txt", b"through the link").await.unwrap();
+
+        assert_eq!(std::fs::read(workspace.join("real/file.txt")).unwrap(), b"through the link");
+        assert_eq!(session.read_file("alias/file.txt").await.unwrap(), b"through the link");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn writing_a_hard_linked_file_leaves_the_other_link_unchanged() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_base, session, outside) = workspace_beside_outside().await;
+        let inside = session.workspace_dir.join("linked.txt");
+        std::fs::hard_link(outside.join("victim.txt"), &inside).unwrap();
+        std::fs::set_permissions(&inside, std::fs::Permissions::from_mode(0o640)).unwrap();
+
+        session.write_file("linked.txt", b"rewritten\n").await.unwrap();
+
+        assert_eq!(std::fs::read_to_string(&inside).unwrap(), "rewritten\n");
+        assert_eq!(std::fs::read_to_string(outside.join("victim.txt")).unwrap(), "original\n");
+        assert_eq!(std::fs::metadata(&inside).unwrap().permissions().mode() & 0o7777, 0o640);
     }
 }

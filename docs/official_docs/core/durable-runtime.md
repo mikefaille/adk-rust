@@ -1,0 +1,839 @@
+# Durable Runtime
+
+Four store contracts in `adk-core` let agent runs outlive a process and run safely across
+replicas: a lease store, a run store, a schedule store, and a governance state store. Each is
+a backend-neutral trait with an in-memory implementation and a conformance suite that every
+backend passes.
+
+| Contract | Trait | In-memory implementation | Holds |
+|----------|-------|--------------------------|-------|
+| Leases | `LeaseStore` | `InMemoryLeaseStore` | One owner per named resource, with a fencing epoch |
+| Runs | `DurableRunStore` | `InMemoryRunStore` | The run queue: input, state, attempts, lease, checkpoint, outcome |
+| Schedules | `ScheduleStore` | `InMemoryScheduleStore` | Cron, one-shot, and interval schedules with their next fire time |
+| Governance state | `GovernanceStateStore` | `InMemoryGovernanceStateStore` | Freeze state per organisation, tenant, and agent |
+
+The run store is named `DurableRunStore` after the role it plays: the durable queue every
+replica claims from. `adk-server`'s background runs, cron jobs, workers, and scheduler are built
+on these contracts (see [Worker](#worker) and [Scheduler](#scheduler)).
+
+Time comes from the injected `adk_core::Clock`: `with_clock` sets it on every in-memory store
+that reads the time, and the conformance suites drive a `ManualClock`.
+
+## Design rules
+
+| Rule | Meaning |
+|------|---------|
+| One transactional store holds durable truth | Caches and notification channels only shorten the time until a replica reads the store |
+| Fencing | Every worker write carries its lease epoch; a stale epoch is refused |
+| Revisions decide conflicts | Exact revision or epoch markers, never timestamps, decide which concurrent write wins |
+| Resume never repeats a side effect | A recovered run resumes from its checkpoint; non-idempotent tool calls go through the [action ledger](../security/durable-stores.md) |
+| Fail loudly on unknown ids | Operations on an unknown run or schedule return a `*.not_found` error |
+| Pruning is part of the contract | `DurableRunStore::prune` deletes finished runs before a cut-off |
+
+## Agent identity
+
+The `principal` module identifies the agent a run acts as. A `NewRun` carries an optional
+`ActingContext`, and the run record keeps it. A worker treats it as a claim: it acts as a stored
+agent id only when `DurableWorkerConfig::allowed_principals` lists it, and only for the run's
+user unless a delegation rule allows another subject. `NewRun::with_service_subject` marks a run
+created by a scheduler, webhook, or queue as acting for a service. See
+[Agent Identity](../security/agent-identity.md#durable-runs).
+
+| Type | Identifies |
+|------|------------|
+| `AgentId` | One agent, stable across redeploys: a URI such as `spiffe://example.org/agent/billing` or `urn:adk:agent:billing`; non-empty, at most 512 bytes, no control characters |
+| `SubjectRef` | A human, a service, or an agent (`SubjectKind`) by identifier |
+| `AgentPrincipal` | An agent with its tenant, class (template), instance (replica), sponsor, and attributes |
+| `ActingContext` | An agent acting on behalf of a subject, through a delegation chain (outermost first); the invocation is the execution identity's |
+
+```rust
+use adk_core::principal::{ActingContext, AgentId, AgentPrincipal, SubjectRef};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let agent = AgentPrincipal::new(AgentId::new("urn:adk:agent:billing")?)
+        .with_tenant("acme")
+        .with_sponsor(SubjectRef::human("alice@example.com"));
+    let acting = ActingContext::new(agent)
+        .on_behalf_of(SubjectRef::human("bob@example.com"));
+    assert_eq!(serde_json::to_value(&acting)?["onBehalfOf"]["kind"], "human");
+    Ok(())
+}
+```
+
+## Leases and fencing
+
+`LeaseStore::acquire` grants a resource to one owner for a time to live. Each grant's `epoch`
+is one higher than the resource's previous grant, and epochs never repeat, even after release.
+
+| Operation | Free, expired, or released | Held by the caller | Held by another owner |
+|-----------|----------------------------|--------------------|-----------------------|
+| `acquire` | Granted at epoch + 1 | Granted again at epoch + 1 | `None` |
+| `renew` | Extended while the epoch is current and the lease was not released | Extended | `lease.stale_epoch` |
+| `release` | No-op | Released | No-op |
+
+Stale epochs and compare-and-swap conflicts (`lease.stale_epoch`, `run_store.stale_epoch`,
+`governance.conflict`) carry `ErrorCategory::Conflict`, which maps to HTTP 409.
+
+A holder that stalls past its expiry while another owner takes the resource holds a lower
+epoch, so its next renew fails with `lease.stale_epoch` and any store that checks the epoch
+refuses its writes.
+
+## Runs
+
+A worker claims a run, heartbeats while it works, and finishes it. Every worker write —
+`heartbeat`, `set_checkpoint`, `wait`, `finish` — carries the epoch returned by `claim` and
+fails with `run_store.stale_epoch` once the run is no longer `Running` at that epoch.
+
+| From | Event | To | Attempt | Epoch |
+|------|-------|----|---------|-------|
+| — | `enqueue` | `Queued` | 0 | 0 |
+| `Queued` | `claim`, once `not_before` passed and no earlier run holds its concurrency key | `Running` | + 1 | + 1 |
+| `Running` | `claim` after the lease expired (recovery) | `Running` | + 1 | + 1 |
+| `Running` | `wait(until)` | `Waiting`, lease released | — | — |
+| `Waiting` | `claim` once `until` passed or `wake` was called | `Running` | — | + 1 |
+| `Running` | `finish(Completed)` | `Completed` | — | — |
+| `Running` | `finish(Failed { retryable: true })` with attempts left and no cancel request | `Queued` | — | — |
+| `Running` | `finish(Failed)` otherwise | `Failed` | — | — |
+| `Running` | `finish(Cancelled)` | `Cancelled` | — | — |
+| `Queued`, `Waiting` | `request_cancel` | `Cancelled` | — | — |
+| `Running` | `request_cancel` | `Running` with `cancel_requested`, returned by the next `heartbeat` | — | — |
+
+A recovery claim of a run that already used `max_attempts` attempts fails it instead. A
+`wake` that arrives while the run is still `Running` — an approval decided before the worker
+parked the run — sets `wake_pending`, and the next `wait` parks the run as already woken.
+
+### Idempotency and double texting
+
+- **Idempotency key**: unique per queue. `enqueue` returns `Enqueued::Existing` with the
+  existing run until that run is pruned.
+- **Concurrency key**: runs sharing a key in one queue run one at a time, in enqueue order.
+  `OnConflict` decides what `enqueue` does when an unfinished run holds the key.
+
+| `OnConflict` | Effect |
+|--------------|--------|
+| `Reject` | `Enqueued::Rejected { blocking_run_id }`, naming the oldest unfinished run |
+| `Enqueue` (default) | Queues the run behind the unfinished ones |
+| `Interrupt` | Cancels queued and waiting holders, requests cancellation of running ones, and queues the run behind them |
+
+```rust
+use std::time::Duration;
+
+use adk_core::{DurableRunStore, InMemoryRunStore, NewRun, OnConflict, RunOutcome};
+use serde_json::json;
+
+#[tokio::main]
+async fn main() -> adk_core::Result<()> {
+    let runs = InMemoryRunStore::new();
+    let run = NewRun::new("default", "support", "user-1", "triage_agent", json!({ "text": "hi" }))
+        .with_idempotency_key("webhook:evt_123")
+        .with_concurrency_key("thread:42", OnConflict::Interrupt);
+    runs.enqueue(run).await?;
+
+    let claimed = runs.claim("default", "worker-1", Duration::from_secs(30)).await?.unwrap();
+    let cancel_requested = runs.heartbeat(&claimed.record.run_id, claimed.epoch, Duration::from_secs(30)).await?;
+    assert!(!cancel_requested);
+    runs.finish(&claimed.record.run_id, claimed.epoch, RunOutcome::Completed(json!("done"))).await?;
+    Ok(())
+}
+```
+
+## Schedules and the firing rule
+
+A `Schedule` pairs a `ScheduleSpec` — `Cron { expr, timezone }`, `At(instant)`, or
+`Every(interval)` — with a `NewRun` template and a `MissedFirePolicy`. A scheduler on each
+replica runs the same loop:
+
+1. Read `ScheduleStore::due(now, limit)`.
+2. For each schedule, call `schedule::plan_fires(&spec, missed, next_fire_at, now, grace)`.
+3. Enqueue `schedule.run_for(fire_time)` for every planned fire time. Each run's idempotency
+   key is `schedule:{id}:{fire_time RFC 3339}`, so every replica that plans the same fire time
+   enqueues the same run once.
+4. Call `ScheduleStore::advance(id, revision, plan.next_fire_at)`. The compare-and-swap on the
+   revision lets one replica move the schedule; the others get `false`.
+
+A replica that crashes between steps 3 and 4 leaves the schedule due; the next replica plans
+the same fire times, and their idempotency keys enqueue nothing new.
+
+| `MissedFirePolicy` | Fires when several occurrences are due |
+|--------------------|----------------------------------------|
+| `Skip` | The latest due occurrence, only if it is at most `grace` late (`DEFAULT_MISFIRE_GRACE` is 60 seconds) |
+| `FireOnce` | The latest due occurrence, however late |
+| `CatchUp(n)` | The latest `n` due occurrences, oldest first |
+
+Cron expressions take five fields (`min hour dom month dow`) or six or seven (`sec min hour
+dom month dow [year]`) and are evaluated in an IANA time zone. A local time skipped by a
+spring-forward change does not fire; a local time repeated by a fall-back change fires once.
+The day-of-week field counts days by the number of fields:
+
+| Expression | Sunday | Monday to Saturday | `1-5` fires |
+|------------|--------|--------------------|-------------|
+| Five fields, as Unix cron | `0` or `7` | `1` to `6` | Monday to Friday |
+| Six or seven fields, as the `cron` crate | `1` | `2` to `7` | Sunday to Thursday |
+
+Day names (`Mon-Fri`, `SAT,SUN`) mean the same days in both. Evaluating cron specs needs the
+`cron` feature:
+
+```toml
+[dependencies]
+adk-core = { version = "3.0.0", features = ["cron"] }
+```
+
+`ScheduleStore::upsert` assigns revisions: 1 on insert, the previous revision plus one on a
+change, and no change for an identical definition, so replicas registering the same schedule
+at startup do not disturb an advance in flight.
+
+## Governance state
+
+`GovernanceStateStore` records whether a `GovernanceScope` — `Org`, `Tenant(name)`, or
+`Agent(AgentId)` — is frozen, who froze it, and why. `set` is a compare-and-swap on the
+scope's epoch (0 when it has no state); a moved epoch fails with `governance.conflict`, whose
+`current_epoch` metadata holds the epoch to re-read from.
+
+## Worker
+
+`adk_server::background::DurableWorker` (feature `background`) claims runs from a
+`DurableRunStore` under fenced leases and executes them: agents through their `Runner`,
+workflows through a `WorkflowExecutor`. Run one per replica; every replica claiming from the
+same store and queue shares the work.
+
+`DurableWorker::with_clock` sets the clock the worker compares with the run store's timestamps
+(`SystemClock` by default) — for pruning, idle waits, hand-back deadlines and approval expiry.
+Give it the run store's clock: on another clock, a store whose time trails the wall clock by
+more than `retain_finished` loses runs that just finished.
+
+| `DurableWorkerConfig` field | Default | Meaning |
+|-----------------------------|---------|---------|
+| `worker_id` | `worker-{uuid}` | Owner name written into every lease |
+| `queue` | `default` | Queue claimed from |
+| `lease_ttl` | 30 s | How long a claim or heartbeat holds the run; heartbeats run every `lease_ttl / 3` |
+| `poll_interval` | 500 ms | Wait when nothing is claimable; the loop wakes earlier, at the earliest future `not_before` of a queued or parked run on its queue, so a delayed run or a timed wait resumes at its time (spec 3.2 §7.9, §13 Q2) |
+| `max_concurrent_runs` | 4 | Attempts executed at once |
+| `run_timeout` | `None` | Fails an attempt that runs longer (not retried) |
+| `retain_finished` | 24 h | Finished runs older than this on the worker's clock are pruned by the claim loop |
+| `approval_timeout` | `None` | How long a run parked on a held tool call waits for a decision; `None` waits until woken |
+| `allowed_principals` | Empty | Agent ids beyond the worker's own and the target's derived id that a run's stored principal may name (`with_allowed_principal`); any other fails the run with `identity.principal_not_allowed` |
+| `on_governance_refusal` | `GovernanceRefusal::Park` | What a kill-switch refusal does to a run that already made a model or tool call, on a worker with a governance control: `Park` parks it at its next model-call boundary and wakes it on unfreeze, as **Kill switch** below describes; `Fail` ends the attempt with the control's error (spec 3.2 §10 S3) |
+
+One attempt of a claimed run:
+
+1. `claim` returns the run with a fencing epoch. A worker whose governance control refuses work
+   (frozen, or a stale fail-closed mirror) claims nothing. A claim already in flight when the
+   control starts refusing can still return a run; the worker checks the control again and
+   hands that run back unstarted, as **Kill switch** below describes.
+2. The worker records the checkpoint with `set_checkpoint` before any progress is made.
+3. A heartbeat every `lease_ttl / 3` extends the lease. A heartbeat that reports a cancellation
+   request stops the run cooperatively; one refused with `run_store.stale_epoch` drops the
+   execution at once, and the worker writes nothing more.
+4. `finish` writes the outcome, fenced by the epoch: `Completed`, `Failed { retryable }`
+   (retryable failures requeue while attempts remain), or `Cancelled` when cancellation was
+   requested.
+
+**Lease fence.** For agent runs the worker installs invocation hooks around every model call,
+model response, tool call, and tool result. Each checks that the lease is still provably held —
+the last successful heartbeat was sent less than `lease_ttl` ago. When it is not, the hook never
+returns and the worker drops the attempt, so a stalled worker makes no further model call, tool
+call, session write, or store write.
+
+**Kill switch.** The worker reads its governance control before each claim, and again before it
+runs what the claim returned, because a claim can return after a freeze landed:
+
+| Refused | Worker |
+|---------|--------|
+| Once the claim returns | Hands the run back unstarted |
+| By the runner before the agent produced an event (the runner's start check, or the agent's check before its first model call) | Hands the run back unstarted, when the worker's own control also refuses |
+| After the run made a model or tool call, under `on_governance_refusal = Park` (the default) | Parks the run at its next model-call boundary, as below |
+| After the run made a model or tool call, under `on_governance_refusal = Fail`, or by the runner's control on a worker with none | Ends the attempt with the control's error (`governance.frozen` is not retried; `governance.stale` is); a run asked to suspend parks instead, as [Suspending a run](#suspending-a-run) describes |
+
+A run handed back is parked with `wait` until the time it was claimed: it is `Waiting`,
+claimable at once — by this worker once its control allows work again — and the claim that
+resumes it counts no further attempt, so a freeze never uses up a queued run's attempts.
+
+**Freeze parks** (spec 3.2 §10 S3, K-I21). Under `Park`, a run the control refuses after it
+made a call stops at its next model-call boundary: the model's last tool calls are answered —
+those the kill switch refused inside the batch as `{"error": "not run: ..."}` — the worker records
+`RunCheckpointRef::Session`, parks the run with `wait(run_id, epoch, None)`, and reports
+`ParkReason::Frozen` to `on_park`. The park has no expiry. The worker keeps the ids of the runs it
+parked this way and wakes exactly those once its control allows work again — never a run parked
+by `suspend` — and `wake_frozen()` does the same on demand. The resumed run continues its session
+as [Crash resume](#crash-resume) describes, and the action ledger keeps a completed call from
+running twice. `request_cancel` still finishes a parked run `Cancelled`, and the unfreeze does
+not revive it.
+
+The park and the resume each leave a system notice in the session, authored `system`
+(`adk_core::history::system_notice_event`), which every agent reading the session gets as a
+user-role turn:
+
+| When | Notice |
+|------|--------|
+| The run parks under the freeze | `FREEZE_PAUSED_NOTICE`: "[System notice] Execution paused by an operator freeze." |
+| The claim after the unfreeze, on any worker, finds the park's notice as the parked invocation's latest | `FREEZE_RESUMED_NOTICE`: "[System notice] Execution was paused by an operator freeze and has now resumed. The tool calls refused during the freeze did not run. Continue the task, and call again any refused call you still need." |
+
+The resume notice ends the model's next request, so the model continues the task instead of
+ending it at a refused call's `not run` answer. Before adding it, the claim writes a
+`governance.run_resumed` audit record (`FREEZE_RESUMED_ACTION`) with the run, session and
+parked invocation, on the worker's trail or else its runner's. A run no freeze parked —
+suspended, woken by an approval, or recovered after a crash — resumes without one. A notice
+authorizes nothing: a refused call made again goes through the governed path.
+
+Only a worker with a governance control (`with_governance`) parks this way, since its own control
+tells it the freeze is over. The list of parked runs lives in the worker's memory: a worker
+restarted while frozen does not wake the runs parked before the restart, so a supervisor that must
+survive restarts records each `ParkReason::Frozen` that `on_park` reports and wakes those runs
+itself.
+
+| `WorkerHandle` method | Effect |
+|-----------------------|--------|
+| `shutdown().await` | Stops claiming and waits for in-flight attempts to write their outcome |
+| `wake()` | Tries a claim now instead of after `poll_interval` |
+| `heartbeat_now()` | Makes every in-flight attempt heartbeat now, so a cancellation requested in this process is seen at once |
+| `suspend(run_id)` | Parks the agent run `run_id`, in flight on this worker, at its next model-call boundary; returns whether the request reached an attempt. See [Suspending a run](#suspending-a-run) |
+| `wake_frozen().await` | Wakes every run the worker parked under a freeze and returns how many; the claim loop does the same when its control allows work again |
+| `frozen_runs()` | The ids of the runs parked under a freeze and not woken yet |
+| `abort()` | Drops the loop and every in-flight attempt without writing, as a crash would; their leases expire and another worker recovers them |
+
+**Live targets** (spec 3.3 §10 S4). A worker reads its targets on every claim: first the agents
+registered with `with_agent`, then a shared `AgentTable` set with `with_agent_table`, then its
+workflows. A host that adds agents while its workers run — the kernel's agents a person adds —
+shares one table with every worker and changes it in place:
+
+| `AgentTable` method | Effect on the next claim |
+|---------------------|--------------------------|
+| `insert(target, runner)` | Runs `target` on `runner`; a runner swapped in serves the next claim, and a claim already running finishes on the runner it started on |
+| `remove(target)` | No runner serves `target`; a claim of it is handed back while it is expected, and fails without retry otherwise |
+| `expect(target)` | A claim of `target` before it is built is handed back unstarted, claimable again one `poll_interval` later, and reported as `ParkReason::HandedBack`; the hand-back counts no attempt |
+| `forget(target)` | Stops expecting `target` |
+
+An agent hosted from the table acts as `urn:adk:agent:{app}/{target}`, the target's derived id, so
+it needs no `allowed_principals` entry.
+
+```rust
+use std::sync::Arc;
+
+use adk_core::{DurableRunStore, GovernanceControl};
+use adk_runner::Runner;
+use adk_server::background::{DurableWorker, DurableWorkerConfig, WorkflowRegistry};
+
+async fn serve(run_store: Arc<dyn DurableRunStore>, runner: Runner, governance: GovernanceControl) {
+    let worker = DurableWorker::new(run_store)
+        .with_agent("support", Arc::new(runner))
+        .with_workflows(Arc::new(WorkflowRegistry::new()))
+        .with_governance(governance.clone())
+        .with_config(DurableWorkerConfig::default().with_queue("default"));
+    let handle = worker.spawn();
+    // ... serve until shutdown ...
+    handle.shutdown().await;
+}
+```
+
+## Parking on held tool calls
+
+An agent run that ends holding a tool call for approval (no decision available) parks
+instead of finishing:
+
+1. The worker records `RunCheckpointRef::AwaitingApproval { session_id, invocation_id,
+   fingerprints, expires_at }`. `fingerprints` are the held calls' decision keys
+   (`ToolConfirmationRequest::fingerprint`); `expires_at` is `now + approval_timeout` when one
+   is configured.
+2. It calls `DurableRunStore::wait(run_id, epoch, expires_at)`; the run is `Waiting` and holds
+   no lease.
+3. The approval service records the decision and wakes the run with
+   `BackgroundState::wake_run(run_id)`, `BackgroundState::wake_session_runs(app, user,
+   session)`, or `POST /runs/{run_id}/wake`. A wake that lands before the run parks is kept
+   (`wake_pending`).
+4. The next claim continues at the same attempt and resumes the same session with an empty user
+   turn; the agent dispatches the held call under its original call id through the governed
+   path, so the approved call executes once and a denied one is answered as denied.
+
+A run claimed again past `expires_at` with the same calls still held fails with
+`approval expired`.
+
+## Lifecycle hooks
+
+`DurableWorker::with_hooks` registers a `WorkerHooks` implementation; each call adds one, and
+hooks run in the order they were added. Every method has an empty default. A hook runs after the
+store write it reports, so the store already shows the state the hook receives, and it only
+observes: it cannot change what the worker does. The worker awaits each hook, so a hook hands
+slow work, such as delivery to a remote sink, to another task.
+
+| Hook | Called | The run it receives |
+|------|--------|---------------------|
+| `on_claim(run)` | Once the worker starts the claimed run's target, before any model call or workflow step | `Running`, at the claim's epoch |
+| `on_park(run, reason)` | After `wait` parked the run | `Waiting`, holding no lease |
+| `on_finish(run)` | After `finish` wrote the attempt's outcome | `Completed`, `Failed`, or `Cancelled`; `Queued` when a retryable failure requeued it |
+
+| `ParkReason` | Parked by | Claimable |
+|--------------|-----------|-----------|
+| `AwaitingApproval` | Held tool calls, on an `AwaitingApproval` checkpoint ([Parking on held tool calls](#parking-on-held-tool-calls)) | After a wake, or at `expires_at` |
+| `Suspended` | A suspend request, on a `Session` checkpoint ([Suspending a run](#suspending-a-run)) | After a wake |
+| `HandedBack` | The kill switch, before the run made a model or tool call | At once, once the control allows work |
+
+A run handed back because the control refused work when the claim returned is reported to
+`on_park` only: its target never started. An attempt that lost its lease writes nothing and calls
+no hook; the worker that recovers the run reports it.
+
+## Suspending a run
+
+`DurableWorker::suspend(run_id)` and `WorkerHandle::suspend(run_id)` ask an agent run in flight
+on that worker to stop at its next model-call boundary and park, so it resumes later instead of
+ending. Clones of a worker and its handle share the attempts in flight.
+
+1. The tool calls the model already asked for finish, and their responses reach the session. No
+   further model call is made.
+2. The worker interrupts the turn, records `RunCheckpointRef::Session { session_id,
+   invocation_id }` on the interrupted invocation, and calls `wait(run_id, epoch, None)`: the run
+   is `Waiting`, holds no lease, and is not claimable however long it waits.
+3. `DurableRunStore::wake(run_id)` makes it claimable. The claim, by any worker, continues the
+   session at the same attempt with an empty user turn, as [Crash resume](#crash-resume)
+   describes: a call that completed before the suspension is answered from the session and never
+   executed again.
+
+| Requested | Outcome |
+|-----------|---------|
+| `suspend` | Parked `Waiting` on its `Session` checkpoint; `on_park` with `ParkReason::Suspended` |
+| `suspend`, then the kill switch refuses the run at that boundary | Parked the same way, with `ParkReason::Suspended`, so an unfreeze does not wake it; refused before its first event, it is handed back as **Kill switch** describes |
+| `request_cancel`, with or without `suspend` | Finished `Cancelled` |
+| `suspend`, and the turn ends without another model call | Finished, or parked on its held tool calls, as without the request |
+
+`suspend` returns `false` when the worker has no attempt of the run in flight, or the run is a
+workflow run: a workflow has no model-call boundary the worker can stop at, so it runs on. A wake
+that arrives while the run is still running is kept (`wake_pending`) and applied when the run
+parks, so a resume requested before the suspension took effect makes the run claimable at once.
+
+```rust
+use std::sync::Arc;
+
+use adk_core::{DurableRunStore, RunRecord};
+use adk_runner::Runner;
+use adk_server::background::{DurableWorker, ParkReason, WorkerHandle, WorkerHooks};
+use async_trait::async_trait;
+
+struct Transitions;
+
+#[async_trait]
+impl WorkerHooks for Transitions {
+    async fn on_claim(&self, run: &RunRecord) {
+        tracing::info!(run.id = %run.run_id, "running");
+    }
+
+    async fn on_park(&self, run: &RunRecord, reason: ParkReason) {
+        tracing::info!(run.id = %run.run_id, park.reason = ?reason, "waiting");
+    }
+
+    async fn on_finish(&self, run: &RunRecord) {
+        tracing::info!(run.id = %run.run_id, run.state = ?run.state, "attempt finished");
+    }
+}
+
+fn start(runs: Arc<dyn DurableRunStore>, runner: Arc<Runner>) -> WorkerHandle {
+    DurableWorker::new(runs).with_agent("support", runner).with_hooks(Arc::new(Transitions)).spawn()
+}
+
+/// Parks the run at its next model-call boundary; `false` when it is not in flight here.
+fn suspend(worker: &WorkerHandle, run_id: &str) -> bool {
+    worker.suspend(run_id)
+}
+
+/// Makes the suspended run claimable; the claim resumes its session on any worker.
+async fn resume(runs: &dyn DurableRunStore, run_id: &str) -> adk_core::Result<()> {
+    runs.wake(run_id).await
+}
+```
+
+## Crash resume
+
+A run recovered after its lease expired resumes rather than restarting. No tool executes again
+during recovery.
+
+| Target | Checkpoint | What the recovering worker does |
+|--------|------------|---------------------------------|
+| Agent | `Session { session_id, invocation_id }`, recorded before the event stream is polled, so the user turn never reaches the session without a checkpoint naming it | 1. When the session's last event is the checkpoint invocation's final answer, completes the run with it — no model call. 2. Otherwise answers every unanswered function call from the action ledger (`Runner::recover_unanswered_calls`). 3. Continues the same session with an empty user turn when the original user turn was persisted, so nothing is sent twice; otherwise starts from the run's input |
+| Workflow | `Graph { thread_id, checkpoint_id }`; `thread_id` is the run id | Calls the workflow again with `WorkflowRunContext::resumed` set and the same `thread_id`; a graph workflow invoked with `ExecutionConfig::new(&run.thread_id)` resumes from its checkpointer |
+
+`Runner::recover_unanswered_calls` keys each call by its original idempotency key
+(`app/user/session/invocation/call`):
+
+| Ledger record | Response appended |
+|---------------|-------------------|
+| Completed with a value | `already_succeeded` with the result digest |
+| Completed with an error | `already_failed` with the error |
+| Begun with no outcome, or none | `outcome_unknown` |
+
+A workflow registered with `WorkflowRegistry::register_durable` (or an executor overriding
+`WorkflowExecutor::execute_durable`) receives the `WorkflowRunContext`, and may report
+checkpoints with `record_checkpoint`, which is fenced by the claim's epoch. A workflow
+registered with `register` restarts from its input.
+
+```rust
+use std::sync::Arc;
+
+use adk_graph::graph::CompiledGraph;
+use adk_graph::node::ExecutionConfig;
+use adk_graph::state::State;
+use adk_server::background::WorkflowRegistry;
+
+fn registry(graph: Arc<CompiledGraph>) -> WorkflowRegistry {
+    WorkflowRegistry::new().register_durable("settle", move |input, run| {
+        let graph = graph.clone();
+        async move {
+            let state: State = input.into_iter().collect();
+            let out = graph
+                .invoke(state, ExecutionConfig::new(&run.thread_id))
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(serde_json::json!({ "receipt": out.get("receipt") }))
+        }
+    })
+}
+```
+
+**Across processes.** The `crash_mid_payment` gate in `adk-durability-gates` runs this with
+separate OS processes on every backend: the process running the charge is killed with SIGKILL
+mid-call, and a second process completes the run with one charge, answered `outcome_unknown`
+from the durable action ledger. See [Verified guarantees](#verified-guarantees).
+
+**Known limits.**
+
+- Session events a stalled worker appended before its fence tripped remain in the session.
+- A model that issues a call again after an `outcome_unknown` response issues a new call with a
+  new idempotency key; the ledger does not deduplicate it. Payment tools keep their own
+  business idempotency key for that case.
+
+## Scheduler
+
+`adk_server::background::DurableScheduler` enqueues each schedule's fire times exactly once,
+from any number of replicas. Each `tick`:
+
+1. Reads `ScheduleStore::due`.
+2. Plans the fire times with `plan_fires` and the schedule's `MissedFirePolicy`.
+3. Enqueues `Schedule::run_for(fire_time)`, keyed `schedule:{id}:{fire_time}`, so replicas that
+   plan the same fire time create one run.
+4. Advances the schedule with `ScheduleStore::advance`, a compare-and-swap on its revision; a
+   replica that loses the race drops its plan.
+
+While the governance control refuses work, nothing fires and nothing advances. Once the freeze
+lifts, the missed-fire policy decides which fire times that fell due during it run.
+`start_cron_scheduler` runs the tick loop every second; start it on every replica.
+
+```rust
+use std::sync::Arc;
+
+use adk_core::{DurableRunStore, GovernanceControl, ScheduleStore};
+use adk_server::background::DurableScheduler;
+
+fn start(
+    schedule_store: Arc<dyn ScheduleStore>,
+    run_store: Arc<dyn DurableRunStore>,
+    governance: GovernanceControl,
+) -> tokio::task::JoinHandle<()> {
+    DurableScheduler::new(schedule_store, run_store).with_governance(governance).spawn()
+}
+```
+
+## Replicated kill switch
+
+`GovernanceControl::mirrored(store, config)` builds a kill switch that mirrors a
+`GovernanceStateStore` shared by every replica. `GovernanceControl::new` stays process-local.
+
+| `GovernanceMirrorConfig` field | Default | Meaning |
+|--------------------------------|---------|---------|
+| `poll_interval` | 2 s | How often `spawn_mirror` reads the store |
+| `max_staleness` | 30 s | How long the last successful read is trusted |
+| `fail_open` | `false` | Keep running when the store cannot be read past `max_staleness` |
+| `scopes` | `[GovernanceScope::Org]` | Mirrored scopes; frozen when any is; the first is the one replicated freezes write |
+| `watch` | `None` | A `GovernanceWatch` change notification that triggers a read before the next poll |
+
+| Method | Behaviour |
+|--------|-----------|
+| `spawn_mirror` | Reads the store at once, then every `poll_interval` and on each `GovernanceWatch` notification |
+| `refresh` | One read of the mirrored scopes |
+| `freeze_replicated` | Compare-and-swap write of the first scope, retried on `governance.conflict`, then applied locally; when the store cannot be written the replica freezes locally and the error is returned |
+| `unfreeze_replicated` | Compare-and-swap write, then clears the local freeze too |
+| `is_stale`, `staleness` | Time since the last successful read |
+
+A mirrored control is stale until its first read. Past `max_staleness` without a successful
+read, `check` fails closed with `governance.stale` (`ErrorCategory::Unavailable`, retryable;
+`GOVERNANCE_STALE_CODE`): new runs are refused and running ones stop at their next model or tool
+check, as under a freeze (`governance.frozen`, `GOVERNANCE_FROZEN_CODE`). A local `freeze` on a
+mirrored control holds until a local `unfreeze`; the store never lifts it.
+
+The server's `POST /api/admin/freeze` and `POST /api/admin/unfreeze`, which admit only callers
+with `SecurityConfig::admin_scope`, call `freeze_recorded` and `unfreeze_recorded`, so a mirrored `ServerConfig::governance` reaches every replica. A
+freeze also requests cancellation of every running run in the background run stores mounted on
+the builder — a terminate, not a pause — unless a `FreezeDelegate` registered with
+`ServerBuilder::with_freeze_delegate` handles the freeze (spec 3.2 §10 S4), as a kernel does,
+and parks them instead; the delegate also handles the unfreeze and resumes them. Responses report
+`frozen`, `reason`, `mirrored`, `stale`, `runningRuns` (`park` under a delegate, `cancel`
+otherwise), and, for a freeze, `parkedRuns` and `cancelledRuns`; a store write failure returns
+`503` with `error`.
+
+```rust
+use std::sync::Arc;
+use std::time::Duration;
+
+use adk_core::{AgentLoader, GovernanceControl, GovernanceMirrorConfig, GovernanceStateStore};
+use adk_server::ServerConfig;
+use adk_session::SessionService;
+
+fn config(
+    governance_store: Arc<dyn GovernanceStateStore>,
+    loader: Arc<dyn AgentLoader>,
+    sessions: Arc<dyn SessionService>,
+) -> ServerConfig {
+    let control = GovernanceControl::mirrored(
+        governance_store,
+        GovernanceMirrorConfig::default().with_poll_interval(Duration::from_secs(1)),
+    );
+    // Reads the store on a background task every poll interval.
+    let _mirror = control.spawn_mirror();
+    ServerConfig::new(loader, sessions).with_governance(control)
+}
+```
+
+## Cancel across replicas
+
+| Entry point | Effect |
+|-------------|--------|
+| `DELETE /runs/{id}` | `request_cancel`: a queued or waiting run is cancelled at once; a running run is flagged. With an authenticated server, only the run's owner may cancel it; another caller gets `404` |
+| `Runner::interrupt(session_id)` | Cancels local runs, and, when the runner has a durable run store (`RunnerConfig::durable_runs`, builder `durable_run_store`), requests cancellation of the session's unfinished durable runs on a spawned task |
+| `Runner::cancel_durable_runs(user_id, session_id).await` | The same store request, awaited; returns how many runs were asked to stop |
+
+The worker that owns a flagged run sees the request on its next heartbeat, within
+`lease_ttl / 3`, interrupts the agent or fires the workflow's cancellation token, and finishes
+the run `Cancelled`.
+
+## Backend matrix
+
+| Backend | `LeaseStore` | `DurableRunStore` | `ScheduleStore` | `GovernanceStateStore` |
+|---------|--------------|-------------------|-----------------|------------------------|
+| In memory (`adk-core`) | `InMemoryLeaseStore` | `InMemoryRunStore` | `InMemoryScheduleStore` | `InMemoryGovernanceStateStore` |
+| SQLite (`adk-session`, `sqlite`) | `SqliteLeaseStore` | `SqliteRunStore` | `SqliteScheduleStore` | `SqliteGovernanceStateStore` |
+| PostgreSQL (`adk-session`, `postgres`) | `PostgresLeaseStore` | `PostgresRunStore` | `PostgresScheduleStore` | `PostgresGovernanceStateStore` |
+| Redis (`adk-session`, `redis`) | `RedisLeaseStore` | `RedisRunStore` | `RedisScheduleStore` | `RedisGovernanceStateStore` |
+| MongoDB (`adk-session`, `mongodb`) | `MongoLeaseStore` | `MongoRunStore` | `MongoScheduleStore` | `MongoGovernanceStateStore` |
+| Neo4j (`adk-session`, `neo4j`) | `Neo4jLeaseStore` | `Neo4jRunStore` | `Neo4jScheduleStore` | `Neo4jGovernanceStateStore` |
+| Firestore (`adk-session`, `firestore`) | `FirestoreLeaseStore` | `FirestoreRunStore` | `FirestoreScheduleStore` | `FirestoreGovernanceStateStore` |
+
+The Redis, MongoDB, Neo4j, and Firestore types live in `adk-session` behind the backend's
+existing feature. Each has `new(...)`, a constructor over the handle a session service holds (`from_client`,
+`from_database`, `from_graph`, `from_db`), and `migrate()`; the lease, run, and governance
+stores add `with_clock`.
+
+```rust
+use std::sync::Arc;
+use std::time::Duration;
+
+use adk_core::{DurableRunStore, NewRun, RunOutcome};
+use adk_session::RedisRunStore;
+use serde_json::json;
+
+#[tokio::main]
+async fn main() -> adk_core::Result<()> {
+    let runs: Arc<dyn DurableRunStore> = {
+        let store = RedisRunStore::new("redis://localhost:6379").await?;
+        store.migrate().await?;
+        Arc::new(store)
+    };
+    runs.enqueue(NewRun::new("default", "billing", "user-1", "invoice_agent", json!({}))).await?;
+    if let Some(claimed) = runs.claim("default", "worker-1", Duration::from_secs(30)).await? {
+        let run_id = &claimed.record.run_id;
+        runs.finish(run_id, claimed.epoch, RunOutcome::Completed(json!("done"))).await?;
+    }
+    Ok(())
+}
+```
+
+The atomic primitive each guarantee needs:
+
+| Guarantee | SQL | Redis | MongoDB | Neo4j, Firestore |
+|-----------|-----|-------|---------|------------------|
+| Single lease winner | Conditional upsert on the resource row | One Lua script | `findOneAndUpdate` with `upsert` | Transaction over the resource record |
+| Idempotent enqueue | Unique index on `(queue, idempotency_key)` | Lua create-if-absent | Unique partial index, inside a transaction on a replica set | Transaction over the key record |
+| Single claim winner | `SELECT ... FOR UPDATE SKIP LOCKED` (PostgreSQL), `BEGIN IMMEDIATE` (SQLite) | One Lua script | Replace filtered on the run's `revision` | Transaction that re-reads the run and writes the new epoch |
+| Fenced worker writes | `UPDATE ... WHERE lease_epoch = $epoch` | Lua epoch compare | Replace filtered on the `revision` after the epoch check | Transaction that checks the epoch |
+| Schedule advance, governance set | `UPDATE ... WHERE revision = $expected` | Lua compare | Filtered `updateOne` or replace | Transaction that checks the revision |
+
+### Backend notes
+
+| Backend | Atomicity | Storage | Notes |
+|---------|-----------|---------|-------|
+| Redis | Every conditional change is one Lua script | One hash per lease and run; sorted sets of ready runs (by enqueue order), timers (delays, waits, lease expiry), key holders, and due schedules | No key expiry: deadlines are timestamps compared in the scripts, so the durable truth never depends on eviction. Each store keeps its keys under one hash tag, so it runs on Redis Cluster on one slot per store |
+| MongoDB | On a replica set (one node is enough) or sharded cluster, every enqueue is one multi-document transaction; everything else is a single-document write: filtered `findOneAndUpdate`, revision-filtered replace, unique indexes | `adk_leases`, `adk_runs` (record as JSON plus queried fields), `adk_run_keys`, `adk_schedules`, `adk_governance` | A concurrency key's `adk_run_keys` document lists its unfinished holders in order; only the first is claimable. `MongoRunStore::supports_transactions` detects the server type from `hello` (`with_transactions` overrides it). A standalone `mongod` uses a weaker fallback with two windows: a `Reject` that loses admission deletes the run it inserted, which a concurrent enqueue with the same idempotency key can briefly see as `Existing`; and a keyed run whose enqueue stopped before admission is admitted by a claim a minute later |
+| Neo4j | Transactions that write-lock a lock node before reading | `AdkLease`, `AdkRun` (record as JSON), `AdkRunQueue`, `AdkSchedule`, `AdkGovernanceState` nodes | Enqueues and claims serialize per queue on the `AdkRunQueue` node; worker writes lock the run node. Transient errors such as deadlocks are retried up to 30 times. A transaction keeps its locks while its client is paused, so a replica stopped inside a claim blocks every claim and enqueue in that queue until it resumes; set the server's `db.transaction.timeout` to bound that. Every store call runs to completion on its own task, so a caller that drops the call (as the worker drops an in-flight heartbeat) never returns a connection to the pool mid-exchange |
+| Firestore | Read-write transactions that read documents by ID only | `adk_leases`, `adk_runs`, `adk_run_queues`, `adk_run_keys`, `adk_run_key_holders`, `adk_schedules`, `adk_governance` | Enqueues serialize per queue on the `adk_run_queues` document. A claim queries candidates outside any transaction, then re-reads and claims each in its own transaction. A concurrency key's holders live in one document. Every query ranges over one field, so no composite index is needed. Claims take the run that became claimable first, then the oldest enqueued; for undelayed queued runs that is enqueue order |
+
+### SQL stores
+
+The SQLite and PostgreSQL stores share one schema shape and, where the dialects agree, one
+statement text. Each has `new(url)`, `from_pool` over the pool a session service uses, and
+`migrate()`, which applies versioned steps and, on PostgreSQL, holds an advisory lock so
+replicas can migrate at startup. Timestamps are stored as microseconds.
+
+| Store | Table | Primitive |
+|-------|-------|-----------|
+| `*LeaseStore` | `adk_leases` | `acquire` is one `INSERT ... ON CONFLICT (resource) DO UPDATE ... WHERE released OR expires_at_us <= now OR owner = $owner RETURNING epoch`; `renew` and `release` are `UPDATE ... WHERE epoch = $epoch` |
+| `*RunStore` | `adk_runs` | Unique index on `(queue, idempotency_key)`; PostgreSQL claims with `SELECT ... FOR UPDATE OF r SKIP LOCKED` and serializes enqueues per concurrency key with `pg_advisory_xact_lock`, SQLite runs both under `BEGIN IMMEDIATE`; fenced writes are `UPDATE ... WHERE run_id = $1 AND lease_epoch = $2 AND state = 'running'` |
+| `*ScheduleStore` | `adk_schedules` | `advance` is `UPDATE ... WHERE id = $1 AND revision = $2`; `due` reads the `(paused, next_fire_at_us)` index |
+| `*GovernanceStateStore` | `adk_governance_state` | `INSERT ... ON CONFLICT DO NOTHING` from epoch 0, `UPDATE ... WHERE epoch = $expected` otherwise |
+
+`prune` deletes finished runs in batches of 500, so one call never holds a long lock.
+
+```rust
+use std::time::Duration;
+
+use adk_core::{AdkError, DurableRunStore, LeaseStore, NewRun};
+use adk_session::{PostgresLeaseStore, PostgresRunStore, PostgresSessionService};
+use serde_json::json;
+use sqlx::postgres::PgPoolOptions;
+
+#[tokio::main]
+async fn main() -> adk_core::Result<()> {
+    // One pool serves the session service and every durable store.
+    let pool = PgPoolOptions::new()
+        .max_connections(20)
+        .connect("postgres://localhost/app")
+        .await
+        .map_err(|e| AdkError::session(e.to_string()))?;
+    let sessions = PostgresSessionService::from_pool(pool.clone());
+    sessions.migrate().await?;
+    let leases = PostgresLeaseStore::from_pool(pool.clone());
+    leases.migrate().await?;
+    let runs = PostgresRunStore::from_pool(pool);
+    runs.migrate().await?;
+
+    if let Some(leader) = leases.acquire("scheduler", "replica-1", Duration::from_secs(30)).await? {
+        runs.enqueue(NewRun::new("default", "my-app", "user-1", "assistant", json!({}))).await?;
+        leases.release(&leader).await?;
+    }
+    Ok(())
+}
+```
+
+## Conformance suites
+
+The suites live in `adk-core` behind the `conformance` feature, alongside the
+[durable store suites](../security/durable-stores.md#conformance-suite). Time-dependent
+harnesses receive the clock to read.
+
+```rust
+use std::sync::Arc;
+
+use adk_core::conformance::RunStoreHarness;
+use adk_core::{Clock, DurableRunStore, InMemoryRunStore, async_trait};
+
+struct InMemory;
+
+#[async_trait]
+impl RunStoreHarness for InMemory {
+    async fn open(&self, clock: Arc<dyn Clock>) -> Arc<dyn DurableRunStore> {
+        Arc::new(InMemoryRunStore::new().with_clock(clock))
+    }
+
+    fn is_durable(&self) -> bool {
+        false
+    }
+}
+
+adk_core::run_store_conformance_tests!(harness = InMemory);
+```
+
+| Suite | Cases |
+|-------|-------|
+| `lease_store_conformance_tests!` | acquire, renew, and release with epochs; 32 concurrent acquirers across two handles with one winner; expiry takeover at the next epoch; stale renew and release refused; restart survival |
+| `run_store_conformance_tests!` | round trip; 32 concurrent idempotent enqueues with one run; `Reject`, `Enqueue`, and `Interrupt`; 32 concurrent claimers with one winner per run; `not_before`; expired-lease recovery and exhausted attempts; stale-epoch `heartbeat`, `set_checkpoint`, `wait`, and `finish` refused; retryable failures until `max_attempts`; wait and wake; a run parked until woken keeps its checkpoint and attempt across a restart; cancellation through heartbeat; prune; restart survival |
+| `schedule_store_conformance_tests!` | idempotent upsert; due ordering and limit; 32 concurrent advances with one winner; paused schedules never due; restart survival |
+| `governance_state_store_conformance_tests!` | set, get, and list with the epoch CAS; 32 concurrent sets with one winner; independent scopes; restart survival |
+
+Identifiers in every case contain `:`, `/`, and non-ASCII characters, so a backend that builds
+keys from them is checked for escaping. Restart cases and two-handle concurrency are skipped
+for a harness whose `is_durable` returns `false`.
+
+| Backend | Command |
+|---------|---------|
+| In memory | `cargo nextest run -p adk-core --test store_conformance` |
+| SQLite | `cargo nextest run -p adk-session --features sqlite --test store_conformance_sqlite` |
+| PostgreSQL | `DATABASE_URL=postgres://... cargo nextest run -p adk-session --features postgres --run-ignored only --test store_conformance_postgres --test run_store_multiprocess_postgres` |
+| Redis | `REDIS_URL=redis://localhost:6379 cargo nextest run -p adk-session --features redis --run-ignored only --test store_conformance_redis` |
+| MongoDB | `MONGODB_URL=mongodb://localhost:27017 cargo nextest run -p adk-session --features mongodb --run-ignored only --test store_conformance_mongodb` |
+| Neo4j | `NEO4J_URI=bolt://localhost:7687 NEO4J_USER=neo4j NEO4J_PASSWORD=<password> cargo nextest run -p adk-session --features neo4j --run-ignored only --test store_conformance_neo4j` |
+| Firestore | `FIRESTORE_EMULATOR_HOST=localhost:8080 cargo nextest run -p adk-session --features firestore --run-ignored only --test store_conformance_firestore` |
+
+`run_store_multiprocess_postgres` starts three OS processes that claim from one queue of
+200 runs at once and checks that each run is claimed and finished exactly once. The SQLite
+suites run on every pull request; the PostgreSQL suites run in the nightly `durable-stores`
+job.
+
+Each backend file also runs a contention case beyond the suites: 24 claimers, half on each of
+two handles, drain one queue of 48 runs (16 claimers and 16 runs on the Firestore emulator),
+and every run is claimed exactly once. The nightly
+`durable-stores` job runs all of them against live servers and the Firestore emulator.
+
+## End-to-end example
+
+[`examples/durable_company`](https://github.com/zavora-ai/adk-rust/tree/main/examples/durable_company)
+runs one accounts-payable day against a real model, with every piece of this page and the
+governance features working together. Replicas are separate OS processes on SQLite and
+PostgreSQL, and tasks in one process on the in-memory stores.
+
+| Step | Exercises | Checked |
+|------|-----------|---------|
+| Cron fires | `DurableScheduler`, `ScheduleStore` | One run keyed `schedule:ap-daily:{fire time}`; the schedule advances |
+| Worker killed mid-tool | `DurableWorker`, fenced lease, SIGKILL | The run stays `Running` with a `Session` checkpoint |
+| Another process resumes | Lease expiry, `recover_unanswered_calls` | Claimed at attempt 2; the interrupted call is answered and audited `outcome_unknown` |
+| Payment over the threshold | `DeclarativePolicy` (`for_agent`, `at_most`), `AgentPrincipal` | The run parks `Waiting` on `AwaitingApproval` |
+| Quorum of two | `StoreApprovalService` | Self-approval refused; one approval keeps the run parked; the second wakes it |
+| Payment | Governed checkout (`adk-payments`), action ledger | Each invoice paid once |
+| Spend cap | `SpendLedger` daily org limit | A payment the policy allows is refused before the merchant |
+| Freeze | `GovernanceControl::mirrored`, `freeze_recorded` | No run is claimed and no schedule fires on any replica |
+| Audit | Signed audit log per process, `adk-rust audit export` / `verify` | Every log verifies; an edited record does not |
+
+```bash
+cargo run --manifest-path examples/durable_company/Cargo.toml -- --provider openai --store sqlite
+```
+
+## Verified guarantees
+
+The `adk-durability-gates` workspace crate (unpublished) checks the runtime's guarantees end to
+end with separate OS processes that share nothing but one backend. Every process opens the run
+store, session service, action ledger, schedule store, and governance state store on that
+backend.
+
+| Gate | Processes | Pass condition |
+|------|-----------|----------------|
+| `crash_mid_payment` | two workers | the worker running a non-idempotent charge is SIGKILLed mid-call; the other claims the run only after the lease expired, at the next epoch; exactly one charge; the run completes with the call answered `outcome_unknown` |
+| `one_firing_per_schedule` | three schedulers | an interval, a per-second cron, and five one-shot schedules race for at least four seconds and until the recurring ones fired 12 and 3 times; every occurrence before each schedule's cursor has exactly one run, no run is for a time that is no occurrence, and the processes' own counts of created runs sum to the runs stored |
+| `stalled_worker` | two workers | the worker holding a charged run is SIGSTOPped at its heartbeat, with no store call in flight, past the lease; the other recovers the run and holds it; after SIGCONT the paused worker's heartbeat is refused with `run_store.stale_epoch`, it writes nothing that succeeds, and the charge happened once |
+| `kill_switch` | three replicas and a writer | a freeze written by the test process reaches every replica within three poll intervals (300 ms); no model or tool call starts after a replica froze; no run starts and no schedule fires or advances while frozen, and a run a claim in flight returns after the freeze is handed back `Waiting` at attempt 1; after unfreezing every queued run completes and the missed occurrence fires once; a replica cut off from the governance store goes stale at its 1 s limit and starts no run while its peers keep working |
+
+The gates use a 2 s run lease, a 100 ms governance poll interval, and a 1 s staleness limit, so
+each finishes in seconds. Gates sharing one server run one at a time (nextest test groups in
+`.config/nextest.toml`).
+
+### Where the gates run
+
+The SQLite gates run in the PR tier (`adk-durability-gates sqlite` in
+`scripts/feature-coverage-pairs.txt`); the server backends run in the nightly `durable-stores`
+job against service containers and the Firestore emulator.
+
+### Running the gates
+
+```bash
+# SQLite
+cargo nextest run -p adk-durability-gates --features sqlite
+
+# Every backend, with each server reachable at the variables the nightly job sets
+DATABASE_URL=postgres://postgres@localhost:5432/postgres \
+REDIS_URL=redis://localhost:6379 \
+MONGODB_URL='mongodb://localhost:27017/?directConnection=true' \
+NEO4J_URI=bolt://localhost:7687 NEO4J_USER=neo4j NEO4J_PASSWORD=<password> \
+FIRESTORE_EMULATOR_HOST=localhost:8080 \
+  cargo nextest run -p adk-durability-gates --features all-backends --run-ignored all
+```
+
+MongoDB runs as a single-node replica set, so the run store takes its transactional path.
+
+## Related
+
+- [Durable Stores](../security/durable-stores.md)
+- [Tool Authorization](../security/tool-authorization.md)
+- [Runner](runner.md)
+- [Background runs and cron](../agents/functional-api.md)

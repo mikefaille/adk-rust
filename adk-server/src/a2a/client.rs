@@ -11,23 +11,185 @@ use std::pin::Pin;
 pub struct A2aClient {
     http_client: reqwest::Client,
     agent_card: AgentCard,
+    credential: Option<adk_core::ScopedToken>,
+}
+
+/// Attaches `token` as a bearer credential to a request for `url`, after checking the
+/// URL is inside the token's audience.
+fn bearer(
+    request: reqwest::RequestBuilder,
+    token: Option<&adk_core::ScopedToken>,
+    url: &str,
+) -> Result<reqwest::RequestBuilder> {
+    let Some(token) = token else {
+        return Ok(request);
+    };
+    let target = adk_core::Url::parse(url)
+        .map_err(|error| adk_core::AdkError::agent(format!("invalid A2A endpoint URL: {error}")))?;
+    Ok(request.bearer_auth(token.authorize_for(&target)?.expose()))
+}
+
+/// Whether `url` names this host: `localhost`, `127.0.0.1`, or `::1`.
+fn is_loopback(url: &adk_core::Url) -> bool {
+    // `host_str` is normalized: lowercase, IPv4 dotted, IPv6 bracketed and compressed.
+    matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"))
+}
+
+/// `url`'s origin, with every loopback name written as `localhost`.
+fn comparable_origin(url: &adk_core::Url) -> String {
+    let host = if is_loopback(url) {
+        "localhost".to_string()
+    } else {
+        url.host_str().unwrap_or_default().to_string()
+    };
+    format!("{}://{host}:{}", url.scheme(), url.port_or_known_default().unwrap_or_default())
+}
+
+/// Checks that `endpoint`, the RPC URL named by the agent card fetched from `card_url`,
+/// may receive messages.
+///
+/// The endpoint must share the card's origin, with `localhost`, `127.0.0.1`, and `::1`
+/// counted as one host, or have an origin listed in `allowed_origins`. An allowed endpoint
+/// on another origin must use `https` unless its host is loopback. Without this check a
+/// card could send every message, and any credential sent with it, to a host of its
+/// choosing.
+///
+/// # Example
+///
+/// ```rust
+/// use adk_server::a2a::client::check_card_endpoint;
+///
+/// let card = "https://agents.example.com/.well-known/agent-card.json";
+/// assert!(check_card_endpoint(card, "https://agents.example.com/a2a", &[]).is_ok());
+/// assert!(check_card_endpoint(card, "https://collector.example.net/a2a", &[]).is_err());
+///
+/// let allowed = vec!["https://rpc.example.com".to_string()];
+/// assert!(check_card_endpoint(card, "https://rpc.example.com/a2a", &allowed).is_ok());
+/// ```
+///
+/// # Errors
+///
+/// Returns `a2a.card_endpoint_refused` when the endpoint may not receive messages, and an
+/// invalid-input error when either URL does not parse.
+pub fn check_card_endpoint(
+    card_url: &str,
+    endpoint: &str,
+    allowed_origins: &[String],
+) -> Result<()> {
+    let parse = |url: &str, what: &str| {
+        adk_core::Url::parse(url).map_err(|error| {
+            adk_core::AdkError::new(
+                adk_core::ErrorComponent::Server,
+                adk_core::ErrorCategory::InvalidInput,
+                "a2a.card_endpoint_invalid",
+                format!("invalid A2A {what} URL: {error}"),
+            )
+        })
+    };
+    let card = parse(card_url, "agent card")?;
+    let target = parse(endpoint, "endpoint")?;
+    let target_origin = comparable_origin(&target);
+    if target_origin == comparable_origin(&card) {
+        return Ok(());
+    }
+    let refused = |reason: String| {
+        Err(adk_core::AdkError::new(
+            adk_core::ErrorComponent::Server,
+            adk_core::ErrorCategory::Forbidden,
+            "a2a.card_endpoint_refused",
+            reason,
+        ))
+    };
+    let listed = allowed_origins.iter().any(|origin| {
+        adk_core::Url::parse(origin).is_ok_and(|origin| comparable_origin(&origin) == target_origin)
+    });
+    if !listed {
+        return refused(format!(
+            "the agent card from {} names an endpoint on {}; messages are sent only to the \
+             card's origin unless the endpoint's origin is allowed explicitly",
+            card.origin().ascii_serialization(),
+            target.origin().ascii_serialization(),
+        ));
+    }
+    if target.scheme() != "https" && !is_loopback(&target) {
+        return refused(format!(
+            "the agent card endpoint on {} must use https",
+            target.origin().ascii_serialization()
+        ));
+    }
+    Ok(())
 }
 
 impl A2aClient {
-    /// Create a new A2A client from an agent card
+    /// Create a new A2A client from an agent card.
+    ///
+    /// The card is trusted as given: its endpoint is not checked. Resolve cards from a
+    /// URL with [`resolve_agent_card`](Self::resolve_agent_card) or
+    /// [`from_url`](Self::from_url), which check it.
     pub fn new(agent_card: AgentCard) -> Self {
-        Self { http_client: reqwest::Client::new(), agent_card }
+        Self { http_client: reqwest::Client::new(), agent_card, credential: None }
     }
 
-    /// Resolve an agent card from a URL (fetch from /.well-known/agent.json)
-    pub async fn resolve_agent_card(base_url: &str) -> Result<AgentCard> {
-        let url = format!("{}/.well-known/agent.json", base_url.trim_end_matches('/'));
+    /// Sends `token` as a bearer credential on every message request.
+    ///
+    /// A request goes out only when its URL is inside the token's audience
+    /// ([`ScopedToken::authorize_for`](adk_core::ScopedToken::authorize_for)); a request
+    /// to any other URL fails with `credential.audience_mismatch` and is not sent.
+    /// Agent card discovery stays unauthenticated.
+    pub fn with_credential(mut self, token: adk_core::ScopedToken) -> Self {
+        self.credential = Some(token);
+        self
+    }
 
+    /// Resolves an agent card from a base URL.
+    ///
+    /// Fetches `/.well-known/agent-card.json`, the path A2A 0.3.0 and later define,
+    /// and falls back to `/.well-known/agent.json` when that path returns 404, so
+    /// servers that predate A2A 0.3.0 still resolve.
+    ///
+    /// The card's endpoint must be on `base_url`'s origin; see [`check_card_endpoint`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the request fails, when the card path answers with a
+    /// non-success status other than the 404 that triggers the fallback, when the
+    /// body is not an agent card, or when the card names an endpoint on another origin
+    /// (`a2a.card_endpoint_refused`).
+    pub async fn resolve_agent_card(base_url: &str) -> Result<AgentCard> {
+        Self::resolve_agent_card_allowing(base_url, &[]).await
+    }
+
+    /// Resolves an agent card from a base URL, accepting an endpoint on any origin in
+    /// `allowed_origins` as well as on `base_url`'s own; see [`check_card_endpoint`].
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let card = A2aClient::resolve_agent_card_allowing(
+    ///     "https://agents.example.com",
+    ///     &["https://rpc.example.com".to_string()],
+    /// )
+    /// .await?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// See [`resolve_agent_card`](Self::resolve_agent_card).
+    pub async fn resolve_agent_card_allowing(
+        base_url: &str,
+        allowed_origins: &[String],
+    ) -> Result<AgentCard> {
+        let base_url = base_url.trim_end_matches('/');
         let client = reqwest::Client::new();
-        let response =
-            client.get(&url).send().await.map_err(|e| {
-                adk_core::AdkError::agent(format!("Failed to fetch agent card: {e}"))
-            })?;
+        let fetch = |path: &'static str| client.get(format!("{base_url}{path}")).send();
+        let fetch_error = |e: reqwest::Error| {
+            adk_core::AdkError::agent(format!("Failed to fetch agent card: {e}"))
+        };
+
+        let mut response = fetch("/.well-known/agent-card.json").await.map_err(fetch_error)?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            response = fetch("/.well-known/agent.json").await.map_err(fetch_error)?;
+        }
 
         if !response.status().is_success() {
             return Err(adk_core::AdkError::agent(format!(
@@ -41,10 +203,12 @@ impl A2aClient {
             .await
             .map_err(|e| adk_core::AdkError::agent(format!("Failed to parse agent card: {e}")))?;
 
+        check_card_endpoint(base_url, &card.url, allowed_origins)?;
         Ok(card)
     }
 
-    /// Create a client by resolving an agent card from a URL
+    /// Create a client by resolving an agent card from a URL; see
+    /// [`resolve_agent_card`](Self::resolve_agent_card).
     pub async fn from_url(base_url: &str) -> Result<Self> {
         let card = Self::resolve_agent_card(base_url).await?;
         Ok(Self::new(card))
@@ -67,9 +231,8 @@ impl A2aClient {
             id: Some(Value::String(uuid::Uuid::new_v4().to_string())),
         };
 
-        let response = self
-            .http_client
-            .post(&self.agent_card.url)
+        let post = self.http_client.post(&self.agent_card.url);
+        let response = bearer(post, self.credential.as_ref(), &self.agent_card.url)?
             .json(&request)
             .send()
             .await
@@ -107,9 +270,8 @@ impl A2aClient {
             id: Some(Value::String(uuid::Uuid::new_v4().to_string())),
         };
 
-        let response = self
-            .http_client
-            .post(&stream_url)
+        let post = self.http_client.post(&stream_url);
+        let response = bearer(post, self.credential.as_ref(), &stream_url)?
             .json(&request)
             .send()
             .await
@@ -122,59 +284,62 @@ impl A2aClient {
             )));
         }
 
-        // Parse SSE stream
+        // An event can end on any read, so bytes are decoded only once a whole SSE line has
+        // arrived; a stream that stops before a final status is reported, not completed.
         let stream = async_stream::stream! {
-            let mut bytes_stream = response.bytes_stream();
-            let mut buffer = String::new();
-
             use futures::StreamExt;
+            let mut bytes_stream = response.bytes_stream();
+            let mut decoder = SseDecoder::default();
+            let mut finished = false;
+
             while let Some(chunk_result) = bytes_stream.next().await {
                 let chunk = match chunk_result {
                     Ok(c) => c,
                     Err(e) => {
                         yield Err(adk_core::AdkError::agent(format!("Stream error: {e}")));
-                        break;
+                        return;
+                    }
+                };
+                let payloads = match decoder.push(&chunk) {
+                    Ok(payloads) => payloads,
+                    Err(e) => {
+                        yield Err(e);
+                        return;
                     }
                 };
 
-                buffer.push_str(&String::from_utf8_lossy(&chunk));
-
-                // Process complete SSE events
-                while let Some(event_end) = buffer.find("\n\n") {
-                    let event_data = buffer[..event_end].to_string();
-                    buffer = buffer[event_end + 2..].to_string();
-
-                    // Parse SSE event
-                    if let Some(data) = parse_sse_data(&event_data) {
-                        // Skip done events
-                        if data.is_empty() {
-                            continue;
-                        }
-
-                        // Parse JSON-RPC response
-                        match serde_json::from_str::<JsonRpcResponse>(&data) {
-                            Ok(rpc_response) => {
-                                if let Some(result) = rpc_response.result {
-                                    // Try to parse as different event types
-                                    if let Ok(status_event) = serde_json::from_value::<TaskStatusUpdateEvent>(result.clone()) {
-                                        yield Ok(UpdateEvent::TaskStatusUpdate(status_event));
-                                    } else if let Ok(artifact_event) = serde_json::from_value::<TaskArtifactUpdateEvent>(result) {
-                                        yield Ok(UpdateEvent::TaskArtifactUpdate(artifact_event));
-                                    }
-                                } else if let Some(error) = rpc_response.error {
-                                    yield Err(adk_core::AdkError::agent(format!(
-                                        "RPC error: {} ({})",
-                                        error.message, error.code
-                                    )));
+                for data in payloads {
+                    // The server's closing `done` event carries no data.
+                    if data.trim().is_empty() {
+                        continue;
+                    }
+                    match serde_json::from_str::<JsonRpcResponse>(&data) {
+                        Ok(rpc_response) => {
+                            if let Some(result) = rpc_response.result {
+                                if let Ok(status_event) = serde_json::from_value::<TaskStatusUpdateEvent>(result.clone()) {
+                                    finished |= ends_task(&status_event);
+                                    yield Ok(UpdateEvent::TaskStatusUpdate(status_event));
+                                } else if let Ok(artifact_event) = serde_json::from_value::<TaskArtifactUpdateEvent>(result) {
+                                    yield Ok(UpdateEvent::TaskArtifactUpdate(artifact_event));
                                 }
+                            } else if let Some(error) = rpc_response.error {
+                                yield Err(adk_core::AdkError::agent(format!(
+                                    "RPC error: {} ({})",
+                                    error.message, error.code
+                                )));
+                                return;
                             }
-                            Err(e) => {
-                                // Skip parse errors for non-JSON data
-                                tracing::debug!("Failed to parse SSE data: {e}");
-                            }
+                        }
+                        Err(e) => {
+                            // Skip parse errors for non-JSON data
+                            tracing::debug!("Failed to parse SSE data: {e}");
                         }
                     }
                 }
+            }
+
+            if !finished {
+                yield Err(truncated_stream_error());
             }
         };
 
@@ -182,14 +347,65 @@ impl A2aClient {
     }
 }
 
-/// Parse the data field from an SSE event
-fn parse_sse_data(event: &str) -> Option<String> {
-    for line in event.lines() {
-        if let Some(data) = line.strip_prefix("data:") {
-            return Some(data.trim().to_string());
+/// Whether `update` is the last status of its task's stream: a final update, or a state
+/// the task stops in.
+fn ends_task(update: &TaskStatusUpdateEvent) -> bool {
+    use crate::a2a::TaskState;
+    update.final_update
+        || match update.status.state {
+            TaskState::Completed
+            | TaskState::Failed
+            | TaskState::Canceled
+            | TaskState::InputRequired
+            | TaskState::AuthRequired => true,
+            TaskState::Submitted | TaskState::Working => false,
         }
+}
+
+/// The error for a stream that ended before its task reached a final status.
+pub(crate) fn truncated_stream_error() -> adk_core::AdkError {
+    adk_core::AdkError::agent(
+        "the A2A stream ended before the task reached a final status; the response is incomplete",
+    )
+}
+
+/// Splits an SSE byte stream into the data of each event.
+///
+/// Bytes are buffered until a whole line has arrived, so a multi-byte character split
+/// across reads is decoded intact. Lines end in `\n` or `\r\n`; an event's `data:` lines
+/// are joined with `\n`; other fields and comments are ignored.
+#[derive(Default)]
+pub(crate) struct SseDecoder {
+    buffer: Vec<u8>,
+    data: Vec<String>,
+}
+
+impl SseDecoder {
+    /// Feeds `chunk` and returns the data of every event it completes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a complete line is not valid UTF-8.
+    pub(crate) fn push(&mut self, chunk: &[u8]) -> Result<Vec<String>> {
+        self.buffer.extend_from_slice(chunk);
+        let mut events = Vec::new();
+        while let Some(end) = self.buffer.iter().position(|&byte| byte == b'\n') {
+            let line: Vec<u8> = self.buffer.drain(..=end).collect();
+            let line = std::str::from_utf8(&line[..end]).map_err(|error| {
+                adk_core::AdkError::agent(format!("the A2A stream is not valid UTF-8: {error}"))
+            })?;
+            let line = line.strip_suffix('\r').unwrap_or(line);
+            if line.is_empty() {
+                if !self.data.is_empty() {
+                    events.push(self.data.join("\n"));
+                    self.data.clear();
+                }
+            } else if let Some(value) = line.strip_prefix("data:") {
+                self.data.push(value.strip_prefix(' ').unwrap_or(value).to_string());
+            }
+        }
+        Ok(events)
     }
-    None
 }
 
 #[cfg(test)]
@@ -197,15 +413,98 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_sse_data() {
-        let event = "event: message\ndata: {\"test\": true}\n";
-        assert_eq!(parse_sse_data(event), Some("{\"test\": true}".to_string()));
+    fn a_card_endpoint_on_the_card_origin_is_accepted() {
+        let card = "https://agents.example.com/.well-known/agent-card.json";
+        assert!(check_card_endpoint(card, "https://agents.example.com/a2a", &[]).is_ok());
+        assert!(check_card_endpoint(card, "https://AGENTS.example.com:443/rpc", &[]).is_ok());
+        // Loopback names are one host.
+        let local = "http://127.0.0.1:8080/.well-known/agent-card.json";
+        assert!(check_card_endpoint(local, "http://localhost:8080/a2a", &[]).is_ok());
+        assert!(check_card_endpoint(local, "http://[::1]:8080/a2a", &[]).is_ok());
     }
 
     #[test]
-    fn test_parse_sse_data_no_data() {
-        let event = "event: ping\n";
-        assert_eq!(parse_sse_data(event), None);
+    fn a_card_endpoint_on_another_origin_is_refused() {
+        let card = "https://agents.example.com/.well-known/agent-card.json";
+        for endpoint in [
+            "https://collector.example.net/a2a",
+            "http://agents.example.com/a2a",
+            "https://agents.example.com:8443/a2a",
+            "http://169.254.169.254/latest",
+            "http://localhost:8080/a2a",
+        ] {
+            let error = check_card_endpoint(card, endpoint, &[]).unwrap_err();
+            assert_eq!(error.code, "a2a.card_endpoint_refused", "{endpoint}");
+        }
+        let local = "http://127.0.0.1:8080/.well-known/agent-card.json";
+        assert!(check_card_endpoint(local, "http://127.0.0.1:9090/a2a", &[]).is_err());
+    }
+
+    #[test]
+    fn an_allowed_origin_must_use_https_unless_loopback() {
+        let card = "https://agents.example.com/.well-known/agent-card.json";
+        let allowed = vec![
+            "https://rpc.example.com".to_string(),
+            "http://plain.example.com".to_string(),
+            "http://localhost:9090".to_string(),
+        ];
+        assert!(check_card_endpoint(card, "https://rpc.example.com/a2a", &allowed).is_ok());
+        assert!(check_card_endpoint(card, "http://127.0.0.1:9090/a2a", &allowed).is_ok());
+        let error =
+            check_card_endpoint(card, "http://plain.example.com/a2a", &allowed).unwrap_err();
+        assert!(error.message.contains("must use https"), "{error}");
+    }
+
+    #[test]
+    fn a_refusal_names_origins_not_credentials() {
+        let error = check_card_endpoint(
+            "https://user:secret@agents.example.com/card",
+            "https://token:hunter2@collector.example.net/a2a?key=abc",
+            &[],
+        )
+        .unwrap_err();
+        for leaked in ["secret", "hunter2", "key=abc", "/a2a"] {
+            assert!(!error.message.contains(leaked), "{}", error.message);
+        }
+    }
+
+    #[test]
+    fn decoder_joins_data_lines_and_ignores_other_fields() {
+        let mut decoder = SseDecoder::default();
+        let events = decoder
+            .push(b"event: message\ndata: {\"a\":\ndata: 1}\n\n: comment\nevent: ping\n\n")
+            .unwrap();
+        assert_eq!(events, vec!["{\"a\":\n1}".to_string()]);
+    }
+
+    #[test]
+    fn decoder_keeps_a_character_split_across_reads() {
+        let frame = "data: Grüße ☕\r\n\r\n".as_bytes();
+        let split = "data: Gr".len() + 1;
+        let mut decoder = SseDecoder::default();
+        assert!(decoder.push(&frame[..split]).unwrap().is_empty());
+        assert_eq!(decoder.push(&frame[split..]).unwrap(), vec!["Grüße ☕".to_string()]);
+    }
+
+    #[test]
+    fn decoder_rejects_invalid_utf8() {
+        let mut decoder = SseDecoder::default();
+        assert!(decoder.push(b"data: \xff\n\n").is_err());
+    }
+
+    #[test]
+    fn only_final_or_stopping_statuses_end_a_task() {
+        use crate::a2a::{TaskState, TaskStatus};
+        let update = |state: TaskState, final_update: bool| TaskStatusUpdateEvent {
+            task_id: "task".to_string(),
+            context_id: None,
+            status: TaskStatus { state, message: None },
+            final_update,
+        };
+        assert!(!ends_task(&update(TaskState::Working, false)));
+        assert!(ends_task(&update(TaskState::Working, true)));
+        assert!(ends_task(&update(TaskState::InputRequired, false)));
+        assert!(ends_task(&update(TaskState::Completed, false)));
     }
 }
 
@@ -270,9 +569,37 @@ pub mod v1_client {
         #[error("serialization error: {0}")]
         Serde(#[from] serde_json::Error),
 
+        /// The client's credential may not be sent to the request URL, or the URL is
+        /// invalid. The request was not sent.
+        #[error("credential refused: {0}")]
+        Credential(#[from] adk_core::AdkError),
+
         /// The server returned an unexpected HTTP status.
         #[error("unexpected HTTP status {status}: {body}")]
         UnexpectedStatus { status: u16, body: String },
+
+        /// The resolved agent card names an endpoint on an origin it may not; see
+        /// [`check_card_endpoint`](super::check_card_endpoint).
+        #[error("agent card refused: {0}")]
+        CardEndpoint(adk_core::AdkError),
+    }
+
+    /// Checks every interface this client calls (`JSONRPC`, `HTTP+JSON`) against the
+    /// origin the card was fetched from.
+    fn check_interfaces(
+        card_url: &str,
+        card: &AgentCard,
+        allowed_origins: &[String],
+    ) -> Result<(), V1ClientError> {
+        card.supported_interfaces
+            .iter()
+            .filter(|interface| {
+                matches!(interface.protocol_binding.as_str(), "JSONRPC" | "HTTP+JSON")
+            })
+            .try_for_each(|interface| {
+                super::check_card_endpoint(card_url, &interface.url, allowed_origins)
+            })
+            .map_err(V1ClientError::CardEndpoint)
     }
 
     /// Cached agent card with ETag and Last-Modified for conditional requests.
@@ -294,6 +621,7 @@ pub mod v1_client {
         agent_card: AgentCard,
         retry_config: RetryConfig,
         cached_card: std::sync::Mutex<CachedCard>,
+        credential: Option<adk_core::ScopedToken>,
     }
 
     impl A2aV1Client {
@@ -304,6 +632,7 @@ pub mod v1_client {
                 agent_card,
                 retry_config: RetryConfig::default(),
                 cached_card: std::sync::Mutex::new(CachedCard::default()),
+                credential: None,
             }
         }
 
@@ -314,7 +643,38 @@ pub mod v1_client {
                 agent_card,
                 retry_config,
                 cached_card: std::sync::Mutex::new(CachedCard::default()),
+                credential: None,
             }
+        }
+
+        /// Sends `token` as a bearer credential on every operation request.
+        ///
+        /// A request goes out only when its URL is inside the token's audience
+        /// ([`ScopedToken::authorize_for`](adk_core::ScopedToken::authorize_for)); a
+        /// request to any other URL fails with [`V1ClientError::Credential`] and is not
+        /// sent. Agent card discovery stays unauthenticated.
+        pub fn with_credential(mut self, token: adk_core::ScopedToken) -> Self {
+            self.credential = Some(token);
+            self
+        }
+
+        /// The default headers plus, when a credential is set, its bearer value for a
+        /// request to `url`.
+        fn headers_for(&self, url: &str) -> Result<HeaderMap, V1ClientError> {
+            let mut headers = Self::default_headers();
+            if let Some(token) = &self.credential {
+                let target = adk_core::Url::parse(url).map_err(|error| {
+                    adk_core::AdkError::agent(format!("invalid A2A endpoint URL: {error}"))
+                })?;
+                let secret = token.authorize_for(&target)?;
+                let mut value = HeaderValue::from_str(&format!("Bearer {}", secret.expose()))
+                    .map_err(|_| {
+                        adk_core::AdkError::agent("the brokered token is not a valid header value")
+                    })?;
+                value.set_sensitive(true);
+                headers.insert(reqwest::header::AUTHORIZATION, value);
+            }
+            Ok(headers)
         }
 
         /// Returns a reference to the agent card.
@@ -354,9 +714,27 @@ pub mod v1_client {
         /// Resolves an agent card from a base URL, fetching from
         /// `/.well-known/agent-card.json` with `A2A-Version: 1.0`.
         ///
-        /// Caches the ETag and Last-Modified headers for subsequent
-        /// conditional requests.
+        /// The card's JSON-RPC and HTTP+JSON interfaces must be on `base_url`'s origin;
+        /// see [`check_card_endpoint`](super::check_card_endpoint).
+        ///
+        /// # Errors
+        ///
+        /// Returns [`V1ClientError::CardEndpoint`] when an interface names another
+        /// origin, and the transport or status error when the card cannot be fetched.
         pub async fn resolve_agent_card(base_url: &str) -> Result<AgentCard, V1ClientError> {
+            Self::resolve_agent_card_allowing(base_url, &[]).await
+        }
+
+        /// Resolves an agent card from a base URL, accepting interfaces on any origin in
+        /// `allowed_origins` as well as on `base_url`'s own.
+        ///
+        /// # Errors
+        ///
+        /// See [`resolve_agent_card`](Self::resolve_agent_card).
+        pub async fn resolve_agent_card_allowing(
+            base_url: &str,
+            allowed_origins: &[String],
+        ) -> Result<AgentCard, V1ClientError> {
             let url = format!("{}{AGENT_CARD_PATH}", base_url.trim_end_matches('/'));
             let client = reqwest::Client::new();
             let response = client.get(&url).headers(Self::default_headers()).send().await?;
@@ -368,11 +746,15 @@ pub mod v1_client {
             }
 
             let card: AgentCard = response.json().await?;
+            check_interfaces(&url, &card, allowed_origins)?;
             Ok(card)
         }
 
         /// Resolves an agent card using conditional headers if a cached
         /// version exists. Returns `None` if the server responds 304.
+        ///
+        /// The card's interfaces must be on `base_url`'s origin, as for
+        /// [`resolve_agent_card`](Self::resolve_agent_card).
         pub async fn resolve_agent_card_cached(
             &self,
             base_url: &str,
@@ -414,6 +796,7 @@ pub mod v1_client {
                 .map(String::from);
 
             let card: AgentCard = response.json().await?;
+            check_interfaces(&url, &card, &[])?;
 
             {
                 let mut cache = self.cached_card.lock().unwrap();
@@ -489,7 +872,7 @@ pub mod v1_client {
                 match self
                     .http_client
                     .post(url)
-                    .headers(Self::default_headers())
+                    .headers(self.headers_for(url)?)
                     .json(request)
                     .send()
                     .await
@@ -547,7 +930,7 @@ pub mod v1_client {
             let response = self
                 .http_client
                 .post(&url)
-                .headers(Self::default_headers())
+                .headers(self.headers_for(&url)?)
                 .header("content-type", "application/a2a+json")
                 .json(body)
                 .send()
@@ -580,7 +963,7 @@ pub mod v1_client {
             let url = format!("{}{path}", base.trim_end_matches('/'));
 
             let response =
-                self.http_client.get(&url).headers(Self::default_headers()).send().await?;
+                self.http_client.get(&url).headers(self.headers_for(&url)?).send().await?;
 
             if !response.status().is_success() {
                 let status = response.status().as_u16();
@@ -606,7 +989,7 @@ pub mod v1_client {
             let url = format!("{}{path}", base.trim_end_matches('/'));
 
             let response =
-                self.http_client.delete(&url).headers(Self::default_headers()).send().await?;
+                self.http_client.delete(&url).headers(self.headers_for(&url)?).send().await?;
 
             if !response.status().is_success() {
                 let status = response.status().as_u16();
@@ -688,7 +1071,7 @@ pub mod v1_client {
             let response = self
                 .http_client
                 .post(url)
-                .headers(Self::default_headers())
+                .headers(self.headers_for(url)?)
                 .json(&request)
                 .send()
                 .await?;
@@ -759,7 +1142,7 @@ pub mod v1_client {
             let response = self
                 .http_client
                 .post(url)
-                .headers(Self::default_headers())
+                .headers(self.headers_for(url)?)
                 .json(&request)
                 .send()
                 .await?;
@@ -1100,6 +1483,33 @@ pub mod v1_client {
             assert!(cache.card.is_none());
             assert!(cache.etag.is_none());
             assert!(cache.last_modified.is_none());
+        }
+
+        #[test]
+        fn a_credential_is_attached_only_inside_its_audience() {
+            let token = |audience: &str| {
+                adk_core::ScopedToken::new(
+                    adk_core::AgentId::new("urn:adk:agent:caller").unwrap(),
+                    "secret",
+                    adk_core::resource_indicator(audience).unwrap(),
+                    vec![],
+                )
+            };
+            let client = A2aV1Client::new(make_test_card())
+                .with_credential(token("http://localhost:9999/a2a"));
+            let headers = client.headers_for("http://localhost:9999/a2a").unwrap();
+            assert_eq!(headers.get(reqwest::header::AUTHORIZATION).unwrap(), "Bearer secret");
+            assert_eq!(headers.get(A2A_VERSION_HEADER).unwrap(), A2A_VERSION);
+
+            match client.headers_for("http://localhost:9999/rest/tasks") {
+                Err(V1ClientError::Credential(error)) => {
+                    assert_eq!(error.code, "credential.audience_mismatch");
+                }
+                other => panic!("expected a refused credential, got {other:?}"),
+            }
+            let anonymous = A2aV1Client::new(make_test_card());
+            let headers = anonymous.headers_for("http://localhost:9999/rest").unwrap();
+            assert!(headers.get(reqwest::header::AUTHORIZATION).is_none());
         }
     }
 }

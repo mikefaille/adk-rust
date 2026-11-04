@@ -332,7 +332,7 @@ impl FunctionResponseData {
 }
 
 /// A message in a conversation, consisting of a role and content parts.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Content {
     /// The role of this content's author (e.g., "user", "model", "function").
     pub role: String,
@@ -468,7 +468,81 @@ pub enum Part {
     },
 }
 
+/// Prefix of the ID an agent gives a function call that its provider sent without one.
+///
+/// Providers such as Ollama issue tool calls without IDs. [`Content::assign_call_ids`] gives
+/// each such call a generated ID, so the call, its response and any confirmation request for
+/// it share one identity in the session, and [`Content::strip_generated_call_ids`] removes
+/// these IDs again from the contents sent to a model, so a provider never receives an ID it
+/// did not issue.
+pub const GENERATED_CALL_ID_PREFIX: &str = "adk-call-";
+
 impl Content {
+    /// Gives each function call without an ID a generated one, prefixed with
+    /// [`GENERATED_CALL_ID_PREFIX`]. Calls that carry an ID keep it.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_core::{Content, GENERATED_CALL_ID_PREFIX, Part};
+    ///
+    /// let call = |id: Option<&str>| Part::FunctionCall {
+    ///     name: "transfer".to_string(),
+    ///     args: serde_json::json!({}),
+    ///     id: id.map(str::to_string),
+    ///     thought_signature: None,
+    /// };
+    /// let mut content = Content { role: "model".into(), parts: vec![call(None), call(Some("c1"))] };
+    /// content.assign_call_ids();
+    ///
+    /// let ids: Vec<_> = content
+    ///     .parts
+    ///     .iter()
+    ///     .filter_map(|part| match part {
+    ///         Part::FunctionCall { id, .. } => id.clone(),
+    ///         _ => None,
+    ///     })
+    ///     .collect();
+    /// assert!(ids[0].starts_with(GENERATED_CALL_ID_PREFIX));
+    /// assert_eq!(ids[1], "c1");
+    /// ```
+    pub fn assign_call_ids(&mut self) {
+        for part in &mut self.parts {
+            if let Part::FunctionCall { id: id @ None, .. } = part {
+                *id = Some(format!("{GENERATED_CALL_ID_PREFIX}{}", uuid::Uuid::new_v4().simple()));
+            }
+        }
+    }
+
+    /// Removes the IDs [`assign_call_ids`](Self::assign_call_ids) generated from this
+    /// content's function calls and function responses, leaving provider-issued IDs.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_core::{Content, FunctionResponseData, Part};
+    ///
+    /// let mut content = Content {
+    ///     role: "function".into(),
+    ///     parts: vec![Part::FunctionResponse {
+    ///         function_response: FunctionResponseData::new("transfer", serde_json::json!({})),
+    ///         id: Some("adk-call-1f2e".into()),
+    ///         annotations: None,
+    ///     }],
+    /// };
+    /// content.strip_generated_call_ids();
+    /// assert!(matches!(&content.parts[0], Part::FunctionResponse { id: None, .. }));
+    /// ```
+    pub fn strip_generated_call_ids(&mut self) {
+        for part in &mut self.parts {
+            if let Part::FunctionCall { id, .. } | Part::FunctionResponse { id, .. } = part
+                && id.as_deref().is_some_and(|id| id.starts_with(GENERATED_CALL_ID_PREFIX))
+            {
+                *id = None;
+            }
+        }
+    }
+
     /// Returns `true` if any part of this content is a function (tool) call.
     ///
     /// Useful for deciding response semantics — e.g. a model turn that emits
@@ -493,6 +567,36 @@ impl Content {
     /// ```
     pub fn has_function_calls(&self) -> bool {
         self.parts.iter().any(|p| matches!(p, Part::FunctionCall { .. }))
+    }
+
+    /// Returns `true` if this content carries input from its author: a part other than
+    /// blank text or a function response.
+    ///
+    /// A run that only resumes held tool calls sends a user turn of blank text, and a
+    /// client's custom tool results arrive as user-role function responses; neither is a
+    /// message for input guardrails to screen.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_core::Content;
+    ///
+    /// assert!(Content::new("user").with_text("hello").carries_user_input());
+    /// assert!(!Content::new("user").with_text("  ").carries_user_input());
+    /// assert!(!Content::new("user").carries_user_input());
+    /// ```
+    pub fn carries_user_input(&self) -> bool {
+        self.parts.iter().any(|part| match part {
+            Part::Text { text } => !text.trim().is_empty(),
+            Part::FunctionResponse { .. } => false,
+            Part::Thinking { .. }
+            | Part::InlineData { .. }
+            | Part::FileData { .. }
+            | Part::FunctionCall { .. }
+            | Part::ServerToolCall { .. }
+            | Part::ServerToolResponse { .. }
+            | Part::EmbeddedResource { .. } => true,
+        })
     }
 
     /// Creates a new empty content with the given role.

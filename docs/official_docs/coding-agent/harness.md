@@ -1,5 +1,8 @@
 # The Coding Harness (`CodingAgent`)
 
+> **Note:** the [harness](../harness/index.md) supersedes `adk_agent::coding::CodingAgent` in 3.1;
+> see [Migrating from `CodingAgent`](../migration/coding-agent-to-harness.md).
+
 `CodingAgent` is a thin harness — shipped in `adk-agent` behind the `coding`
 feature — that wires the [dev tools](devtools.md), a planning `write_todos` tool,
 and a minimal coding system prompt onto a normal `LlmAgent`. It's *configuration
@@ -14,7 +17,7 @@ use adk_devtools::Workspace;
 
 let coding = CodingAgent::builder()
     .model(model)                              // any adk-model provider (required)
-    .workspace(Workspace::new("./my-repo"))    // sandboxed (required)
+    .workspace(Workspace::new("./my-repo").allow_bash(true)) // sandboxed (required); bash is opt-in
     .instruction("Follow the project's existing style; prefer small diffs.") // optional, appended
     .build()?;
 
@@ -36,12 +39,36 @@ Builder options:
 
 - **The dev toolset** — read/write/edit/glob/grep/bash, scoped to the workspace.
 - **`write_todos`** — a planning tool the model uses to record and update a short
-  task list. Read it back from the harness:
+  task list. Each call replaces the list of the session it runs in, stored in
+  session state under `harness:todos` (`adk_agent::coding::TODOS_STATE_KEY`) as
+  `{ "items": [{ "id", "content", "status" }], "revision" }`, so sessions sharing one
+  agent keep separate plans. UIs see each write in
+  `event.actions.state_delta["harness:todos"]`. `coding.todos()` returns the last
+  list any session wrote in this process, which is the running session's list when
+  one session runs at a time:
 
   ```rust
   for todo in coding.todos() {
       println!("[{}] {}", todo.status, todo.content);  // pending | in_progress | completed
   }
+  ```
+
+  For a specific session, read the key from its state:
+
+  ```rust
+  use adk_agent::coding::TODOS_STATE_KEY;
+  use adk_session::GetRequest;
+
+  let session = sessions
+      .get(GetRequest {
+          app_name: "my-app".into(),
+          user_id: "user".into(),
+          session_id: "session-1".into(),
+          num_recent_events: None,
+          after: None,
+      })
+      .await?;
+  let todos = session.state().get(TODOS_STATE_KEY); // Some({"items": [...], "revision": n})
   ```
 
 - **A minimal prompt** — sub-1k-token base instructions ("explore before you
@@ -74,8 +101,7 @@ Because it's an `LlmAgent` underneath, everything else in ADK composes:
 
 - Attach a [`MemoryService`](../memory/index.md) (e.g. the bi-temporal knowledge
   graph) on the `Runner` for cross-session project memory.
-- Add [lazy skills](../agents/realtime-agents.md) via `adk-skill` to extend
-  capabilities without bloating the prompt.
+- Add skills with `adk-skill` to extend capabilities without bloating the prompt.
 - Hooks/guardrails (`adk-plugin`, `adk-guardrail`) gate tool calls deterministically.
 
 ## Running it

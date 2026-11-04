@@ -24,28 +24,51 @@
 //!
 //! ## Quick Start
 //!
-//! ```rust,ignore
-//! use adk_graph::functional::{TaskContext, ReducedValue, MessagesValue};
+//! `#[task]` generates a `__task_<name>` wrapper next to the function. Call the wrapper: it
+//! records the call in the run's execution log and checkpoints its result, so a resumed run
+//! returns the recorded result instead of running the task again. Calling the function
+//! itself runs it with neither. `#[entrypoint]` generates `<Name>Agent`, which runs the
+//! workflow against a checkpointer.
+//!
+//! ```rust
+//! use std::sync::Arc;
+//!
+//! use adk_graph::checkpoint::{Checkpointer, MemoryCheckpointer};
+//! use adk_graph::error::Result;
+//! use adk_graph::functional::TaskContext;
+//! use adk_graph::node::ExecutionConfig;
+//! use adk_graph::state::State;
 //! use adk_rust_macros::{entrypoint, task};
+//! use serde_json::{Value, json};
 //!
 //! #[task]
-//! async fn fetch_data(ctx: &mut TaskContext) -> Result<String, FunctionalError> {
-//!     ctx.emit(serde_json::json!({"status": "fetching"})).await;
-//!     Ok("data result".to_string())
+//! async fn fetch_data(_ctx: &mut TaskContext) -> Result<Value> {
+//!     Ok(json!("data result"))
 //! }
 //!
 //! #[task(retry(max_attempts = 3, backoff = "1s"))]
-//! async fn process(ctx: &mut TaskContext, data: &str) -> Result<String, FunctionalError> {
-//!     Ok(format!("processed: {data}"))
+//! async fn process(_ctx: &mut TaskContext, data: &str) -> Result<Value> {
+//!     Ok(json!(format!("processed: {data}")))
 //! }
 //!
 //! #[entrypoint]
-//! async fn my_workflow(ctx: &mut TaskContext) -> Result<(), FunctionalError> {
-//!     let data = fetch_data(ctx).await?;
-//!     let result = process(ctx, &data).await?;
-//!     ctx.set("output", serde_json::json!(result));
-//!     Ok(())
+//! async fn my_workflow(ctx: &mut TaskContext) -> Result<Value> {
+//!     let data = __task_fetch_data(ctx).await?;
+//!     let result = __task_process(ctx, data.as_str().unwrap_or_default()).await?;
+//!     ctx.set("output", result);
+//!     Ok(Value::Null)
 //! }
+//!
+//! # #[tokio::main]
+//! # async fn main() -> Result<()> {
+//! let checkpointer = Arc::new(MemoryCheckpointer::new());
+//! let agent = MyWorkflowAgent::new(checkpointer.clone());
+//! let state = agent.invoke(State::new(), ExecutionConfig::new("thread-1")).await?;
+//! assert_eq!(state["output"], json!("processed: data result"));
+//! // The run checkpointed the thread; a resume replays the recorded task results.
+//! assert!(checkpointer.load("thread-1").await?.is_some());
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ## Typed State Reducers
@@ -78,7 +101,9 @@ mod error;
 pub mod execution_log;
 pub mod messages;
 pub mod reducers;
+mod resume;
 pub mod schema;
+mod task_id;
 pub mod typed_reducer;
 
 pub use context::TaskContext;
@@ -87,4 +112,26 @@ pub use execution_log::{ExecutionLog, TaskRecord, TaskStatus};
 pub use messages::{ChatMessage, MessageRole, MessagesValue};
 pub use reducers::{ReducedValue, UntrackedValue};
 pub use schema::{ExpectedType, StateSchemaValidator};
+/// Items the `#[entrypoint]` and `#[task]` expansions call; not public API.
+#[doc(hidden)]
+pub mod __private {
+    pub use super::resume::load_resume_point;
+    pub use super::task_id::__private::*;
+
+    /// Runs `workflow` until it finishes or `token` is cancelled.
+    ///
+    /// Called by the `#[entrypoint]` expansion, so the generated code needs no
+    /// `tokio` macros of its own.
+    pub async fn until_cancelled<T>(
+        token: &tokio_util::sync::CancellationToken,
+        workflow: impl std::future::Future<Output = crate::error::Result<T>>,
+    ) -> crate::error::Result<T> {
+        tokio::select! {
+            biased;
+            () = token.cancelled() => Err(crate::error::GraphError::Cancelled),
+            result = workflow => result,
+        }
+    }
+}
+pub use task_id::task_call_id;
 pub use typed_reducer::{AppendReducer, MergeReducer, ReplaceReducer, TypedReducer};

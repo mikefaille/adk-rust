@@ -11,7 +11,7 @@ GraphAgent allows you to define workflows as directed graphs with nodes and edge
 - **Conditional Routing**: Dynamic edge routing based on state
 - **State Management**: Typed state with reducers (overwrite, append, sum, custom)
 - **Checkpointing**: Persistent state for fault tolerance and human-in-the-loop
-- **Streaming**: Multiple stream modes (values, updates, messages, debug)
+- **Streaming**: Multiple stream modes (values, updates, messages, custom, debug)
 
 The `adk-graph` crate provides LangGraph-style workflow orchestration for building complex, stateful agent workflows. It brings graph-based workflow capabilities to the ADK-Rust ecosystem while maintaining full compatibility with ADK's agent system.
 
@@ -111,7 +111,7 @@ In this guide, you'll create a **Text Processing Pipeline** that runs translatio
 Nodes are where the actual work happens. Each node can:
 - **AgentNode**: Wrap an LLM agent to process natural language
 - **Function Node**: Execute custom Rust code for data processing
-- **Built-in Nodes**: Use predefined logic like counters or validators
+- **Action Nodes**: Deterministic node types from `adk-action` (the `action` feature), such as set, transform, switch and HTTP
 
 Think of nodes as specialized workers in an assembly line - each has a specific job and expertise.
 
@@ -154,14 +154,18 @@ Add dependencies to `Cargo.toml`:
 
 ```toml
 [dependencies]
-adk-graph = { version = "2.1.0", features = ["sqlite"] }
-adk-agent = "2.1.0"
-adk-model = "2.1.0"
-adk-core = "2.1.0"
+adk-graph = { version = "3.0.0", features = ["sqlite"] }
+adk-agent = "3.0.0"
+adk-model = "3.0.0"
+adk-core = "3.0.0"
+adk-tool = "3.0.0"
 tokio = { version = "1", features = ["full"] }
 dotenvy = "0.15"
 serde_json = "1.0"
+anyhow = "1"
 ```
+
+`adk-tool` is used by the ReAct example, and the `sqlite` feature by `SqliteCheckpointer`.
 
 Create `.env` with your API key:
 
@@ -415,6 +419,7 @@ Build smart routing systems where LLMs decide the execution path:
 
 ```rust
 use adk_agent::LlmAgentBuilder;
+use adk_core::Agent;
 use adk_graph::{
     edge::{END, Router, START},
     graph::StateGraph,
@@ -508,31 +513,37 @@ async fn main() -> anyhow::Result<()> {
             updates
         });
 
-    // Response nodes (similar pattern for each)
-    let positive_node = AgentNode::new(positive_agent)
-        .with_input_mapper(|state| {
-            let text = state.get("feedback").and_then(|v| v.as_str()).unwrap_or("");
-            adk_core::Content::new("user").with_text(text)
-        })
-        .with_output_mapper(|events| {
-            let mut updates = std::collections::HashMap::new();
-            for event in events {
-                if let Some(content) = event.content() {
-                    let text: String = content.parts.iter()
-                        .filter_map(|p| p.text())
-                        .collect::<Vec<_>>()
-                        .join("");
-                    updates.insert("response".to_string(), json!(text));
+    // Response nodes share one input and output mapping
+    let response_node = |agent: Arc<dyn Agent>| {
+        AgentNode::new(agent)
+            .with_input_mapper(|state| {
+                let text = state.get("feedback").and_then(|v| v.as_str()).unwrap_or("");
+                adk_core::Content::new("user").with_text(text)
+            })
+            .with_output_mapper(|events| {
+                let mut updates = std::collections::HashMap::new();
+                // Streamed deltas end with one complete event; read only complete events.
+                for event in events.iter().filter(|event| !event.llm_response.partial) {
+                    if let Some(content) = event.content() {
+                        let text: String = content.parts.iter()
+                            .filter_map(|p| p.text())
+                            .collect::<Vec<_>>()
+                            .join("");
+                        if !text.is_empty() {
+                            updates.insert("response".to_string(), json!(text));
+                        }
+                    }
                 }
-            }
-            updates
-        });
+                updates
+            })
+    };
 
     // Build graph with conditional routing
     let graph = StateGraph::with_channels(&["feedback", "sentiment", "response"])
         .add_node(classifier_node)
-        .add_node(positive_node)
-        // ... add negative_node and neutral_node similarly
+        .add_node(response_node(positive_agent))
+        .add_node(response_node(negative_agent))
+        .add_node(response_node(neutral_agent))
         .add_edge(START, "classifier")
         .add_conditional_edges(
             "classifier",
@@ -573,41 +584,19 @@ Positive Agent: "Thank you so much for the wonderful feedback!
 
 ## ReAct Pattern: Reasoning + Acting
 
-Build agents that can use tools iteratively to solve complex problems:
+An `LlmAgent` with tools already runs the reason–act loop: it calls tools, reads their
+results and asks the model again until the model answers without a tool call. Inside a
+graph, that whole loop happens within one run of its `AgentNode`, and the node's output
+mapper receives every event of it — the tool calls, their results and the final answer.
 
-### Visual: ReAct Cycle
+### Visual: ReAct Inside One Node
 
 ```
-                        ┌─────────────────────┐
-       User Question    │                     │
-      ────────────────▶ │      REASONER       │
-                        │  🧠 Think + Act     │
-                        └──────────┬──────────┘
-                                   │
-                                   ▼
-                        ┌─────────────────────┐
-                        │   Has tool calls?   │
-                        │                     │
-                        └──────────┬──────────┘
-                                   │
-                   ┌───────────────┴───────────────┐
-                   │                               │
-                   ▼                               ▼
-        ┌──────────────────┐            ┌──────────────────┐
-        │       YES        │            │        NO        │
-        │                  │            │                  │
-        │  🔄 Loop back    │            │  ✅ Final answer │
-        │     to reasoner  │            │      END         │
-        └─────────┬────────┘            └──────────────────┘
-                  │
-                  └─────────────────┐
-                                    │
-                                    ▼
-                        ┌─────────────────────┐
-                        │      REASONER       │
-                        │  🧠 Think + Act     │
-                        │   (next iteration)  │
-                        └─────────────────────┘
+                        ┌──────────────────────────────────┐
+       User Question    │            REASONER              │
+      ────────────────▶ │  🧠 model → 🔧 tools → 🧠 model   │ ──▶ END
+                        │  (repeats until it answers)      │
+                        └──────────────────────────────────┘
 ```
 
 ### Complete ReAct Example
@@ -618,7 +607,7 @@ use adk_core::{Part, Tool};
 use adk_graph::{
     edge::{END, START},
     graph::StateGraph,
-    node::{AgentNode, ExecutionConfig, NodeOutput},
+    node::{AgentNode, ExecutionConfig},
     state::State,
 };
 use adk_model::GeminiModel;
@@ -649,17 +638,11 @@ async fn main() -> anyhow::Result<()> {
 
     let calculator_tool = Arc::new(FunctionTool::new(
         "calculator",
-        "Perform mathematical calculations. Takes an 'expression' parameter (string).",
+        "Add two numbers. Takes 'a' and 'b' parameters (numbers).",
         |_ctx, args| async move {
-            let expr = args.get("expression").and_then(|v| v.as_str()).unwrap_or("0");
-            let result = match expr {
-                "2 + 2" => "4",
-                "10 * 5" => "50",
-                "100 / 4" => "25",
-                "15 - 7" => "8",
-                _ => "Unable to evaluate",
-            };
-            Ok(json!({ "result": result, "expression": expr }))
+            let a = args.get("a").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let b = args.get("b").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            Ok(json!({ "result": a + b }))
         },
     )) as Arc<dyn Tool>;
 
@@ -677,7 +660,7 @@ async fn main() -> anyhow::Result<()> {
             .build()?,
     );
 
-    // Create reasoner node that detects tool usage
+    // Record the tools the agent called and its final answer
     let reasoner_node = AgentNode::new(reasoner_agent)
         .with_input_mapper(|state| {
             let question = state.get("question").and_then(|v| v.as_str()).unwrap_or("");
@@ -685,66 +668,39 @@ async fn main() -> anyhow::Result<()> {
         })
         .with_output_mapper(|events| {
             let mut updates = std::collections::HashMap::new();
-            let mut has_tool_calls = false;
+            let mut tools_used = Vec::new();
             let mut response = String::new();
 
-            for event in events {
+            // Streamed deltas end with one complete event; read only complete events.
+            for event in events.iter().filter(|event| !event.llm_response.partial) {
                 if let Some(content) = event.content() {
                     for part in &content.parts {
                         match part {
-                            Part::FunctionCall { .. } => {
-                                has_tool_calls = true;
-                            }
-                            Part::Text { text } => {
-                                response.push_str(text);
-                            }
+                            Part::FunctionCall { name, .. } => tools_used.push(name.clone()),
+                            Part::Text { text } => response.push_str(text),
                             _ => {}
                         }
                     }
                 }
             }
 
-            updates.insert("has_tool_calls".to_string(), json!(has_tool_calls));
+            updates.insert("tools_used".to_string(), json!(tools_used));
             updates.insert("response".to_string(), json!(response));
             updates
         });
 
-    // Build ReAct graph with cycle
-    let graph = StateGraph::with_channels(&["question", "has_tool_calls", "response", "iteration"])
+    let graph = StateGraph::with_channels(&["question", "tools_used", "response"])
         .add_node(reasoner_node)
-        .add_node_fn("counter", |ctx| async move {
-            let i = ctx.get("iteration").and_then(|v| v.as_i64()).unwrap_or(0);
-            Ok(NodeOutput::new().with_update("iteration", json!(i + 1)))
-        })
-        .add_edge(START, "counter")
-        .add_edge("counter", "reasoner")
-        .add_conditional_edges(
-            "reasoner",
-            |state| {
-                let has_tools = state.get("has_tool_calls").and_then(|v| v.as_bool()).unwrap_or(false);
-                let iteration = state.get("iteration").and_then(|v| v.as_i64()).unwrap_or(0);
+        .add_edge(START, "reasoner")
+        .add_edge("reasoner", END)
+        .compile()?;
 
-                // Safety limit
-                if iteration >= 5 { return END.to_string(); }
-
-                if has_tools {
-                    "counter".to_string()  // Loop back for more reasoning
-                } else {
-                    END.to_string()  // Done - final answer
-                }
-            },
-            [("counter", "counter"), (END, END)],
-        )
-        .compile()?
-        .with_recursion_limit(10);
-
-    // Test the ReAct agent
     let mut input = State::new();
     input.insert("question".to_string(), json!("What's the weather in Paris and what's 15 + 25?"));
 
     let result = graph.invoke(input, ExecutionConfig::new("react-1")).await?;
+    println!("Tools used: {}", result.get("tools_used").cloned().unwrap_or_default());
     println!("Final answer: {}", result.get("response").and_then(|v| v.as_str()).unwrap_or(""));
-    println!("Iterations: {}", result.get("iteration").and_then(|v| v.as_i64()).unwrap_or(0));
 
     Ok(())
 }
@@ -754,18 +710,14 @@ async fn main() -> anyhow::Result<()> {
 ```
 Question: "What's the weather in Paris and what's 15 + 25?"
 
-Iteration 1:
-  Reasoner: "I need to get weather info and do math"
-  → Calls get_weather(location="Paris") and calculator(expression="15 + 25")
-  → has_tool_calls = true → Loop back
-
-Iteration 2:
-  Reasoner: "Based on the results: Paris is 72°F and sunny, 15 + 25 = 40"
-  → No tool calls → has_tool_calls = false → END
-
-Final Answer: "The weather in Paris is 72°F and sunny with 45% humidity. 
-              And 15 + 25 equals 40."
+Reasoner (one node run):
+  model  → calls get_weather(location="Paris") and calculator(a=15, b=25)
+  tools  → {"temperature": "72°F", "condition": "Sunny", ...}, {"result": 40.0}
+  model  → "The weather in Paris is 72°F and sunny, and 15 + 25 = 40."
 ```
+
+Use a graph cycle when a step *outside* the agent decides whether to go again, as in
+[Cyclic Graphs](#cyclic-graphs-review-loop).
 
 ### AgentNode
 
@@ -781,6 +733,8 @@ automatically:
 | Carried through | Note |
 |-----------------|------|
 | `app_name`, `user_id`, `session_id` | The caller's, not a synthetic one |
+| `invocation_id` | The caller's, so the node's events belong to the caller's invocation |
+| Session state | The caller's session state, read live, with the graph's state layered on top, so an instruction template such as `{customer_name}` resolves from either; writes through `State::set` stay with the node |
 | Scopes and request metadata | So scope checks see the caller's grants |
 | Secret service, memory, artifacts, shared state | Available exactly as outside the graph |
 | Cancellation | `Runner::interrupt` reaches an agent running as a node |
@@ -797,12 +751,39 @@ To bridge manually — for instance when driving a graph from your own executor 
 the invocation explicitly:
 
 ```rust
-let config = ExecutionConfig::new(ctx.session_id()).with_parent_context(ctx.clone());
+use adk_graph::agent::session_thread_id;
+
+let thread_id = session_thread_id(ctx.app_name(), ctx.user_id(), ctx.session_id());
+let config = ExecutionConfig::new(&thread_id).with_parent_context(ctx.clone());
 ```
 
-> **Note:** the node still runs on its own in-memory graph session, so agent
-> conversation history inside a node is scoped to the node rather than appended to the
-> caller's session.
+> **Note:** the node's conversation is its own: the agent's history is the input the
+> node's mapper built and the agent's own turns, not the caller's conversation.
+
+#### What the caller sees
+
+Under a `GraphAgent`, each agent node forwards its agent's events as the agent
+produces them, so a `Runner` streams them to its caller while the graph runs and
+records them in the session. Each forwarded event carries the caller's invocation id
+and the node's branch, `{caller_branch}.{agent_name}`, so events from nodes that run
+in parallel stay attributable. A confirmation request is not forwarded on its own:
+the graph reports the pause once, with the checkpoint to resume from. A transfer the
+agent asks for names an agent of the node's own tree, so the forwarded event does
+not carry it, and the runner does not act on it. The events the
+output mapper builds from the final state follow, stamped with the turn's invocation
+id and the graph agent's name.
+
+#### When the agent fails
+
+An error the agent yields — a model failure, a guardrail block, a budget stop —
+fails the node with `GraphError::AgentFailed { node, source }`, in blocking and
+streaming execution alike. `source` is the agent's own `AdkError`. A retry policy on
+the node runs the agent again, and the nodes after it do not run on a missing answer.
+
+Under a `GraphAgent`, the turn fails with that error: a rate-limited model is still
+`ErrorCategory::RateLimited`, retryable, and HTTP 429, with the node named in the
+message. An agent node inside a subgraph is named by its path, such as
+`drafting.writer`.
 
 
 
@@ -922,16 +903,16 @@ use adk_graph::edge::Router;
     ("neutral", "neutral_handler"),
 ])
 
-// Route based on boolean field
-.conditional_edge("check", Router::by_bool("approved"), [
-    ("true", "execute"),
-    ("false", "reject"),
+// Route based on a boolean field: its true target, then its false target
+.conditional_edge("check", Router::by_bool("approved", "execute", "reject"), [
+    ("execute", "execute"),
+    ("reject", "reject"),
 ])
 
-// Limit iterations
-.conditional_edge("loop", Router::max_iterations("count", 5), [
-    ("continue", "process"),
-    ("done", END),
+// Limit iterations: "process" while count < 5, then END
+.conditional_edge("loop", Router::max_iterations("count", 5, "process", END), [
+    ("process", "process"),
+    (END, END),
 ])
 ```
 
@@ -963,90 +944,90 @@ above asks for that: a node with more than one incoming direct edge is deferred
 automatically at compile time. Branches of unequal length therefore join
 correctly without configuration.
 
-Two details follow from how the count is taken:
+A deferred node waits only for the predecessors that can still run in the current
+pass:
 
 | Case | Behaviour |
 |------|-----------|
-| Conditional predecessors | Not counted. A conditional branch may never fire, so waiting for it could stall the join. |
-| A quorum instead of all | Set `min_predecessors` on `DeferredNodeConfig` and mark the node with `mark_deferred`, to release after *n* of *m* arrive. |
+| Which predecessors arrive | Each one that routed to the node in this step, along a direct edge, a conditional edge, or a `goto`. A predecessor that ran but routed elsewhere has not arrived. |
+| A merge after a conditional branch | Runs with the branch that was taken, because the untaken branch can no longer run. |
+| A node re-entered by a loop's back edge | Runs on every pass. A predecessor reached only through the node itself belongs to the next pass, so it is not waited for. |
+| A node reached from `START` and from another node | Waits like any join: `START` has arrived, and the node runs once, after its other predecessors that can still run. A loop's head reached from `START` starts at once, because its other predecessors run only after it. |
+| A predecessor behind another waiting join | Waited for, because the other join still runs and its successors can still arrive. |
+| Nothing else can run | Every waiting node is released, so a run never ends with a join that did not fire. |
+| What `{node}_fan_in` holds | One entry per arrival: the value the predecessor wrote to a channel named after itself, or else every update it wrote. |
+| A quorum instead of all | Set `min_predecessors` on `DeferredNodeConfig` and mark the node with `mark_deferred`. With a `fan_in_timeout`, the node releases once that many arrive and ignores the late arrival of a branch it was released without. A node whose remaining predecessors can no longer run fails with `GraphError::FanInIncomplete` when fewer arrived. |
 
-## Cyclic Graphs (ReAct Pattern)
+Reachability follows declared edges, so a `goto` to a node no edge reaches is not
+anticipated.
 
-Build iterative reasoning agents with cycles:
+## Cyclic Graphs (Review Loop)
+
+A back edge makes a cycle: here a writer drafts, a reviewer approves or asks for changes,
+and the graph returns to the writer until the reviewer approves or the round limit is hit.
 
 ```rust
-use adk_core::Part;
+use adk_graph::edge::{END, START};
 
-// Create agent with tools
-let reasoner = Arc::new(
-    LlmAgentBuilder::new("reasoner")
-        .model(model)
-        .instruction("Use tools to answer questions. Provide final answer when done.")
-        .tool(search_tool)
-        .tool(calculator_tool)
-        .build()?
-);
-
-let reasoner_node = AgentNode::new(reasoner)
+// Writer drafts from the task and the last review
+let writer_node = AgentNode::new(writer)
     .with_input_mapper(|state| {
-        let question = state.get("question").and_then(|v| v.as_str()).unwrap_or("");
-        adk_core::Content::new("user").with_text(question)
+        let task = state.get("task").and_then(|v| v.as_str()).unwrap_or("");
+        let review = state.get("review").and_then(|v| v.as_str()).unwrap_or("none yet");
+        adk_core::Content::new("user").with_text(format!("Task: {task}\nLast review: {review}"))
     })
     .with_output_mapper(|events| {
         let mut updates = std::collections::HashMap::new();
-        let mut has_tool_calls = false;
-        let mut response = String::new();
-
-        for event in events {
-            if let Some(content) = event.content() {
-                for part in &content.parts {
-                    match part {
-                        Part::FunctionCall { name, .. } => {
-                            has_tool_calls = true;
-                        }
-                        Part::Text { text } => {
-                            response.push_str(text);
-                        }
-                        _ => {}
-                    }
-                }
+        for event in events.iter().filter(|event| !event.llm_response.partial) {
+            if let Some(text) = event.content().and_then(|c| c.parts.iter().find_map(|p| p.text())) {
+                updates.insert("draft".to_string(), json!(text));
             }
         }
-
-        updates.insert("has_tool_calls".to_string(), json!(has_tool_calls));
-        updates.insert("response".to_string(), json!(response));
         updates
     });
 
-// Build graph with cycle
-let react_agent = StateGraph::with_channels(&["question", "has_tool_calls", "response", "iteration"])
-    .add_node(reasoner_node)
-    .add_node_fn("counter", |ctx| async move {
-        let i = ctx.get("iteration").and_then(|v| v.as_i64()).unwrap_or(0);
-        Ok(NodeOutput::new().with_update("iteration", json!(i + 1)))
+// Reviewer answers APPROVED, or lists the changes it wants
+let reviewer_node = AgentNode::new(reviewer)
+    .with_input_mapper(|state| {
+        let draft = state.get("draft").and_then(|v| v.as_str()).unwrap_or("");
+        adk_core::Content::new("user").with_text(draft)
     })
-    .add_edge(START, "counter")
-    .add_edge("counter", "reasoner")
-    .add_conditional_edges(
-        "reasoner",
-        |state| {
-            let has_tools = state.get("has_tool_calls").and_then(|v| v.as_bool()).unwrap_or(false);
-            let iteration = state.get("iteration").and_then(|v| v.as_i64()).unwrap_or(0);
-
-            // Safety limit
-            if iteration >= 5 { return END.to_string(); }
-
-            if has_tools {
-                "counter".to_string()  // Loop back
-            } else {
-                END.to_string()  // Done
+    .with_output_mapper(|events| {
+        let mut updates = std::collections::HashMap::new();
+        for event in events.iter().filter(|event| !event.llm_response.partial) {
+            if let Some(text) = event.content().and_then(|c| c.parts.iter().find_map(|p| p.text())) {
+                updates.insert("approved".to_string(), json!(text.contains("APPROVED")));
+                updates.insert("review".to_string(), json!(text));
             }
+        }
+        updates
+    });
+
+let review_loop = StateGraph::with_channels(&["task", "draft", "review", "approved", "round"])
+    .add_node(writer_node)
+    .add_node(reviewer_node)
+    .add_node_fn("count", |ctx| async move {
+        let round = ctx.get("round").and_then(|v| v.as_i64()).unwrap_or(0);
+        Ok(NodeOutput::new().with_update("round", json!(round + 1)))
+    })
+    .add_edge(START, "writer")
+    .add_edge("writer", "reviewer")
+    .add_edge("reviewer", "count")
+    .add_conditional_edges(
+        "count",
+        |state| {
+            let approved = state.get("approved").and_then(|v| v.as_bool()).unwrap_or(false);
+            let round = state.get("round").and_then(|v| v.as_i64()).unwrap_or(0);
+            if approved || round >= 3 { END.to_string() } else { "writer".to_string() }
         },
-        [("counter", "counter"), (END, END)],
+        [("writer", "writer"), (END, END)],
     )
     .compile()?
-    .with_recursion_limit(10);
+    .with_recursion_limit(20);
 ```
+
+`with_recursion_limit` bounds the super-steps a run may take, so a cycle whose exit
+condition never holds still ends, with `GraphError::RecursionLimitExceeded`.
 
 ## Multi-Agent Supervisor
 
@@ -1175,7 +1156,8 @@ let graph = StateGraph::with_channels(&["task", "result"])
 ```rust
 use adk_graph::checkpoint::SqliteCheckpointer;
 
-let checkpointer = SqliteCheckpointer::new("checkpoints.db").await?;
+// `mode=rwc` creates the database file when it does not exist
+let checkpointer = SqliteCheckpointer::new("sqlite:checkpoints.db?mode=rwc").await?;
 
 let graph = StateGraph::with_channels(&["task", "result"])
     // ... nodes and edges
@@ -1183,39 +1165,65 @@ let graph = StateGraph::with_channels(&["task", "result"])
     .with_checkpointer(checkpointer);
 ```
 
+Every backend — memory, SQLite, PostgreSQL, Redis, MongoDB, Neo4j, and Firestore —
+passes one conformance suite. See [Graph Checkpointing](graph-checkpointing.md) for the
+backend matrix, the version rule that keeps two writers from interleaving, durability
+modes, and pending writes.
+
 ### What a Checkpoint Records
 
 A checkpoint stores the accumulated state, the step number, and the **frontier** —
 the nodes that still have to run. It is written after the frontier advances, so
-resuming never re-executes a node that already completed and never double-applies
-its updates. A run that finishes checkpoints an empty frontier, so resuming a
-completed thread returns the final state rather than restarting the graph.
+resuming an interrupted run does not re-execute a node whose step was checkpointed
+and never double-applies its updates. A run that finishes checkpoints an empty
+frontier, so resuming a completed thread with `invoke` returns the final state
+rather than restarting the graph.
 
-Two cases deliberately checkpoint the frontier that was *executing* rather than
-the next one, because the interrupted node has not produced its updates yet and
-must run again on resume:
+The frontier saved depends on how the step ended:
 
 | Situation | Frontier saved |
 |-----------|----------------|
 | Super-step completed | The next nodes to run |
 | Run finished | Empty |
-| Interrupt raised (blocking or streaming) | The nodes that were executing |
+| `interrupt_before` gate | The nodes that were executing; the gated node has not run |
+| `interrupt_after` gate | The successors of the nodes that ran |
+| Dynamic or tool-confirmation pause | The successors and `goto` targets of every node that completed in the step, plus each node that paused |
+
+A checkpoint also records the arrivals a fan-in node is still waiting on, so a join
+whose first predecessor finished before a pause or crash runs once the last one
+arrives after the resume. `update_state` keeps those arrivals, the answered gate,
+and the retry budget.
 
 Streamed runs checkpoint on the same schedule as blocking runs, including when an
 interrupt ends the stream, so a human-in-the-loop pause is resumable in either
 execution mode.
+
+### Execution Guarantees
+
+Node execution is **at-least-once**. A super-step runs its nodes, applies their
+updates, and only then saves its checkpoint, so:
+
+| Event | Effect on resume |
+|-------|------------------|
+| Crash while a super-step is running | Every node of that step runs again, including nodes that had finished |
+| A node of a super-step fails | No node still queued for the step starts, a sibling waiting to retry stops waiting, and the step is saved with the finished nodes' outputs as pending writes; a resume runs only the nodes that did not finish |
+| Checkpoint save fails | The run fails; the last saved step is where a resume starts |
+| Another writer advanced the thread | The save fails with `GraphError::CheckpointConflict` and the run stops |
+| Pause or completed step | No node of a checkpointed step runs again |
+
+Make a node with external side effects — a payment, an email, a write to another
+system — idempotent, for example by deriving an idempotency key from the thread id
+and step, so a repeated execution is harmless.
 
 ### Checkpoint History (Time Travel)
 
 > **Reads only.** `TimeTravelHandle::state_history(from, to)` returns the state that
 > was *stored* at each checkpointed step. It executes nothing — no node runs, no event
 > is regenerated, and no side effect repeats. To re-run from a point in history, use
-> `fork_at` to branch that checkpoint and invoke the graph on the forked thread. The
-> method was previously named `replay` and documented as re-executing the graph, which
-> it never did.
+> `fork_at` to branch that checkpoint and invoke the graph on the forked thread.
 
 
-Checkpoints also enable **durable resume** — if a graph execution crashes or the process restarts, execution resumes from the last persisted checkpoint rather than starting over. Use `SqliteCheckpointer` (the `sqlite` feature) for crash-safe persistence. `MemoryCheckpointer` holds checkpoints in the process, so they do not survive a restart. Those two are the backends this crate ships; implement the `Checkpointer` trait for anything else.
+Checkpoints also enable **durable resume** — if a graph execution crashes or the process restarts, execution resumes from the last persisted checkpoint rather than starting over. Use a durable backend — `SqliteCheckpointer`, `PostgresCheckpointer`, `RedisCheckpointer`, `MongoCheckpointer`, `Neo4jCheckpointer`, or `FirestoreCheckpointer` — for crash-safe persistence. `MemoryCheckpointer` holds checkpoints in the process, so they do not survive a restart. A custom backend implements the `Checkpointer` trait and runs the conformance suite; see [Graph Checkpointing](graph-checkpointing.md).
 
 ```rust
 // List all checkpoints for a thread
@@ -1266,11 +1274,12 @@ let graph = StateGraph::with_channels(&["task", "plan", "risk_level", "approved"
     .add_node(executor_node)
     .add_node_fn("review", |ctx| async move {
         let risk = ctx.get("risk_level").and_then(|v| v.as_str()).unwrap_or("low");
-        let approved = ctx.get("approved").and_then(|v| v.as_bool());
 
-        // Already approved - continue
-        if approved == Some(true) {
-            return Ok(NodeOutput::new());
+        // Resuming this pause: the reviewer's answer
+        match ctx.resume_value().and_then(|v| v.as_str()) {
+            Some("approve") => return Ok(NodeOutput::new().with_update("approved", json!(true))),
+            Some(_) => return Ok(NodeOutput::new().with_update("approved", json!(false)).with_goto([END])),
+            None => {}
         }
 
         // High/medium risk - interrupt for approval
@@ -1280,7 +1289,7 @@ let graph = StateGraph::with_channels(&["task", "plan", "risk_level", "approved"
                 json!({
                     "plan": ctx.get("plan"),
                     "risk_level": risk,
-                    "action": "Set 'approved' to true to continue"
+                    "action": "Resume with \"approve\" or \"reject\""
                 })
             ));
         }
@@ -1305,13 +1314,9 @@ match result {
         println!("Reason: {}", interrupt.interrupt);
         println!("Plan awaiting approval: {:?}", interrupt.state.get("plan"));
 
-        // Human reviews and approves...
-
-        // Update state with approval
-        graph.update_state(thread_id, [("approved".to_string(), json!(true))]).await?;
-
-        // Resume execution
-        let final_result = graph.invoke(State::new(), ExecutionConfig::new(thread_id)).await?;
+        // Human reviews and approves; the answer goes to the node that paused
+        let config = ExecutionConfig::new(thread_id).with_resume_value("review", json!("approve"));
+        let final_result = graph.invoke(State::new(), config).await?;
         println!("Final result: {:?}", final_result.get("result"));
     }
     Ok(result) => {
@@ -1322,6 +1327,16 @@ match result {
     }
 }
 ```
+
+`ctx.resume_value()` holds the answer only in the step that resumes the node's own
+pause, and the answer is not written to state, so the next pause — a later pass of
+a loop, or the next turn of a `GraphAgent` — asks again. An answer written to state,
+with `update_state` or through the next run's input, stays there: a node that reads
+it treats every later pause as already answered.
+
+When several nodes of one step pause, `InterruptedExecution::interrupts` holds
+every pause in node-name order; `interrupt` is the first. Supply an answer under
+each paused node's name.
 
 ### Static Interrupts
 
@@ -1338,24 +1353,109 @@ let graph = StateGraph::with_channels(&["task", "plan", "result"])
     .with_interrupt_before(&["executor"]);  // Always pause before execution
 ```
 
+### Governed nodes
+
+A node with a consequence — a payment, an email, an order — can opt into the governed
+path. Its call then waits for a decision like any tool call, and runs at most once per
+call in the thread's lineage, forks included. A graph that governs no node behaves as
+before.
+
+```rust
+use adk_core::ToolEffect;
+use adk_graph::agent::GraphAgent;
+use adk_graph::checkpoint::MemoryCheckpointer;
+use adk_graph::edge::{END, START};
+use adk_graph::governed::GovernedNode;
+use adk_graph::graph::StateGraph;
+use adk_graph::node::NodeOutput;
+use serde_json::json;
+
+fn build() -> adk_graph::Result<GraphAgent> {
+    let graph = StateGraph::with_channels(&["invoice", "charge"])
+        .add_node_fn("draft", |_ctx| async {
+            Ok(NodeOutput::new().with_update("invoice", json!({ "amountCents": 4200 })))
+        })
+        .add_node_fn("pay", |_ctx| async {
+            Ok(NodeOutput::new().with_update("charge", json!({ "id": "ch_1" })))
+        })
+        .add_edge(START, "draft")
+        .add_edge("draft", "pay")
+        .add_edge("pay", END)
+        .compile()?
+        .with_checkpointer(MemoryCheckpointer::new())
+        .with_node_effect("pay", ToolEffect::NonIdempotent)
+        .with_governed_node("pay", GovernedNode::new().with_approval().spending_money());
+    Ok(GraphAgent::from_graph("invoice-run", graph))
+}
+```
+
+`GraphAgentBuilder::governed_node` does the same on a builder. Run the graph under a
+`Runner` (or with `CompiledGraph::invoke_with_run_config`) whose `RunConfig` has an
+approval store and an action ledger. Each dispatch of the node goes through one bracket:
+
+| Order | Check | Outcome |
+|-------|-------|---------|
+| 0 | The gate: the parent invocation, or the `RunConfig` of `invoke_with_run_config` | Without one — plain `invoke`, or a subgraph or `NodeTool` that does not pass it on — the node is not run (`graph.not_run`) |
+| 1 | The kill switch | Frozen: refused before anything is touched (`graph.frozen`) |
+| 1a | `Node::will_act` | Does nothing here (an action node whose condition is false): done, no writes, no decision. Cannot act (an HTTP request that cannot be built): fails with that error, no decision |
+| 1b | An action ledger and a checkpointer | Without either the node is not run (`graph.unavailable`): its call could not be kept to once |
+| 2 | The action ledger, under `graph/{agent id}/{lineage root}/{node}/{occurrence}/{digest}` | Completed: answered from the effect log, not run, no decision (`recorded`). Failed: fails again (`graph.recorded_failure`). Begun without an outcome: fails closed (`graph.outcome_unknown`). Refused before: asks again |
+| 3 | `adk_core::authorize_tool_call` | Waiting: the node pauses and the call is in the inbox. Refused: not run (`graph.refused`). Approved: begin, run, complete, append to the effect log |
+
+- **The call.** `Node::call_args` describes the call, shown in full on the decision and
+  bound by its digest; a node that does not describe one is bound to the whole state it
+  reads, less the `session_id` a graph agent writes each turn. An HTTP action node
+  describes its method, full URL, headers and body, with credentials as `sha256:`
+  digests (keyed with `HttpActionPolicy::credential_key` when the host sets one).
+- **Sent once.** An action node's `Retry`, `Continue` and `Fallback` error handling does
+  not apply to a governed call: it is sent once and its failure is the node's. A timeout,
+  or an HTTP answer that fails validation or cannot be read, leaves the outcome unknown
+  (`graph.outcome_unknown`).
+- **Edits.** An approver's edit runs through `Node::run_call`, which sends exactly the
+  edited call. A node without it refuses the edit (`graph.edit_unsupported`) and nothing
+  runs; the unedited call never runs after an edit.
+- **Occurrences.** The occurrence counts the node's completed runs in the lineage, so
+  each pass of a loop is a new call. Two graph agents in one session never share a
+  record, because the key names the acting agent.
+- **Failures.** Each is a `GraphError::NodeExecutionFailed` whose message starts with
+  its code; `GovernedError::code_of` reads it back. The step is checkpointed with the
+  node `refused`, `failed` or `notRun`.
+- **Waiting.** A run that resumes the node before its call is decided pauses again with
+  the same request, without asking anyone again. When the call's arguments changed
+  while it waited, or another fork's record answers it, its waiting decision is
+  withdrawn.
+- **Subgraphs.** A governed node inside a `SubgraphNode` keys its record by the parent's
+  lineage, so a fork of the parent finds the calls its source made.
+- **Not a child.** A governed node runs only through its bracket: a node body cannot
+  invoke it with `NodeContext::run_node`, and a node cache never answers it.
+- **Names.** Governing a name that is not a node fails the run with
+  `GraphError::InvalidGraph`, and `GraphAgentBuilder::build` refuses it.
+- **Observers.** `CompiledGraph::governed_shapes` lists every governed node, inside
+  subgraphs too, with its path; `Node::subgraph` exposes a subgraph's graph.
+
+> **Note:** an `AgentNode` is not a governed node. A tool call held inside an
+> `AgentNode` pauses the graph, and on resume the node runs its agent again, which asks
+> its model again; the held call resumes only if the model makes the same call.
+
 ## Streaming Execution
 
 Stream events as the graph executes:
 
 ```rust
+use adk_graph::stream::{StreamEvent, StreamMode};
 use futures::StreamExt;
-use adk_graph::stream::StreamMode;
 
 let stream = agent.stream(input, config, StreamMode::Updates);
+futures::pin_mut!(stream);
 
 while let Some(event) = stream.next().await {
     match event? {
-        StreamEvent::NodeStart(name) => println!("Starting: {}", name),
+        StreamEvent::NodeStart { node, step } => println!("Starting: {node} (step {step})"),
         StreamEvent::Updates { node, updates } => {
-            println!("{} updated state: {:?}", node, updates);
+            println!("{node} updated state: {updates:?}");
         }
-        StreamEvent::NodeEnd(name) => println!("Completed: {}", name),
-        StreamEvent::Done(state) => println!("Final state: {:?}", state),
+        StreamEvent::NodeEnd { node, duration_ms, .. } => println!("Completed: {node} in {duration_ms} ms"),
+        StreamEvent::Done { state, .. } => println!("Final state: {state:?}"),
         _ => {}
     }
 }
@@ -1365,9 +1465,10 @@ while let Some(event) = stream.next().await {
 
 | Mode | Description |
 |------|-------------|
-| `Values` | Stream full state after each node |
+| `Values` | Stream the full state after each super-step (default) |
 | `Updates` | Stream only state changes |
-| `Messages` | Stream message-type updates |
+| `Messages` | Stream LLM tokens and messages as nodes produce them |
+| `Custom` | Stream custom events nodes emit |
 | `Debug` | Stream all internal events |
 
 `Messages` mode reads tokens from `Node::execute_stream` as they are produced.
@@ -1384,6 +1485,11 @@ call per node.
 
 Timeout policies apply to the streamed execution itself. For a stream,
 `idle_timeout` means no event was produced within the limit.
+
+A paused step ends the stream with one `StreamEvent::Interrupted { node, message }`
+per pause, in node-name order, each tool-confirmation pause preceded by its
+`tool_confirmation` custom event. In `Messages` mode a node's own pause does not
+stop the step: the other nodes of the step run, as they do in the other modes.
 
 ## Subgraphs
 
@@ -1411,7 +1517,7 @@ let outer = StateGraph::with_channels(&["document", "size"])
 | Shared names | A channel both schemas declare under one name passes through both ways. |
 | `isolated()` | Nothing passes implicitly; every exchange must be named. Worth it when the two graphs are maintained apart, because adding a channel to one then cannot silently start feeding the other. |
 | A pause inside | Pauses the parent, carrying the subgraph's name and the inner message. |
-| Threads | The subgraph runs on `<parent thread>/<node name>`, so two subgraphs of one parent cannot collide. |
+| Threads | Each activation runs on `<parent thread>/<node name>@<parent step>`, so a later pass of a loop or a later turn runs the subgraph again, and two subgraphs of one parent cannot collide. |
 | A wrong channel name | Fails when the **parent compiles**, naming the channel and the side. |
 
 That last row is the difference worth knowing: both schemas are available before
@@ -1422,8 +1528,8 @@ rejected the same way, because it could not affect its parent.
 ### Resuming a pause inside a subgraph
 
 Nothing extra is needed. Invoking the parent again on the same thread re-enters
-the subgraph, which finds its own checkpoint on `<parent thread>/<node name>` and
-continues from where it stopped. Work the subgraph finished before the pause is
+the subgraph in the step that paused, so it finds its own checkpoint on
+`<parent thread>/<node name>@<parent step>` and continues from where it stopped. Work the subgraph finished before the pause is
 not repeated, and a pause several levels down resumes the same way — the message
 names each level it passed through.
 
@@ -1457,7 +1563,7 @@ nodes.
 
 ## Reliability and Cost Controls
 
-Each of these is off by default, so a graph behaves as it did before you set one.
+Each of these is off by default.
 
 ### Per-node retry
 
@@ -1477,14 +1583,34 @@ let graph = graph.with_node_retry(
 );
 ```
 
-The delay grows by `backoff_factor`, is capped at `max_delay`, and then has jitter
-applied. A node with **no policy runs once**, so retry stays opt-in. A policy from
-`RetryPolicy::default()` allows ten attempts, whose nine sleeps total about 243
-seconds — lower `max_attempts` where a caller is waiting on the answer.
+The delay grows by `backoff_factor`, is capped at `max_delay / (1 + jitter)`, and
+then varies by up to `jitter` of itself either way, so no delay exceeds `max_delay`.
+A node with **no policy runs once**, so retry stays opt-in. A policy from
+`RetryPolicy::default()` allows ten attempts with full jitter: its nine sleeps
+total about 151 seconds on average and at most about 302 — lower `max_attempts`
+where a caller is waiting on the answer.
 
 An interrupt is never retried, whatever `retry_on` says: a pause is not a failure.
 The attempt count is checkpointed, so a resumed run continues the budget rather
 than restarting it.
+
+A failure the node's error handler does not recover ends the step's retries: a
+sibling sleeping before its next attempt stops waiting, so the run reports the
+failure without waiting for the longest retry chain. An agent node's
+`GraphError::AgentFailed` carries the model's `AdkError`, so a `RetryOn::Custom`
+predicate can retry on its category:
+
+```rust
+use adk_graph::error::GraphError;
+use adk_graph::retry::{RetryOn, RetryPolicy};
+use std::sync::Arc;
+
+let retry_on_transient = RetryOn::Custom(Arc::new(|error: &GraphError| match error {
+    GraphError::AgentFailed { source, .. } => source.is_retryable(),
+    _ => false,
+}));
+let graph = graph.with_node_retry("call_model", RetryPolicy::new(3).with_retry_on(retry_on_transient));
+```
 
 ### Bounding concurrency
 
@@ -1496,8 +1622,11 @@ let graph = graph.with_max_concurrency(4);
 ```
 
 Nodes beyond the cap wait for a slot. The admission order is the frontier sorted by
-name, so it does not depend on timing. Imperative child invocations are outside
-this budget, because a parent awaits its children while holding its own slot.
+name, so it does not depend on timing. Once a node of the step fails without
+recovery, a node still waiting for a slot does not start, so its side effects do
+not run for a step that failed; it runs when the step resumes. Imperative child
+invocations are outside this budget, because a parent awaits its children while
+holding its own slot.
 
 ### Per-node timeouts
 
@@ -1519,14 +1648,32 @@ let output = ctx
 ```
 
 The target needs no edge. Each completed child is recorded under
-`<parent>/<child>@<run_id>`, so a resumed run returns the recorded answer instead
-of executing the child again — which matters when the child costs a model call.
+`<parent>@<step>/<child>@<run_id>` while the parent's step runs:
+
+| Parent | Children |
+|--------|----------|
+| Retried by its retry policy | Those that finished are served from the record; the rest run |
+| Resumed after a pause or a failed step | Those that finished are served from the record; the rest run |
+| Re-entered by a loop in a later step | All run again, because the record is dropped once the step completes |
+| Calls the same child under the same run id while that call runs | The second call waits for the first and is served its output, so concurrent calls run the child once |
+
+The default run id counts calls to that child within one attempt of the parent, so
+pass your own when the parent's order of calls can change between attempts. A child
+with a policy set by `with_node_retry` is retried under it; the graph's default
+policy does not apply to children, because the parent's own policy retries the
+parent.
 
 ### Node caching
 
 `cache_policy` on a node keys its result by node name and current state, with an
 optional TTL, so an unchanged input skips the work. Requires the `node-cache`
 feature; a Redis-backed store is available behind `redis-cache`.
+
+The key is computed from the state at the start of the super-step, and a hit's
+cached updates are applied with the step's other updates, so a hit is
+indistinguishable from the node running: siblings in the same step never see it.
+The in-memory store belongs to the compiled graph, so every run of that graph
+shares it.
 
 ### Delta checkpoints
 
@@ -1536,8 +1683,9 @@ state, which matters when state is large and steps are many.
 ### Time travel
 
 With the `time-travel` feature, `graph.time_travel(thread_id)?` returns a handle
-over a thread's checkpoint history: list the steps, read the state at one, or
-`fork_at` a checkpoint to branch a new thread from it. The call returns `Result`
+over a thread's checkpoint history: list the steps, read the state at one,
+`fork_at` a checkpoint to branch a new thread from it, or `fork` a checkpoint by id
+with edited state. See [Graph Checkpointing](graph-checkpointing.md#forking-with-edits). The call returns `Result`
 because every operation reads checkpoints, so a graph with no checkpointer reports
 `GraphError::CheckpointError` rather than panicking.
 
@@ -1623,11 +1771,11 @@ GraphAgent implements the ADK `Agent` trait, so it works with:
 use adk_runner::Runner;
 
 let graph_agent = GraphAgent::builder("workflow")
-    .before_agent_callback(|ctx| async {
+    .before_agent_callback(|ctx| async move {
         println!("Starting graph execution for session: {}", ctx.session_id());
         Ok(())
     })
-    .after_agent_callback(|ctx, event| async {
+    .after_agent_callback(|ctx, event| async move {
         if let Some(content) = event.content() {
             println!("Graph completed with content");
         }
@@ -1640,6 +1788,33 @@ let graph_agent = GraphAgent::builder("workflow")
 // See adk-runner README for Runner configuration
 ```
 
+### Turns on a Checkpointed Thread
+
+Each `Agent::run` call is one turn on the session's thread. The thread id is
+`adk_graph::agent::session_thread_id(app_name, user_id, session_id)`: the three parts
+joined with `:`, with `%` and `:` percent-encoded inside each, so two users who choose
+the same session id never share checkpoints. `NodeTool` runs each call on its own
+thread, `adk_graph::agent::tool_call_thread_id(app_name, user_id, session_id, function_call_id)`,
+so a second call runs the graph again, and the same call dispatched again — a held call
+resuming — continues its own run. With a checkpointer configured:
+
+| Thread's latest checkpoint | What the turn does |
+|----------------------------|--------------------|
+| None | Runs the graph from its entry nodes |
+| Paused (non-empty frontier) | Resumes the paused run, with the turn's input merged into its state |
+| Finished (empty frontier) | Runs the graph again from its entry nodes, starting from the previous turn's final state with the turn's input merged on top |
+
+The recursion limit applies to each turn separately. `GraphAgent::invoke` and
+`CompiledGraph::invoke` keep the direct-graph behaviour: re-invoking a finished
+thread returns its final state without running anything.
+
+A turn that resumes a paused node is that node's answer: the node reads the turn's
+text with `ctx.resume_value()`, or the value `GraphAgentBuilder::resume_mapper`
+returns. A turn whose step paused in several nodes yields one event per pause, each
+carrying its `GraphInterruptPayload` and, for a tool-confirmation pause,
+`actions.tool_confirmation`, so a caller can answer every request before the next
+turn.
+
 ## Examples
 
 Validated graph examples in this repository:
@@ -1648,6 +1823,8 @@ Validated graph examples in this repository:
 cargo run --manifest-path examples/tier_examples/standard/Cargo.toml --bin 11-standard-graph
 cargo run --manifest-path examples/tier_examples/standard/Cargo.toml --bin 12-standard-sequential
 cargo run --manifest-path examples/competitive_graph_resume/Cargo.toml
+# Streaming node events, session state in templates, failed steps, retries and pauses
+cargo run --manifest-path examples/graph_runtime/Cargo.toml -- --checkpointer sqlite
 ```
 
 The full graph gallery with real LLM integration lives in [adk-playground](https://github.com/zavora-ai/adk-playground).
@@ -1658,9 +1835,9 @@ The full graph gallery with real LLM integration lives in [adk-playground](https
 |---------|-----------|-----------|
 | State management | TypedDict + reducers | `StateSchema` + reducers |
 | Execution model | Pregel super-steps | Pregel super-steps |
-| Checkpointing | Memory, SQLite, Postgres | Memory, SQLite |
+| Checkpointing | Memory, SQLite, Postgres | Memory, SQLite, PostgreSQL, Redis, MongoDB, Neo4j, Firestore |
 | Human-in-the-loop | `interrupt_before`/`after` | `interrupt_before`/`after` + dynamic |
-| Streaming | 5 modes | 5 modes |
+| Streaming | Several modes | `Values`, `Updates`, `Messages`, `Custom`, `Debug` |
 | Cycles | Native | Native |
 | Type safety | Python typing | Rust type system |
 | LLM integration | LangChain | `AgentNode` + ADK agents |
@@ -1672,13 +1849,12 @@ The full graph gallery with real LLM integration lives in [adk-playground](https
 | Deferred join | `defer=True` | Automatic for multiple direct predecessors, plus an *n*-of-*m* quorum |
 | Subgraph as a node | `add_node("sub", compiled)` | `SubgraphNode`, with channel mapping checked when the parent compiles |
 | Subgraph to parent hop | `Command(graph=Command.PARENT)` | `NodeOutput::with_goto_parent` |
-| Graph-wide node defaults | `set_node_defaults` (≥1.2) | `with_node_defaults`, plus the pre-existing `default_timeout` |
-| Node failure handlers | `error_handler` (≥1.2) | `with_node_error_handler`, run once the retry budget is spent |
+| Graph-wide node defaults | `set_node_defaults` | `with_node_defaults`, plus `default_timeout` |
+| Node failure handlers | `error_handler` | `with_node_error_handler`, run once the retry budget is spent |
 
-Two differences are worth stating plainly. `run_node_with` returns the child's
-result inline and records it, so a resumed run does not pay for a completed child
-again, whereas `Send` hands work to the scheduler and collects it through a
-reducer. And a hop from a subgraph into its parent has no equivalent here yet.
+`run_node_with` returns the child's result inline and records it, so a resumed run
+does not pay for a completed child again, whereas `Send` hands work to the scheduler
+and collects it through a reducer.
 
 ---
 

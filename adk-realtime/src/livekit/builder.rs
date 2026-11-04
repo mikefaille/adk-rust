@@ -108,6 +108,7 @@ impl<I> LiveKitRoomBuilder<I> {
 impl LiveKitRoomBuilder<Present> {
     /// Connect to the LiveKit room and return the configured bundle.
     pub async fn connect(self) -> Result<LiveKitRoomBundle, LiveKitError> {
+        adk_core::ensure_crypto_provider();
         let identity = self.identity.ok_or_else(|| {
             LiveKitError::ConfigError(
                 "Identity is unexpectedly missing from the builder".to_string(),

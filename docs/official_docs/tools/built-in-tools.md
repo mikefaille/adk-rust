@@ -2,7 +2,7 @@
 
 ADK-Rust provides several built-in tools that extend agent capabilities without requiring custom implementation. These tools are ready to use out of the box and integrate seamlessly with the agent framework.
 
-Provider-native tools are now declared through the normal `Tool` API instead of provider-specific `GenerateContentConfig.extensions` blobs. This means you can mix native tools such as Gemini Google Search, Anthropic Web Search, or OpenAI Responses web search with ordinary `FunctionTool` instances in the same agent.
+Provider-native tools are declared through the normal `Tool` API, so you can mix native tools such as Gemini Google Search, Anthropic Web Search, or OpenAI Responses web search with ordinary `FunctionTool` instances in the same agent.
 
 ## Overview
 
@@ -14,8 +14,9 @@ Provider-native tools are now declared through the normal `Tool` API instead of 
 | `UrlContextTool` | Gemini URL grounding | Summarize or reason over live URLs |
 | `GoogleMapsTool` | Gemini Google Maps grounding | Places, routes, and local context |
 | `GeminiCodeExecutionTool` | Gemini native code execution | Server-side Python execution |
-| `WebSearchTool` | Anthropic native web search | Claude server-side web search |
+| `WebSearchTool` | Anthropic native web search | Claude server-side web search; `with_dynamic_filtering()` declares `web_search_20260209`, and `with_allowed_callers(["direct"])` turns its dynamic filtering off |
 | `OpenAIWebSearchTool` | OpenAI Responses web search | OpenAI-hosted retrieval |
+| `DeepSeekWebSearchTool` | DeepSeek Responses web search | DeepSeek server-side search with `deepseek-v4-pro` on `OpenAIResponsesClient` at `https://api.deepseek.com` |
 | `AgentTool` | Wrap agents as callable tools | Agent composition and delegation |
 | `ExitLoopTool` | Loop termination | Controlling LoopAgent iterations |
 | `LoadArtifactsTool` | Artifact loading | Accessing stored binary data |
@@ -63,6 +64,11 @@ Unlike regular function tools, `GoogleSearchTool` operates differently:
 2. **Automatic invocation**: The model decides when to search based on the query
 3. **Integrated results**: Search results are incorporated directly into the model's response
 
+> **Note:** The answer text contains only what the model wrote. The search queries,
+> sources and supports are in the response's `provider_metadata` (`webSearchQueries`,
+> `groundingChunks`, `groundingSupports`); display them as your application's grounding
+> requirements specify.
+
 The tool implementation returns an error if called directly because the actual search happens within the Gemini API:
 
 ```rust
@@ -80,6 +86,12 @@ async fn execute(&self, _ctx: Arc<dyn ToolContext>, _args: Value) -> Result<Valu
 | Description | "Performs a Google search to retrieve information from the web." |
 | Parameters | Determined by Gemini model |
 | Execution | Server-side (Gemini grounding) |
+| Effect | `ToolEffect::ReadOnly` |
+
+> **Important:** a run's `ToolPolicy` decides whether the tool is attached to each request, and
+> every search the response reports counts against the run's tool-call budget and cost. A
+> default-deny `DeclarativePolicy` withholds it unless a rule allows it, such as
+> `allow_read_only()`. See [Built-in Tools](../security/tool-authorization.md#built-in-tools).
 
 ### Use Cases
 
@@ -151,10 +163,25 @@ let coordinator = LlmAgentBuilder::new("coordinator")
 ### How It Works
 
 1. The parent agent decides to call the wrapped agent as a tool
-2. `AgentTool` creates an invocation context with `StreamingMode::None`
+2. `AgentTool` creates an invocation context with `StreamingMode::None`, in the parent's
+   session scope, and a run config derived from the parent's (see below)
 3. The sub-agent runs to completion and accumulates its full response
-4. The response text is returned to the parent agent
+4. The response is returned to the parent agent
 5. State deltas and artifact deltas are forwarded to the parent context
+
+### What the Delegate Inherits
+
+The delegate's run config is built from the caller's field by field:
+
+| Fields | Delegate gets |
+|--------|---------------|
+| `budget`, `budget_tracker`, `governance`, `tool_policy`, `tool_approvals`, `approval_store`, `approval_service`, `durable_run_id`, `action_ledger`, `spend_ledger`, `llm_spend_estimate`, `audit`, `invocation_hooks`, `tool_confirmation_handler`, `tool_confirmation_timeout`, `deny_on_confirmation_timeout`, `tool_concurrency`, `max_transfer_depth`, `auto_cache`, `record_payloads`, `trace_payload_max_bytes`, `history_max_events` | The caller's, shared for the whole invocation |
+| `acting` | The caller's, with the delegate's principal and the caller appended to the delegation chain |
+| `transfer_targets`, `parent_agent` | The delegate's own topology (`Agent::configure_run`, `Agent::transfer_targets_for`), never the caller's handoff targets |
+| `cached_content` | None; a context cache is built for one agent's instructions and tools |
+| `runtime_toolsets` | None; invocation toolsets are attached for the caller's agent |
+| `tool_confirmation_decisions`, `tool_confirmation_fingerprints` | None, except a decision for the delegate's held call on resume (see [Calls Held Inside an Agent Tool](../security/tool-authorization.md#calls-held-inside-an-agent-tool)) |
+| `streaming_mode` | `StreamingMode::None` |
 
 ### Tool Details
 
@@ -163,7 +190,40 @@ let coordinator = LlmAgentBuilder::new("coordinator")
 | Name | Same as the wrapped agent's name |
 | Description | Same as the wrapped agent's description |
 | Parameters | `request`: string (the input to send to the sub-agent) |
-| Returns | `{"response": "..."}` with the sub-agent's text output |
+| Effect | `ToolEffect::NonIdempotent` (the default) |
+| Returns | `{"response": "..."}` with the sub-agent's text output, plus `"server_tool_responses": [...]` with the payloads of its provider-side tool results (such as Gemini code execution's `codeExecutionResult`) when it ran any, never a provider's replay-only copy of its turn; the tool result the sub-agent ended on when it ended on one (a tool that skips summarization, or a nested `AgentTool` with `skip_summarization(true)`), or `{"responses": [{"name", "response"}, ...]}` for several |
+
+### Failures and Timeouts
+
+| Outcome | `ReturnErrorObject` (default) | `Propagate` |
+|---------|-------------------------------|-------------|
+| The sub-agent fails | `{"error": "agent execution failed: <component>.<category> (<code>)", "agent": "<name>"}` result, without the sub-agent's error message unless the tool sets `expose_error_messages(true)` | The sub-agent's error, with its category and code; `LlmAgent` sends the model only those, not the message |
+| A write breaks the state merge policy | `{"error": "...", "agent": "...", "code": "tool.agent.state_policy_violation"}` result | A `tool.agent.state_policy_violation` error |
+| The delegation runs past `timeout` | `Timeout` tool error | `Timeout` tool error |
+| The sub-agent holds a call for confirmation | The call is held by the parent | The call is held by the parent |
+
+The sub-agent's error message can quote credentials, internal hosts, or upstream response
+bodies, and the result is sent to the calling agent's model provider and stored in its session,
+so `ReturnErrorObject` redacts it as `LlmAgent` redacts tool errors. An error with code
+`tool.invalid_arguments` keeps its message.
+
+A timeout is a failed call in both modes, so `on_tool_error`, the circuit breaker, retries and
+the action ledger see it. The calling agent enforces the limit itself and reports
+`tool.timeout`; a `NonIdempotent` delegation cut mid-flight is answered with an unknown outcome.
+Executed directly, the tool returns `tool.agent.timeout`.
+
+### Forwarded Events
+
+With `forward_events(true)`, the sub-agent's events are emitted on the parent's event stream.
+A complete event waits for the client like a tool result does, so it always reaches the
+session. A partial event that cannot be delivered within 100 ms is dropped; the first drop is
+logged at `warn`, the total at the end of the call, and one `[adk: forwarded events dropped]`
+progress event on the `events` stream precedes the next delivered partial event.
+
+Forwarded events carry the tool's own branch, `{caller branch}.{tool}@{call id}`
+(`adk_core::history::tool_branch`). The caller's history leaves events on that branch out, so
+the caller's model receives the sub-agent's answer once, as the tool's response, and never its
+turns as the caller's own.
 
 ### Key Behavior
 
@@ -225,9 +285,14 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 | Property | Value |
 |----------|-------|
 | Name | `exit_loop` |
-| Description | "Exits the loop. Call this function only when you are instructed to do so." |
+| Description | `"Exits the loop.\nCall this function only when you are instructed to do so."` |
 | Parameters | None |
 | Returns | Empty object `{}` |
+| Effect | `ToolEffect::NonIdempotent` (the default) |
+
+> **Note:** `ExitLoopTool`, `LoadArtifactsTool`, and `AgentTool` keep the default
+> `NonIdempotent` effect, so a default-deny `DeclarativePolicy` withholds them, and
+> `allow_read_only()` does not admit them; allow them by name.
 
 ### Best Practices
 
@@ -287,8 +352,9 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 |----------|-------|
 | Name | `load_artifacts` |
 | Description | "Loads artifacts by name and returns their content. Accepts an array of artifact names." |
-| Parameters | `artifact_names`: Array of strings |
+| Parameters | `artifact_names`: Array of strings (required) |
 | Returns | Object with `artifacts` array |
+| Effect | `ToolEffect::NonIdempotent` (the default) |
 
 ### Parameters
 
@@ -309,13 +375,15 @@ The tool returns an object containing the loaded artifacts:
   "artifacts": [
     {
       "name": "document.txt",
-      "content": "The text content of the document..."
+      "content": { "type": "text", "text": "The text content of the document..." }
     },
     {
       "name": "image.png",
       "content": {
+        "type": "inline_data",
         "mime_type": "image/png",
-        "data": "base64-encoded-data..."
+        "data_base64": "iVBORw0KGgo...",
+        "size_bytes": 20480
       }
     },
     {
@@ -325,6 +393,10 @@ The tool returns an object containing the loaded artifacts:
   ]
 }
 ```
+
+An artifact whose part is neither text nor inline data is returned as
+`{"type": "unknown"}`. Without an artifact service the call fails with the tool error
+`ArtifactService not available`.
 
 ### Requirements
 
@@ -342,8 +414,12 @@ use std::sync::Arc;
 let artifact_service = Arc::new(InMemoryArtifactService::new());
 
 // Configure runner with artifact service
-let runner = Runner::new(agent)
-    .with_artifact_service(artifact_service);
+let runner = Runner::builder()
+    .app_name("document_app")
+    .agent(agent)
+    .session_service(Arc::new(InMemorySessionService::new()))
+    .artifact_service(artifact_service)
+    .build()?;
 ```
 
 ## Combining Built-in Tools

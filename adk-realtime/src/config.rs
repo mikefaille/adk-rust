@@ -185,8 +185,17 @@ impl From<adk_core::ToolContract> for ToolDefinition {
             description: Some(contract.description),
             parameters: contract.schema.parameters,
             behavior: None,
+            // A contract declares no effect; repeating the call may repeat a
+            // side effect, so it is treated as non-idempotent.
+            effect: adk_core::ToolEffect::NonIdempotent,
         }
     }
+}
+
+/// The default effect of a declared tool: non-idempotent, because repeating
+/// an undeclared call may repeat its side effect.
+fn default_tool_effect() -> adk_core::ToolEffect {
+    adk_core::ToolEffect::NonIdempotent
 }
 
 /// Execution behavior of a declared realtime tool.
@@ -231,12 +240,31 @@ pub struct ToolDefinition {
     /// Execution behavior hint (Gemini Live only; see [`ToolBehavior`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub behavior: Option<ToolBehavior>,
+    /// The side-effect class of calls to this tool, threaded into the
+    /// governed call the runner authorizes. Defaults to
+    /// [`ToolEffect::NonIdempotent`](adk_core::ToolEffect::NonIdempotent):
+    /// repeating an undeclared call may repeat its effect, so a call
+    /// cancelled after it started cannot be reported as a success.
+    #[serde(default = "default_tool_effect")]
+    pub effect: adk_core::ToolEffect,
 }
 
 impl ToolDefinition {
     /// Create a new tool definition.
     pub fn new(name: impl Into<String>) -> Self {
-        Self { name: name.into(), description: None, parameters: None, behavior: None }
+        Self {
+            name: name.into(),
+            description: None,
+            parameters: None,
+            behavior: None,
+            effect: adk_core::ToolEffect::NonIdempotent,
+        }
+    }
+
+    /// Set the side-effect class of calls to this tool.
+    pub fn with_effect(mut self, effect: adk_core::ToolEffect) -> Self {
+        self.effect = effect;
+        self
     }
 
     /// Set the tool description.
@@ -249,6 +277,46 @@ impl ToolDefinition {
     pub fn with_parameters(mut self, schema: Value) -> Self {
         self.parameters = Some(schema);
         self
+    }
+
+    /// The [`ToolOrigin`](adk_core::ToolOrigin) of governed calls to the native handler a
+    /// [`RealtimeRunner`](crate::RealtimeRunner) registers under this definition:
+    /// [`REALTIME_HANDLER_ORIGIN`](crate::runner::REALTIME_HANDLER_ORIGIN) and a digest of
+    /// the name, description, and parameters.
+    ///
+    /// The origin is part of a held call's
+    /// [fingerprint](adk_core::ToolConfirmationRequest::fingerprint), so build a pre-approval
+    /// for a handler's call with it.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_core::{RunConfig, ToolApproval, ToolConfirmationRequest};
+    /// use adk_realtime::config::ToolDefinition;
+    /// use adk_realtime::runner::REALTIME_HANDLER_ORIGIN;
+    /// use serde_json::json;
+    ///
+    /// let refund = ToolDefinition::new("refund").with_description("Refunds an order");
+    /// assert_eq!(refund.handler_origin().source, REALTIME_HANDLER_ORIGIN);
+    /// let reworded = refund.clone().with_description("Refunds any order");
+    /// assert_ne!(refund.handler_origin(), reworded.handler_origin());
+    ///
+    /// // A runner whose `agent_name` is "voice", in app "shop", acts as this agent.
+    /// let acting = RunConfig::default().acting_context_for("shop", "voice", "alice");
+    /// let key = ToolConfirmationRequest::new("refund", json!({ "order": "A-1" }))
+    ///     .with_origin(refund.handler_origin())
+    ///     .with_acting_context(acting)
+    ///     .fingerprint();
+    /// let config = RunConfig::builder().tool_approval(key, ToolApproval::approve()).build();
+    /// assert_eq!(config.tool_approvals.len(), 1);
+    /// ```
+    pub fn handler_origin(&self) -> adk_core::ToolOrigin {
+        let declaration = serde_json::json!({
+            "name": self.name,
+            "description": self.description,
+            "parameters": self.parameters,
+        });
+        adk_core::ToolOrigin::new(crate::runner::REALTIME_HANDLER_ORIGIN, &declaration, None)
     }
 
     /// Set the execution behavior hint (Gemini Live only).
@@ -292,6 +360,117 @@ pub enum FunctionResponseScheduling {
     Interrupt,
 }
 
+/// A spoken-language tag (RFC 5646 / BCP 47), validated structurally.
+///
+/// The parse checks the tag's shape only — an ASCII primary subtag followed
+/// by hyphen-separated alphanumeric subtags — and keeps no allowlist of
+/// languages or regions, so any well-formed tag (e.g. `fr-CA`) is accepted
+/// while an empty, whitespace-bearing, underscored, or non-ASCII value is
+/// rejected at construction instead of reaching a provider.
+///
+/// Serializes transparently as its string. Deserialization is fail-closed:
+/// a malformed value in a stored config is an error, never a pass-through.
+///
+/// # Example
+///
+/// ```
+/// use adk_realtime::config::LanguageCode;
+///
+/// assert_eq!(LanguageCode::parse("fr-CA").unwrap().as_str(), "fr-CA");
+/// assert!(LanguageCode::parse("fr_CA").is_err());
+/// assert!(LanguageCode::parse("").is_err());
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct LanguageCode(String);
+
+/// A value was not a structurally valid RFC 5646 language tag.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LanguageCodeError {
+    value: String,
+}
+
+impl std::fmt::Display for LanguageCodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "invalid RFC 5646 language tag: {:?}", self.value)
+    }
+}
+
+impl std::error::Error for LanguageCodeError {}
+
+impl LanguageCode {
+    /// Parse and validate a language tag.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LanguageCodeError`] when the tag is empty, contains
+    /// whitespace, an underscore, or a non-ASCII character, or is not a
+    /// hyphen-separated sequence of subtags whose primary subtag is 2–8
+    /// ASCII letters and whose remaining subtags are 1–8 ASCII
+    /// alphanumerics.
+    pub fn parse(value: impl AsRef<str>) -> std::result::Result<Self, LanguageCodeError> {
+        let value = value.as_ref();
+        let invalid = || LanguageCodeError { value: value.to_string() };
+        if value.is_empty()
+            || !value.is_ascii()
+            || value.chars().any(|c| c.is_whitespace() || c == '_')
+        {
+            return Err(invalid());
+        }
+        let mut subtags = value.split('-');
+        let primary = subtags.next().unwrap_or_default();
+        if !(2..=8).contains(&primary.len()) || !primary.chars().all(|c| c.is_ascii_alphabetic()) {
+            return Err(invalid());
+        }
+        for subtag in subtags {
+            if subtag.is_empty()
+                || subtag.len() > 8
+                || !subtag.chars().all(|c| c.is_ascii_alphanumeric())
+            {
+                return Err(invalid());
+            }
+        }
+        Ok(Self(value.to_string()))
+    }
+
+    /// The tag as written.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for LanguageCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl TryFrom<&str> for LanguageCode {
+    type Error = LanguageCodeError;
+
+    fn try_from(value: &str) -> std::result::Result<Self, Self::Error> {
+        Self::parse(value)
+    }
+}
+
+impl TryFrom<String> for LanguageCode {
+    type Error = LanguageCodeError;
+
+    fn try_from(value: String) -> std::result::Result<Self, Self::Error> {
+        Self::parse(value)
+    }
+}
+
+impl<'de> Deserialize<'de> for LanguageCode {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(value).map_err(serde::de::Error::custom)
+    }
+}
+
 /// Configuration for a realtime session.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct RealtimeConfig {
@@ -307,14 +486,18 @@ pub struct RealtimeConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub voice: Option<String>,
 
-    /// BCP-47 output language (e.g. `en-US`), pinned per session.
-    ///
-    /// On Gemini Live this becomes `generationConfig.speechConfig.languageCode`,
-    /// which constrains the model's spoken language at the session level rather
-    /// than through instruction prose. Ignored by providers without an output
-    /// language control.
+    /// Spoken language pinned for the session, validated as an RFC 5646
+    /// tag. Gemini Live sends it as `speechConfig.languageCode`; providers
+    /// without a language field never emit it. `None` leaves detection to
+    /// the provider.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub language: Option<String>,
+    pub language: Option<LanguageCode>,
+
+    /// Whether the provider may resume this session after a disconnect.
+    /// `None` and `Some(true)` both enable it (the default); `Some(false)`
+    /// keeps the provider from issuing a resumption handle in its setup.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_resumption: Option<bool>,
 
     /// Output modalities: ["text"], ["audio"], or ["text", "audio"].
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -473,12 +656,6 @@ impl RealtimeConfig {
         self
     }
 
-    /// Pin the BCP-47 output language for the session.
-    pub fn with_language(mut self, language: impl Into<String>) -> Self {
-        self.language = Some(language.into());
-        self
-    }
-
     /// Set output modalities.
     pub fn with_modalities(mut self, modalities: Vec<String>) -> Self {
         self.modalities = Some(modalities);
@@ -550,6 +727,103 @@ impl RealtimeConfig {
         self
     }
 
+    /// Pins the spoken language (RFC 5646, e.g. `"en-US"`).
+    ///
+    /// Gemini Live sends it as `speechConfig.languageCode`, which steers both the voice and
+    /// the input/output transcription; without it the model detects the language per turn
+    /// and short or accented utterances can be transcribed in the wrong one. Gemini
+    /// native-audio output models choose the language automatically and do not honor it.
+    ///
+    /// Stored in the typed [`language`](Self::language) field, never in
+    /// `extra`, so providers without a language field cannot leak it into
+    /// their session setup.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use adk_realtime::config::LanguageCode;
+    /// use adk_realtime::RealtimeConfig;
+    ///
+    /// let config = RealtimeConfig::default()
+    ///     .with_voice("Kore")
+    ///     .with_language(LanguageCode::parse("en-US").unwrap());
+    /// assert_eq!(config.language.unwrap().as_str(), "en-US");
+    /// assert!(config.extra.is_none());
+    /// ```
+    pub fn with_language(mut self, code: LanguageCode) -> Self {
+        self.language = Some(code);
+        self
+    }
+
+    /// Pins the spoken language from a string, validating it as RFC 5646.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LanguageCodeError`] when `code` is not a structurally
+    /// valid tag; the config is not returned in that case.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use adk_realtime::RealtimeConfig;
+    ///
+    /// let config = RealtimeConfig::default().try_with_language("fr-CA").unwrap();
+    /// assert_eq!(config.language.unwrap().as_str(), "fr-CA");
+    /// assert!(RealtimeConfig::default().try_with_language("fr_CA").is_err());
+    /// ```
+    pub fn try_with_language(self, code: &str) -> std::result::Result<Self, LanguageCodeError> {
+        Ok(self.with_language(LanguageCode::parse(code)?))
+    }
+
+    /// Sets whether the provider may resume this session after a
+    /// disconnect. Resumption is on unless this is called with `false`;
+    /// with `false` the Gemini Live setup carries no `sessionResumption`.
+    pub fn with_session_resumption(mut self, enabled: bool) -> Self {
+        self.session_resumption = Some(enabled);
+        self
+    }
+
+    /// Turns on Gemini Live context window compression (a sliding window).
+    ///
+    /// The server drops the oldest turns once the context reaches `trigger_tokens` (default:
+    /// 80% of the model's context window). Google documents that without it a session ends
+    /// after about 15 minutes of audio, or about 2 once video frames are sent, and that with
+    /// it the session has no length limit (each connection still lasts about 10 minutes).
+    ///
+    /// Stored under `extra.context_window_compression`: `true`, or
+    /// `{"trigger_tokens": n}` when a threshold is given. The object form also accepts
+    /// `target_tokens`, the size to cut back to (default: half of `trigger_tokens`). An
+    /// `extra` value that is not a JSON object is replaced. The OpenAI Realtime session
+    /// copies every `extra` key into its `session.update`, so set it only for a Gemini Live
+    /// model.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use adk_realtime::RealtimeConfig;
+    ///
+    /// let config = RealtimeConfig::default().with_context_window_compression(None);
+    /// assert_eq!(config.extra.unwrap()["context_window_compression"], true);
+    /// ```
+    pub fn with_context_window_compression(self, trigger_tokens: Option<u64>) -> Self {
+        let value = match trigger_tokens {
+            Some(tokens) => serde_json::json!({ "trigger_tokens": tokens }),
+            None => Value::Bool(true),
+        };
+        self.with_extra("context_window_compression", value)
+    }
+
+    /// Sets one key in `extra`, keeping the others; a non-object `extra` is replaced.
+    fn with_extra(mut self, key: &str, value: Value) -> Self {
+        let mut extra = match self.extra.take() {
+            Some(Value::Object(map)) => map,
+            _ => serde_json::Map::new(),
+        };
+        extra.insert(key.to_string(), value);
+        self.extra = Some(Value::Object(extra));
+        self
+    }
+
     /// Let the model proactively ignore irrelevant audio. Only honored by
     /// Gemini Live models whose capabilities include it; a no-op for other
     /// providers/models.
@@ -611,9 +885,26 @@ impl RealtimeConfigBuilder {
         self
     }
 
-    /// Pin the BCP-47 output language for the session.
-    pub fn language(mut self, language: impl Into<String>) -> Self {
-        self.config.language = Some(language.into());
+    /// Pin the RFC 5646 output language for the session.
+    pub fn language(mut self, language: LanguageCode) -> Self {
+        self.config = self.config.with_language(language);
+        self
+    }
+
+    /// Pin the output language from a string, validating it as RFC 5646.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LanguageCodeError`] when `language` is not a structurally
+    /// valid tag.
+    pub fn try_language(mut self, language: &str) -> std::result::Result<Self, LanguageCodeError> {
+        self.config = self.config.try_with_language(language)?;
+        Ok(self)
+    }
+
+    /// Set whether the provider may resume the session after a disconnect.
+    pub fn session_resumption(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_session_resumption(enabled);
         self
     }
 

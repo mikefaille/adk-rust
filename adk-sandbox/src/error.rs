@@ -16,7 +16,9 @@ use thiserror::Error;
 /// let err = SandboxError::Timeout { timeout: Duration::from_secs(30) };
 /// assert!(err.to_string().contains("30s"));
 /// ```
+// Feature-gated variants (`workspace`) mean downstream crates cannot match exhaustively.
 #[derive(Debug, Clone, Error)]
+#[non_exhaustive]
 pub enum SandboxError {
     /// Execution exceeded the configured timeout.
     #[error("execution timed out after {timeout:?}")]
@@ -47,7 +49,7 @@ pub enum SandboxError {
     /// The sandbox enforcer failed to apply the profile.
     #[error("enforcer '{enforcer}' failed: {message}")]
     EnforcerFailed {
-        /// The enforcer name (e.g., "seatbelt", "bubblewrap", "appcontainer").
+        /// The enforcer name (e.g., "seatbelt", "bubblewrap", "restricted-token").
         enforcer: String,
         /// A descriptive message explaining what failed.
         message: String,
@@ -65,6 +67,19 @@ pub enum SandboxError {
     /// A policy path or resource could not be resolved.
     #[error("policy violation: {0}")]
     PolicyViolation(String),
+
+    /// The enforcer cannot enforce part of the policy, so the command does not run.
+    #[error(
+        "enforcer '{enforcer}' cannot enforce {requirement}, so the command does not run with \
+         less confinement than its policy asks for; choose a mode the enforcer supports (see \
+         `SandboxEnforcer::network_support`) or an enforcer that supports this one"
+    )]
+    Unenforceable {
+        /// The enforcer name.
+        enforcer: String,
+        /// What it cannot enforce, such as `network access denied`.
+        requirement: String,
+    },
 
     // ── Workspace lifecycle variants (behind `workspace` feature) ──────────
     /// Workspace provisioning failed.
@@ -149,6 +164,9 @@ impl From<SandboxError> for adk_core::AdkError {
             }
             SandboxError::PolicyViolation(_) => {
                 (ErrorCategory::InvalidInput, "code.sandbox_policy_violation")
+            }
+            SandboxError::Unenforceable { .. } => {
+                (ErrorCategory::Unsupported, "code.sandbox_unenforceable")
             }
             #[cfg(feature = "workspace")]
             SandboxError::ProvisionFailed { .. } => {

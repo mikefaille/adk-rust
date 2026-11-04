@@ -1,0 +1,230 @@
+[package]
+name = "adk-harness"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Governed, durable harness agent for ADK-Rust: modes, standing approvals, shell, todos, instructions and skills over one governed tool path"
+repository.workspace = true
+documentation = "https://docs.rs/adk-harness"
+readme = "README.md"
+keywords = ["adk", "agent", "harness", "coding", "governance"]
+categories = ["development-tools", "asynchronous"]
+# The integration tests build as one binary, `tests/integration.rs`, so dependencies link once.
+autotests = false
+
+# Feature set of spec 3.1 §7.1. Packs (browser, computer-use, payments, voice,
+# managed) are off by default.
+[features]
+default = ["runner", "skills", "team", "graph", "sandbox", "observe", "auth", "memory"]
+# The `Harness` wrapper that owns a Runner.
+runner = ["dep:adk-runner", "dep:adk-session"]
+# Progressive skill disclosure (`list_skills`, `load_skill`, `load_skill_resource`).
+skills = ["dep:adk-skill", "adk-skill/progressive-disclosure", "adk-agent/skills"]
+# Skills from the Vertex AI Skill Registry (`search_skills`).
+skills-registry = ["skills", "adk-skill/vertex-skill-registry"]
+# Team members lowered to a `TeamSpec` (spec 3.1 §7.10).
+team = ["dep:adk-tool", "adk-agent/team-tools"]
+# Claude Code, Codex and Kiro as members over ACP.
+team-acp = ["team", "dep:adk-acp"]
+# Remote agents as members over A2A.
+team-a2a = ["team", "dep:adk-server"]
+# The harness served to editors over ACP: "always allow" and "always deny" become standing
+# rules (spec 3.3 §10 A1).
+acp-server = ["dep:adk-acp", "adk-acp/server"]
+# Goals started by cron, file-watch and webhook triggers (spec 3.1 §7.11).
+ambient = ["runner", "adk-agent/ambient"]
+# The Agent Kernel glue (spec 3.2 §10 HK1, HK3, §13 Q6): `Harness::kernel`, the partition
+# mode mapping, goal progress and stall parking. Opt-in; adk-cli's `harness` enables it.
+kernel = ["runner", "dep:adk-kernel", "adk-kernel/proc"]
+# Plan graph and goal engine (spec 3.1 §7.11).
+graph = ["dep:adk-graph", "adk-graph/time-travel", "adk-graph/action"]
+# OS sandbox for the shell (spec 3.1 §7.9).
+sandbox = ["dep:adk-sandbox", "adk-sandbox/sandbox-native", "adk-sandbox/egress-proxy"]
+# Container isolation for the shell.
+docker = ["sandbox", "adk-sandbox/workspace-docker"]
+# Spans, spend and the loop guard (spec 3.1 §7.13).
+observe = ["dep:adk-telemetry", "dep:adk-eval"]
+# RBAC wrappers, credential broker and signed audit (spec 3.1 §7.14).
+auth = ["dep:adk-auth", "adk-auth/signed-audit"]
+# Working notes and long-term facts (spec 3.1 §7.15); adk-memory for `MemoryServiceIndex`.
+memory = ["dep:adk-memory", "adk-memory/embedding-trait", "dep:adk-guardrail"]
+# `RagEmbedder`: adk-rag's OpenAI and Gemini embedders for long-term facts (spec 3.1 §7.15.2).
+memory-embeddings = ["memory", "dep:adk-rag", "adk-rag/openai", "adk-rag/gemini"]
+# `RagEmbedder::onnx`: adk-rag's `OnnxEmbeddingProvider`, a sentence-transformer run in
+# process, so recall needs no network and no provider key (spec 3.1 §7.15.2, §10 R1).
+memory-embeddings-local = ["memory", "dep:adk-rag", "adk-rag/onnx"]
+# Graph memory tools from adk-memory.
+memory-graph = ["memory", "dep:adk-memory"]
+# Hooks on tool events from `.adk/harness.toml`, the user config and the builder (spec 3.1 §7.22).
+hooks = []
+# SQLite backends for the mode, standing-rule and shell-ledger stores.
+sqlite = ["dep:sqlx", "sqlx/sqlite", "adk-graph?/sqlite", "adk-session?/sqlite"]
+# PostgreSQL backends for the mode and standing-rule stores, shared by every replica of a
+# served harness, and the plan checkpointer (spec 3.1 §7.4, §7.5, §7.11, §13 Q2, Q5); with
+# `kernel`, the kernel's own stores too; with `memory`, the long-term fact store (spec 3.3
+# §12 phase 3).
+postgres = ["dep:sqlx", "sqlx/postgres", "dep:adk-session", "adk-session/postgres", "adk-graph?/postgres", "adk-kernel?/postgres"]
+# Redis backends for the mode and standing-rule stores, and the plan checkpointer
+# (spec 3.1 §7.4, §7.5, §7.11, §13 Q2, Q5).
+redis = ["dep:fred", "dep:adk-session", "adk-session/redis", "adk-graph?/redis"]
+# Plan checkpointers on MongoDB, Neo4j and Firestore for `checkpointer_from_url`
+# (spec 3.1 §7.11, §13 Q5).
+mongodb = ["adk-graph?/mongodb"]
+neo4j = ["adk-graph?/neo4j"]
+firestore = ["adk-graph?/firestore"]
+# The store envelope of spec 3.1 §7.12: sessions, approvals and the SQLite stores sealed
+# under one keyring from a secret provider, the OS keychain or an environment variable.
+encrypted = ["dep:adk-session", "adk-session/encrypted-session", "dep:keyring"]
+# Packs (spec 3.1 §7.16–§7.18, §7.24).
+# The browser pack (spec 3.1 §7.24): `web` for the §7.20 allowlist, URL checks and screening.
+browser = ["dep:adk-browser", "web"]
+# The computer-use pack (spec 3.1 §7.24): `graph` for the reference graph's checkpointer.
+computer-use = ["dep:adk-computer-use", "graph"]
+# The payments pack (spec 3.1 §7.16): `adk-auth` for the scope guard its tools run under.
+payments = ["dep:adk-payments", "dep:adk-auth"]
+# The voice surface (spec 3.1 §7.17): the harness as the agent of an `IntegratedRealtimeRunner`.
+voice = ["dep:adk-realtime", "adk-realtime/integration"]
+# The managed form (spec 3.1 §7.18): adk-managed runs on adk-runner and adk-session already.
+# With `kernel`, also the kernel's managed form: one kernel per tenant (spec 3.2 §7.13).
+managed = ["runner", "dep:adk-managed", "adk-kernel?/managed"]
+# Governed web access: web_fetch, web_search, screening (spec 3.1 §7.20).
+web = ["dep:reqwest", "dep:adk-guardrail", "dep:adk-tool"]
+# MCP interaction: elicitation, sampling and resource bridges (spec 3.1 §7.21).
+mcp = ["dep:adk-tool", "adk-tool/mcp", "adk-tool/mcp-sampling"]
+# Test fixtures only: lets a loopback HTTP server stand in for the web (never on in adk-cli).
+web-fixture = ["web"]
+# The website runtime (spec 3.5 §7.1): `Preset::Website`, the back-office and public
+# toolsets, partitions and signals, the autonomy ladder compiler, authoring entry points,
+# Web Bot Auth signing of outbound requests and the onboarding machinery.
+website = [
+    "kernel",
+    "web",
+    "mcp",
+    "memory",
+    "auth",
+    "dep:adk-site",
+    "dep:adk-drivers",
+    "dep:adk-awp",
+    "adk-awp/verify",
+    "dep:awp-types",
+    "dep:adk-rag",
+    "dep:bytes",
+    "dep:base64",
+    "adk-kernel/charter",
+    "adk-kernel/channels",
+    "adk-auth/web-bot-auth",
+]
+
+[dependencies]
+adk-core.workspace = true
+adk-agent.workspace = true
+adk-devtools.workspace = true
+adk-runner = { workspace = true, optional = true }
+adk-session = { workspace = true, optional = true }
+adk-skill = { workspace = true, optional = true }
+adk-tool = { workspace = true, optional = true }
+adk-acp = { workspace = true, optional = true }
+adk-server = { workspace = true, optional = true }
+adk-graph = { workspace = true, optional = true }
+adk-sandbox = { workspace = true, optional = true }
+adk-telemetry = { workspace = true, optional = true }
+adk-eval = { workspace = true, optional = true }
+adk-auth = { workspace = true, optional = true }
+adk-memory = { workspace = true, optional = true }
+adk-guardrail = { workspace = true, optional = true }
+adk-rag = { workspace = true, optional = true }
+adk-browser = { workspace = true, optional = true }
+adk-computer-use = { workspace = true, optional = true }
+adk-payments = { workspace = true, optional = true }
+adk-realtime = { workspace = true, optional = true }
+adk-managed = { workspace = true, optional = true }
+adk-kernel = { workspace = true, optional = true }
+adk-site = { workspace = true, optional = true }
+adk-drivers = { workspace = true, optional = true }
+adk-awp = { workspace = true, optional = true }
+awp-types = { workspace = true, optional = true }
+async-stream.workspace = true
+bytes = { version = "1", optional = true }
+# Media uploads arrive base64-encoded in `media_intake` (spec 3.5 §7.8.2 "Media").
+base64 = { version = "0.22", optional = true }
+async-trait.workspace = true
+chrono.workspace = true
+dirs = "7"
+fred = { version = "10", optional = true, features = ["i-scripts"] }
+futures.workspace = true
+# `shell_output`'s `pattern` (spec 3.1 §7.29) and the long-term memory screens.
+regex.workspace = true
+reqwest = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sqlx = { workspace = true, optional = true, features = ["runtime-tokio"] }
+tokio = { workspace = true, features = ["sync", "time", "fs", "rt", "macros", "process", "io-util"] }
+# `.adk/harness.toml` (spec 3.1 §8.3, §7.22).
+toml.workspace = true
+tracing.workspace = true
+unicode-normalization = "0.1"
+uuid.workspace = true
+# Take over keeps the person's typed secret in memory for one call (spec 3.3 §10 H2).
+zeroize = "1.8.2"
+
+# The hook runner starts each hook in its own session and kills its process group, as the
+# devtools bash does.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# The OS keychain behind `StoreKeySource::Keychain` (feature `encrypted`), the same
+# configuration adk-cli uses.
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+keyring = { version = "3.6.3", default-features = false, features = ["apple-native"], optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3.6.3", default-features = false, features = ["windows-native"], optional = true }
+
+# Owner-only DACLs on the store files, where Unix uses mode 0600 (spec 3.2 §10 W4).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_SystemServices", "Win32_System_Threading"] }
+
+# Reads a file's DACL back in the owner-only test.
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Security_Authorization"] }
+
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))'.dependencies]
+keyring = { version = "3.6.3", default-features = false, features = ["sync-secret-service", "crypto-rust"], optional = true }
+
+[dev-dependencies]
+# `anthropic` for the live confirmation-wait run (spec 3.3 §10 C2) and the live take-over
+# run (spec 3.3 §10 H2).
+adk-model = { path = "../adk-model", default-features = false, features = ["anthropic"] }
+# The live take-over run reads its key from the workspace `.env`.
+dotenvy = "0.15"
+# The scripted realtime provider of the voice surface tests (spec 3.1 §7.17).
+adk-realtime = { path = "../adk-realtime", features = ["integration", "scripted"] }
+# SQLite sessions, approvals and ledger, and the durable worker, for the durability tests;
+# `encrypted-session` for the encrypted store conformance suite.
+adk-session = { path = "../adk-session", features = ["sqlite", "encrypted-session"] }
+adk-server = { path = "../adk-server", features = ["background", "agent-engine"] }
+# `MemoryServiceIndex` conformance over the SQLite FTS5 and PostgreSQL backends.
+adk-memory = { path = "../adk-memory", features = ["sqlite-memory", "database-memory"] }
+sqlx = { workspace = true, features = ["postgres", "sqlite"] }
+proptest = "1.5"
+# Scripted MCP servers for the elicitation, sampling and resource tests.
+rmcp = { version = "3.1", features = ["server", "client", "elicitation"] }
+tempfile = "3"
+tokio = { workspace = true, features = ["full"] }
+# Captures the harness spans in the observability tests.
+tracing-subscriber = { workspace = true, features = ["registry"] }
+# The managed form's replay to an `adk-enterprise` client over a local HTTP surface, and
+# the Agent Engine dispatch served locally (spec 3.1 §7.18, H9).
+adk-enterprise = { path = "../adk-enterprise" }
+axum = "0.8"
+reqwest = { workspace = true }
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"
+
+[package.metadata.docs.rs]
+all-features = true

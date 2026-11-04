@@ -1,0 +1,928 @@
+//! Conformance cases for the [`StoreApprovalService`] over an [`ApprovalStore`] backend.
+//!
+//! The cases run the service against the harness's store, driven by a [`ManualClock`],
+//! so they check the service's behaviour and the store primitives it relies on together.
+//!
+//! | Case | Contract |
+//! |------|----------|
+//! | [`expiry_denies_the_call`] | `tick` past the expiry expires the request once and records a denial for the call |
+//! | [`quorum_needs_distinct_approvers`] | With a quorum of 2 one approval keeps the request pending and records no decision; the same approver cannot count twice; a second approver resolves it |
+//! | [`self_approval_is_refused`] | The requester cannot approve their own call unless the policy allows it |
+//! | [`delegation_applies_only_in_its_window`] | A delegate decides only inside the delegation's window, and counts for the delegator |
+//! | [`concurrent_decide_has_one_winner`] | Concurrent decisions on one version, across two handles, have exactly one winner |
+//! | [`edit_substitutes_arguments`] | An edit resolves the request with the edited arguments on the recorded decision |
+//! | [`escalation_fires_once`] | An escalation step fires once however often `tick` runs, and only then admits its approvers |
+//! | [`inbox_lists_what_an_approver_may_decide`] | The inbox holds what the approver may decide, directly or by delegation, and pages by cursor |
+//! | [`inbox_lists_one_session`] | An inbox filtered by session (application, user and session ID) holds that session's requests alone and pages by cursor (spec 3.3 §10 C1) |
+//! | [`a_call_held_again_keeps_its_open_request`] | A call held again while its request is pending gets that request back, never a second one (spec 3.3 §7.3) |
+//! | [`cancel_and_reject_deny_the_call`] | Cancelling or rejecting records a denial carrying the reason |
+//! | [`requests_survive_a_restart`] | A partly approved request survives a restart and is resolved through a new handle |
+//! | [`slots_need_distinct_approvers`] | A request with slots stays pending, with no decision for the call, until distinct approvers fill every slot, whatever order they decide in; a partly filled request survives a restart |
+//! | [`directory_decides_groups`] | A service with an [`ApproverDirectory`] takes approvers' and delegators' groups from it, for decisions and inboxes, and ignores the groups a caller asserts |
+//!
+//! Each case lists and ticks only its own application's requests, so cases sharing one
+//! database do not expire or escalate each other's requests.
+
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use serde_json::{Value, json};
+
+use super::approval_store::ApprovalStoreHarness;
+use super::{base_time, unique, unique_unicode};
+use crate::principal::SubjectRef;
+use crate::{
+    ApprovalAction, ApprovalDecision, ApprovalDelegation, ApprovalEventKind, ApprovalNotification,
+    ApprovalNotifier, ApprovalPolicy, ApprovalRequest, ApprovalRequestQuery, ApprovalScope,
+    ApprovalService, ApprovalState, ApprovalStore, ApprovalTick, ApproverDirectory,
+    ApproverSelector, Clock, DelegationScope, DelegationWindow, InboxQuery, ManualClock,
+    PendingApproval, Result, StoreApprovalService, ToolApproval, ToolConfirmationDecision,
+    ToolConfirmationRequest,
+};
+
+/// Restricts listings to one application, so a case's `tick` and inbox see only its
+/// own requests in a shared database.
+#[derive(Debug)]
+struct AppScoped {
+    inner: Arc<dyn ApprovalStore>,
+    app: String,
+}
+
+#[async_trait]
+impl ApprovalStore for AppScoped {
+    async fn record_pending(
+        &self,
+        scope: &ApprovalScope,
+        request: &ToolConfirmationRequest,
+    ) -> Result<()> {
+        self.inner.record_pending(scope, request).await
+    }
+
+    async fn pending(&self, scope: &ApprovalScope) -> Result<Vec<PendingApproval>> {
+        self.inner.pending(scope).await
+    }
+
+    async fn decide(
+        &self,
+        scope: &ApprovalScope,
+        fingerprint: &str,
+        approval: ToolApproval,
+    ) -> Result<()> {
+        self.inner.decide(scope, fingerprint, approval).await
+    }
+
+    async fn take_decision(
+        &self,
+        scope: &ApprovalScope,
+        fingerprint: &str,
+    ) -> Result<Option<ToolConfirmationDecision>> {
+        self.inner.take_decision(scope, fingerprint).await
+    }
+
+    async fn has_decision(&self, scope: &ApprovalScope, fingerprint: &str) -> Result<bool> {
+        self.inner.has_decision(scope, fingerprint).await
+    }
+
+    async fn take_approval(
+        &self,
+        scope: &ApprovalScope,
+        fingerprint: &str,
+    ) -> Result<Option<ToolApproval>> {
+        self.inner.take_approval(scope, fingerprint).await
+    }
+
+    async fn create_request(&self, request: &ApprovalRequest) -> Result<ApprovalRequest> {
+        self.inner.create_request(request).await
+    }
+
+    async fn get_request(&self, id: &str) -> Result<Option<ApprovalRequest>> {
+        self.inner.get_request(id).await
+    }
+
+    async fn replace_request(
+        &self,
+        request: &ApprovalRequest,
+        expected_version: u64,
+    ) -> Result<bool> {
+        self.inner.replace_request(request, expected_version).await
+    }
+
+    async fn list_requests(&self, query: &ApprovalRequestQuery) -> Result<Vec<ApprovalRequest>> {
+        let mut query = query.clone();
+        query.app_name = Some(self.app.clone());
+        self.inner.list_requests(&query).await
+    }
+
+    async fn put_delegation(&self, delegation: &ApprovalDelegation) -> Result<()> {
+        self.inner.put_delegation(delegation).await
+    }
+
+    async fn delegations_to(&self, to: &SubjectRef) -> Result<Vec<ApprovalDelegation>> {
+        self.inner.delegations_to(to).await
+    }
+
+    async fn delete_delegation(&self, id: &str) -> Result<bool> {
+        self.inner.delete_delegation(id).await
+    }
+}
+
+/// Records every notification.
+#[derive(Debug, Default)]
+struct Recorder(Mutex<Vec<ApprovalNotification>>);
+
+impl Recorder {
+    fn kinds(&self) -> Vec<ApprovalEventKind> {
+        self.0.lock().expect("recorder lock").iter().map(|n| n.kind).collect()
+    }
+}
+
+#[async_trait]
+impl ApprovalNotifier for Recorder {
+    async fn notify(&self, notification: &ApprovalNotification) -> Result<()> {
+        self.0.lock().expect("recorder lock").push(notification.clone());
+        Ok(())
+    }
+}
+
+/// One case's service, clock, notifications, and application.
+struct Fixture {
+    service: StoreApprovalService,
+    store: Arc<dyn ApprovalStore>,
+    clock: ManualClock,
+    recorder: Arc<Recorder>,
+    app: String,
+}
+
+impl Fixture {
+    async fn open<H: ApprovalStoreHarness + ?Sized>(harness: &H, app: &str) -> Self {
+        let store = harness.open().await;
+        let clock = ManualClock::new(base_time());
+        let recorder = Arc::new(Recorder::default());
+        let scoped: Arc<dyn ApprovalStore> =
+            Arc::new(AppScoped { inner: store.clone(), app: app.to_string() });
+        let service = StoreApprovalService::new(scoped)
+            .with_clock(Arc::new(clock.clone()))
+            .with_notifier(recorder.clone());
+        Self { service, store, clock, recorder, app: app.to_string() }
+    }
+
+    /// Takes approvers' groups from `directory`.
+    fn with_directory(mut self, directory: Arc<dyn ApproverDirectory>) -> Self {
+        self.service = self.service.with_directory(directory);
+        self
+    }
+
+    async fn new<H: ApprovalStoreHarness + ?Sized>(harness: &H) -> Self {
+        Self::open(harness, &unique_unicode("app")).await
+    }
+
+    fn call(&self, amount: u64) -> (ApprovalScope, ToolConfirmationRequest) {
+        let scope = ApprovalScope::new(&self.app, unique("user"), unique("session"));
+        let call = ToolConfirmationRequest {
+            tool_name: "conformance_transfer".into(),
+            function_call_id: Some(unique("call")),
+            args: json!({ "amount": amount, "to": "acct:1/main" }),
+            acting: None,
+            origin: None,
+        };
+        (scope, call)
+    }
+
+    /// Holds a call in the store and submits its request under `policy`.
+    async fn submit(&self, policy: ApprovalPolicy) -> ApprovalRequest {
+        let (scope, call) = self.call(250);
+        self.submit_in(scope, call, policy).await
+    }
+
+    /// Holds `call` in `scope` and submits its request under `policy`.
+    async fn submit_in(
+        &self,
+        scope: ApprovalScope,
+        call: ToolConfirmationRequest,
+        policy: ApprovalPolicy,
+    ) -> ApprovalRequest {
+        self.store.record_pending(&scope, &call).await.expect("record_pending");
+        let request = ApprovalRequest::new(unique_unicode("request"), scope, &call, policy)
+            .with_requester(SubjectRef::human("conformance:requester"));
+        self.service.submit(request).await.expect("submit")
+    }
+
+    async fn tick(&self) -> ApprovalTick {
+        self.service.tick(self.clock.now()).await.expect("tick")
+    }
+
+    async fn taken(&self, request: &ApprovalRequest) -> Option<ToolApproval> {
+        self.store
+            .take_approval(&request.scope, &request.fingerprint)
+            .await
+            .expect("take_approval reads the store")
+    }
+
+    async fn has_decision(&self, request: &ApprovalRequest) -> bool {
+        self.store
+            .has_decision(&request.scope, &request.fingerprint)
+            .await
+            .expect("has_decision reads the store")
+    }
+}
+
+fn finance() -> ApprovalPolicy {
+    ApprovalPolicy::new([ApproverSelector::group("conformance:finance")])
+}
+
+fn member(name: &str) -> ApprovalDecision {
+    ApprovalDecision::approve(SubjectRef::human(name)).with_groups(["conformance:finance"])
+}
+
+fn code(result: Result<ApprovalRequest>) -> String {
+    match result {
+        Ok(request) => panic!("expected an error, got {:?}", request.state),
+        Err(error) => error.code.to_string(),
+    }
+}
+
+fn minutes(n: u64) -> Duration {
+    Duration::from_secs(n * 60)
+}
+
+fn at(offset: Duration) -> DateTime<Utc> {
+    base_time() + chrono::Duration::from_std(offset).expect("offset fits")
+}
+
+/// A request nobody resolves expires at its first `tick` past the expiry, once, and the
+/// call's decision is a denial.
+pub async fn expiry_denies_the_call<H: ApprovalStoreHarness + ?Sized>(harness: &H) {
+    let fx = Fixture::new(harness).await;
+    let request = fx.submit(finance().expires_after(minutes(10))).await;
+    assert_eq!(request.expires_at, Some(at(minutes(10))), "expiry set from the policy");
+
+    fx.clock.advance(minutes(5));
+    assert_eq!(fx.tick().await, ApprovalTick::default(), "nothing is due before the expiry");
+    assert!(!fx.has_decision(&request).await, "no decision while pending");
+
+    fx.clock.advance(minutes(6));
+    let report = fx.tick().await;
+    assert_eq!(report.expired, std::slice::from_ref(&request.id), "the request expires");
+    assert_eq!(fx.tick().await, ApprovalTick::default(), "and expires once");
+
+    let expired = fx.service.get(&request.id).await.expect("get").expect("stored");
+    assert_eq!(expired.state, ApprovalState::Expired);
+    assert!(expired.outcome_applied, "the denial was written");
+    let decision = fx.taken(&request).await.expect("a decision for the call");
+    assert_eq!(decision.decision, ToolConfirmationDecision::Deny, "expiry denies the call");
+    assert!(decision.message.is_some_and(|message| message.contains("expired")));
+    assert_eq!(
+        code(fx.service.decide(&request.id, expired.version, member("ana")).await),
+        "approval.already_resolved",
+        "an expired request takes no decisions"
+    );
+    assert_eq!(
+        fx.recorder.kinds(),
+        [ApprovalEventKind::Submitted, ApprovalEventKind::Expired],
+        "notified on submission and expiry"
+    );
+}
+
+/// With a quorum of 2, the first approval leaves the request pending and the call
+/// without a decision; the same approver cannot approve twice; a second approver
+/// resolves it and the call is approved.
+pub async fn quorum_needs_distinct_approvers<H: ApprovalStoreHarness + ?Sized>(harness: &H) {
+    let fx = Fixture::new(harness).await;
+    let request = fx.submit(finance().with_quorum(2)).await;
+
+    let first = fx.service.decide(&request.id, request.version, member("ana")).await.expect("ana");
+    assert_eq!(first.state, ApprovalState::Pending, "one of two approvals");
+    assert_eq!(first.version, request.version + 1);
+    assert!(!fx.has_decision(&first).await, "the call stays held");
+
+    assert_eq!(
+        code(fx.service.decide(&first.id, first.version, member("ana")).await),
+        "approval.already_decided",
+        "the same approver counts once"
+    );
+    assert_eq!(
+        code(
+            fx.service
+                .decide(
+                    &first.id,
+                    first.version,
+                    ApprovalDecision::approve(SubjectRef::human("eve"))
+                )
+                .await
+        ),
+        "approval.not_an_approver",
+        "someone outside the group cannot approve"
+    );
+
+    let second = fx.service.decide(&first.id, first.version, member("bo")).await.expect("bo");
+    assert_eq!(second.state, ApprovalState::Approved);
+    assert!(second.outcome_applied);
+    assert_eq!(second.decisions.len(), 2);
+    assert_eq!(fx.taken(&second).await, Some(ToolApproval::approve()), "the call is approved");
+}
+
+/// The requester cannot approve their own call, even through a delegation, unless the
+/// policy allows self-approval.
+pub async fn self_approval_is_refused<H: ApprovalStoreHarness + ?Sized>(harness: &H) {
+    let fx = Fixture::new(harness).await;
+    let requester = || member("conformance:requester");
+    let request = fx.submit(finance()).await;
+    assert_eq!(
+        code(fx.service.decide(&request.id, request.version, requester()).await),
+        "approval.self_approval"
+    );
+
+    let delegate = SubjectRef::human(unique("delegate"));
+    fx.service
+        .delegate(
+            ApprovalDelegation::new(
+                SubjectRef::human("conformance:requester"),
+                delegate.clone(),
+                DelegationWindow::new(at(Duration::ZERO), at(minutes(60))),
+            )
+            .with_from_groups(["conformance:finance"]),
+        )
+        .await
+        .expect("delegate");
+    assert_eq!(
+        code(
+            fx.service
+                .decide(&request.id, request.version, ApprovalDecision::approve(delegate))
+                .await
+        ),
+        "approval.self_approval",
+        "a delegate of the requester cannot approve for them"
+    );
+
+    let allowed = fx.submit(finance().allow_self_approval()).await;
+    let decided =
+        fx.service.decide(&allowed.id, allowed.version, requester()).await.expect("allowed");
+    assert_eq!(decided.state, ApprovalState::Approved);
+}
+
+/// A delegate decides in the delegator's place only inside the delegation's window and
+/// scope, and their approval counts for the delegator.
+pub async fn delegation_applies_only_in_its_window<H: ApprovalStoreHarness + ?Sized>(harness: &H) {
+    let fx = Fixture::new(harness).await;
+    let ana = SubjectRef::human(unique("ana"));
+    let bo = SubjectRef::human(unique("bo"));
+    let request = fx
+        .submit(ApprovalPolicy::new([ApproverSelector::Subject(ana.clone())]).with_quorum(2))
+        .await;
+    // Quorum 2 with one listed approver: ana's own approval and her delegate's count once.
+    let delegation = fx
+        .service
+        .delegate(
+            ApprovalDelegation::new(
+                ana.clone(),
+                bo.clone(),
+                DelegationWindow::new(at(minutes(60)), at(minutes(120))),
+            )
+            .with_scope(DelegationScope { app_name: Some(fx.app.clone()), tool_names: vec![] }),
+        )
+        .await
+        .expect("delegate");
+    let by_bo = || ApprovalDecision::approve(bo.clone());
+
+    assert_eq!(
+        code(fx.service.decide(&request.id, request.version, by_bo()).await),
+        "approval.delegation_inactive",
+        "before the window"
+    );
+    fx.clock.advance(minutes(90));
+    let decided = fx.service.decide(&request.id, request.version, by_bo()).await.expect("bo");
+    assert_eq!(decided.decisions[0].via_delegation, Some(ana.clone()), "acted for ana");
+    assert_eq!(
+        code(fx.service.decide(&decided.id, decided.version, ApprovalDecision::approve(ana)).await),
+        "approval.already_decided",
+        "the delegate's approval counted for the delegator"
+    );
+
+    fx.clock.advance(minutes(60));
+    let other = fx.submit(ApprovalPolicy::new([ApproverSelector::Subject(delegation.from)])).await;
+    assert_eq!(
+        code(fx.service.decide(&other.id, other.version, by_bo()).await),
+        "approval.delegation_inactive",
+        "after the window"
+    );
+    assert!(fx.service.revoke_delegation(&delegation.id).await.expect("revoke"));
+    assert_eq!(
+        code(fx.service.decide(&other.id, other.version, by_bo()).await),
+        "approval.not_an_approver",
+        "a revoked delegation no longer applies"
+    );
+}
+
+/// Concurrent decisions on the same version, split across two handles, have one winner;
+/// the losers see a conflict and the stored request holds the winner's decision only.
+pub async fn concurrent_decide_has_one_winner<H: ApprovalStoreHarness + ?Sized>(harness: &H) {
+    let app = unique_unicode("app");
+    let first = Arc::new(Fixture::open(harness, &app).await);
+    let second = Arc::new(Fixture::open(harness, &app).await);
+    let request = first.submit(finance()).await;
+
+    let tasks: Vec<_> = (0..12)
+        .map(|i| {
+            let fx = if i % 2 == 0 { first.clone() } else { second.clone() };
+            let id = request.id.clone();
+            let version = request.version;
+            tokio::spawn(async move {
+                fx.service.decide(&id, version, member(&format!("approver-{i}"))).await
+            })
+        })
+        .collect();
+    let mut winners = Vec::new();
+    for task in tasks {
+        match task.await.expect("decide task completes") {
+            Ok(request) => winners.push(request),
+            Err(error) => assert!(error.is_conflict(), "a loser sees a conflict: {error}"),
+        }
+    }
+    assert_eq!(winners.len(), 1, "exactly one decision wins");
+    let stored = second.service.get(&request.id).await.expect("get").expect("stored");
+    assert_eq!(stored.decisions, winners[0].decisions, "only the winner's decision is stored");
+    assert_eq!(stored.state, ApprovalState::Approved);
+    assert_eq!(first.taken(&stored).await, Some(ToolApproval::approve()), "one decision recorded");
+    assert_eq!(first.taken(&stored).await, None, "and taken once");
+}
+
+/// An edit resolves the request; the recorded decision carries the edited arguments,
+/// and with a quorum the edit restarts the count.
+pub async fn edit_substitutes_arguments<H: ApprovalStoreHarness + ?Sized>(harness: &H) {
+    let fx = Fixture::new(harness).await;
+    let edited: Value = json!({ "amount": 40, "to": "acct:1/main", "memo": "ü-日本" });
+    let request = fx.submit(finance().with_quorum(2)).await;
+
+    let approved =
+        fx.service.decide(&request.id, request.version, member("ana")).await.expect("ana");
+    let edit = ApprovalDecision::edit(SubjectRef::human("bo"), edited.clone())
+        .with_groups(["conformance:finance"]);
+    let after_edit = fx.service.decide(&approved.id, approved.version, edit).await.expect("edit");
+    assert_eq!(after_edit.state, ApprovalState::Pending, "the edit restarts the quorum");
+    assert_eq!(after_edit.quorum_progress().1, Some(edited.clone()));
+
+    let resolved =
+        fx.service.decide(&after_edit.id, after_edit.version, member("ana")).await.expect("ana");
+    assert_eq!(resolved.state, ApprovalState::Approved);
+    assert_eq!(
+        fx.taken(&resolved).await,
+        Some(ToolApproval::approve().with_edited_args(edited)),
+        "the decision carries the edited arguments"
+    );
+
+    let (scope, call) = fx.call(1);
+    let other = fx
+        .service
+        .submit(
+            ApprovalRequest::new(unique("request"), scope, &call, finance())
+                .with_allowed_actions([ApprovalAction::Approve, ApprovalAction::Reject]),
+        )
+        .await
+        .expect("submit");
+    let edit = ApprovalDecision::edit(SubjectRef::human("bo"), json!({}))
+        .with_groups(["conformance:finance"]);
+    assert_eq!(
+        code(fx.service.decide(&other.id, other.version, edit).await),
+        "approval.action_not_allowed",
+        "a request can forbid edits"
+    );
+}
+
+/// An escalation step fires once, at the first `tick` past its delay, and admits its
+/// approvers only from then on.
+pub async fn escalation_fires_once<H: ApprovalStoreHarness + ?Sized>(harness: &H) {
+    let fx = Fixture::new(harness).await;
+    let request = fx
+        .submit(finance().escalate_after(minutes(15), [ApproverSelector::group("conformance:cfo")]))
+        .await;
+    let cfo =
+        || ApprovalDecision::approve(SubjectRef::human("cy")).with_groups(["conformance:cfo"]);
+    assert_eq!(
+        code(fx.service.decide(&request.id, request.version, cfo()).await),
+        "approval.not_an_approver",
+        "not yet escalated"
+    );
+
+    fx.clock.advance(minutes(10));
+    assert_eq!(fx.tick().await, ApprovalTick::default(), "not due yet");
+    fx.clock.advance(minutes(6));
+    let report = fx.tick().await;
+    assert_eq!(report.escalated, [(request.id.clone(), 0)], "the step fires");
+    fx.clock.advance(minutes(30));
+    assert_eq!(fx.tick().await, ApprovalTick::default(), "and fires once");
+
+    let escalated = fx.service.get(&request.id).await.expect("get").expect("stored");
+    assert_eq!(escalated.escalations_fired, 1);
+    let decided =
+        fx.service.decide(&escalated.id, escalated.version, cfo()).await.expect("cfo decides");
+    assert_eq!(decided.state, ApprovalState::Approved);
+    let escalations = fx
+        .recorder
+        .0
+        .lock()
+        .expect("recorder lock")
+        .iter()
+        .filter(|n| n.kind == ApprovalEventKind::Escalated)
+        .map(|n| n.escalation_step)
+        .collect::<Vec<_>>();
+    assert_eq!(escalations, [Some(0)], "one escalation notification");
+}
+
+/// The inbox holds the pending requests an approver may decide — through a selector
+/// naming them, one of their groups, or a live delegation — and pages by cursor.
+pub async fn inbox_lists_what_an_approver_may_decide<H: ApprovalStoreHarness + ?Sized>(
+    harness: &H,
+) {
+    let fx = Fixture::new(harness).await;
+    let ana = SubjectRef::human(unique("ana"));
+    let by_group = fx.submit(finance()).await;
+    fx.clock.advance(Duration::from_secs(1));
+    let by_name = fx.submit(ApprovalPolicy::new([ApproverSelector::Subject(ana.clone())])).await;
+    fx.clock.advance(Duration::from_secs(1));
+    let ops = fx.submit(ApprovalPolicy::new([ApproverSelector::group("conformance:ops")])).await;
+    fx.clock.advance(Duration::from_secs(1));
+    let delegated = fx.submit(ApprovalPolicy::new([ApproverSelector::human("dee")])).await;
+    fx.service
+        .delegate(ApprovalDelegation::new(
+            SubjectRef::human("dee"),
+            ana.clone(),
+            DelegationWindow::new(at(Duration::ZERO), at(minutes(60))),
+        ))
+        .await
+        .expect("delegate");
+    let ids = |page: crate::InboxPage| page.items.into_iter().map(|r| r.id).collect::<Vec<_>>();
+
+    let inbox = InboxQuery::for_approver(ana.clone(), ["conformance:finance"]);
+    assert_eq!(
+        ids(fx.service.inbox(inbox.clone()).await.expect("inbox")),
+        [by_group.id.clone(), by_name.id.clone(), delegated.id.clone()],
+        "by group, by name, and by delegation, oldest first"
+    );
+    let first = fx.service.inbox(inbox.clone().with_limit(2)).await.expect("inbox");
+    assert_eq!(ids(first.clone()), [by_group.id.clone(), by_name.id.clone()]);
+    let next = fx.service.inbox(inbox.with_limit(2).with_cursor(first.next_cursor)).await;
+    assert_eq!(ids(next.expect("next page")), std::slice::from_ref(&delegated.id));
+    assert_eq!(
+        ids(fx.service.inbox(InboxQuery::for_group("conformance:ops")).await.expect("inbox")),
+        std::slice::from_ref(&ops.id),
+        "a group's queue"
+    );
+
+    fx.service
+        .decide(&by_name.id, by_name.version, ApprovalDecision::approve(ana.clone()))
+        .await
+        .expect("decide");
+    let resolved = InboxQuery::for_approver(ana, ["conformance:finance"])
+        .with_states([ApprovalState::Approved]);
+    assert_eq!(
+        ids(fx.service.inbox(resolved).await.expect("inbox")),
+        [by_name.id],
+        "a decided request leaves the pending inbox"
+    );
+}
+
+/// An inbox filtered by session holds the session's requests the approver may decide,
+/// oldest first, and pages by cursor; requests of the approver's other sessions — another
+/// user's session with the same ID included — stay out (spec 3.3 §10 C1).
+pub async fn inbox_lists_one_session<H: ApprovalStoreHarness + ?Sized>(harness: &H) {
+    let fx = Fixture::new(harness).await;
+    let ana = SubjectRef::human(unique("ana"));
+    let first = fx.submit(finance()).await;
+    fx.clock.advance(Duration::from_secs(1));
+    let other = fx.submit(finance()).await;
+    fx.clock.advance(Duration::from_secs(1));
+    let (_, call) = fx.call(500);
+    let second = fx.submit_in(first.scope.clone(), call, finance()).await;
+    fx.clock.advance(Duration::from_secs(1));
+    let (_, call) = fx.call(750);
+    let not_ana = fx
+        .submit_in(
+            first.scope.clone(),
+            call,
+            ApprovalPolicy::new([ApproverSelector::group("conformance:ops")]),
+        )
+        .await;
+    fx.clock.advance(Duration::from_secs(1));
+    let (mut same_id, call) = fx.call(900);
+    same_id.session_id = first.scope.session_id.clone();
+    let other_user = fx.submit_in(same_id, call, finance()).await;
+    let ids = |page: crate::InboxPage| page.items.into_iter().map(|r| r.id).collect::<Vec<_>>();
+
+    let inbox =
+        InboxQuery::for_approver(ana.clone(), ["conformance:finance"]).with_session(&first.scope);
+    assert_eq!(
+        ids(fx.service.inbox(inbox.clone()).await.expect("inbox")),
+        [first.id.clone(), second.id.clone()],
+        "the session's requests the approver may decide, oldest first"
+    );
+    let page = fx.service.inbox(inbox.clone().with_limit(1)).await.expect("inbox");
+    assert_eq!(ids(page.clone()), std::slice::from_ref(&first.id));
+    let next = fx.service.inbox(inbox.with_limit(1).with_cursor(page.next_cursor)).await;
+    assert_eq!(ids(next.expect("next page")), std::slice::from_ref(&second.id));
+    assert_eq!(
+        ids(fx
+            .service
+            .inbox(InboxQuery::for_group("conformance:ops").with_session(&first.scope))
+            .await
+            .expect("inbox")),
+        std::slice::from_ref(&not_ana.id),
+        "a group's queue for the session"
+    );
+    assert_eq!(
+        ids(fx
+            .service
+            .inbox(
+                InboxQuery::for_approver(ana.clone(), ["conformance:finance"])
+                    .with_session_id(first.scope.session_id.clone())
+            )
+            .await
+            .expect("inbox")),
+        [first.id.clone(), second.id.clone(), other_user.id.clone()],
+        "a session ID alone matches it for every user"
+    );
+    assert_eq!(
+        ids(fx
+            .service
+            .inbox(InboxQuery::default().with_session(&other_user.scope))
+            .await
+            .expect("inbox")),
+        std::slice::from_ref(&other_user.id),
+        "another user's session with the same ID"
+    );
+    assert_eq!(
+        ids(fx
+            .service
+            .inbox(InboxQuery::default().with_session(&other.scope))
+            .await
+            .expect("inbox")),
+        std::slice::from_ref(&other.id),
+        "every pending request of another session"
+    );
+    let mut empty = first.scope.clone();
+    empty.session_id = unique("session");
+    assert_eq!(
+        fx.service.inbox(InboxQuery::default().with_session(&empty)).await.expect("inbox").items,
+        [],
+        "a session with no requests"
+    );
+}
+
+/// A call held again while its request is pending keeps that request, even when its
+/// pending entry was recorded anew; `submit_call` creates no second request and sends no
+/// second notification (spec 3.3 §7.3).
+pub async fn a_call_held_again_keeps_its_open_request<H: ApprovalStoreHarness + ?Sized>(
+    harness: &H,
+) {
+    let fx = Fixture::new(harness).await;
+    let (scope, call) = fx.call(250);
+    let held = || crate::approval::ApprovalCall {
+        scope: scope.clone(),
+        request: call.clone(),
+        reason: "requires confirmation".into(),
+        agent_name: "conformance".into(),
+        invocation_id: "inv-1".into(),
+        run_id: None,
+        acting: None,
+    };
+    let service = StoreApprovalService::new(fx.store.clone())
+        .with_clock(Arc::new(fx.clock.clone()))
+        .with_notifier(fx.recorder.clone())
+        .with_router(finance());
+    fx.store.record_pending(&scope, &call).await.expect("record_pending");
+    let first = service.submit_call(held()).await.expect("submit_call").expect("routed");
+
+    // The entry is cleared and recorded again, as a decision taken and the call re-held do.
+    fx.store.decide(&scope, &call.fingerprint(), ToolApproval::deny()).await.expect("decide");
+    fx.store.take_approval(&scope, &call.fingerprint()).await.expect("take");
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    fx.store.record_pending(&scope, &call).await.expect("record_pending");
+    let again = service.submit_call(held()).await.expect("submit_call").expect("routed");
+
+    assert_eq!(again.id, first.id, "the open request is kept");
+    let all = ApprovalRequestQuery::default().with_session(&scope);
+    assert_eq!(fx.store.list_requests(&all).await.expect("list").len(), 1, "one request");
+    assert_eq!(fx.recorder.kinds(), [ApprovalEventKind::Submitted], "notified once");
+}
+
+/// Cancelling or rejecting a request records a denial for the call that carries the
+/// reason, and a resolved request cannot be cancelled.
+pub async fn cancel_and_reject_deny_the_call<H: ApprovalStoreHarness + ?Sized>(harness: &H) {
+    let fx = Fixture::new(harness).await;
+    let cancelled = fx.submit(finance()).await;
+    let after = fx
+        .service
+        .cancel(&cancelled.id, Some("superseded by INV-43".into()))
+        .await
+        .expect("cancel");
+    assert_eq!(after.state, ApprovalState::Cancelled);
+    let denial = fx.taken(&after).await.expect("a decision");
+    assert_eq!(denial.decision, ToolConfirmationDecision::Deny);
+    assert!(denial.message.is_some_and(|m| m.contains("superseded by INV-43")));
+    assert_eq!(code(fx.service.cancel(&cancelled.id, None).await), "approval.already_resolved");
+
+    let rejected = fx.submit(finance()).await;
+    let reject = ApprovalDecision::reject(SubjectRef::human("ana"), "over budget")
+        .with_groups(["conformance:finance"]);
+    let after = fx.service.decide(&rejected.id, rejected.version, reject).await.expect("reject");
+    assert_eq!(after.state, ApprovalState::Rejected);
+    let denial = fx.taken(&after).await.expect("a decision");
+    assert_eq!(denial.decision, ToolConfirmationDecision::Deny);
+    assert!(denial.message.is_some_and(|m| m.contains("over budget")));
+}
+
+/// A request with one of two approvals survives a restart: a new handle reads it back,
+/// lists it in the inbox, and resolves it with the second approval.
+pub async fn requests_survive_a_restart<H: ApprovalStoreHarness + ?Sized>(harness: &H) {
+    let app = unique_unicode("app");
+    let half = {
+        let fx = Fixture::open(harness, &app).await;
+        let request = fx.submit(finance().with_quorum(2)).await;
+        fx.service.decide(&request.id, request.version, member("ana")).await.expect("ana")
+    };
+
+    let fx = Fixture::open(harness, &app).await;
+    assert_eq!(fx.service.get(&half.id).await.expect("get"), Some(half.clone()));
+    let inbox = fx
+        .service
+        .inbox(InboxQuery::for_approver(SubjectRef::human("bo"), ["conformance:finance"]))
+        .await
+        .expect("inbox");
+    assert_eq!(inbox.items, std::slice::from_ref(&half), "still in the inbox");
+    let resolved = fx.service.decide(&half.id, half.version, member("bo")).await.expect("bo");
+    assert_eq!(resolved.state, ApprovalState::Approved);
+    assert_eq!(fx.taken(&resolved).await, Some(ToolApproval::approve()));
+}
+
+/// A request with slots `[editor, publisher]` stays pending until two distinct people fill
+/// them, however many approvals it has: the quorum alone does not resolve it, the call has
+/// no decision before then, and which slot a person fills is not fixed by the order of
+/// decisions. A partly filled request survives a restart.
+pub async fn slots_need_distinct_approvers<H: ApprovalStoreHarness + ?Sized>(harness: &H) {
+    let app = unique_unicode("app");
+    let editor = ApproverSelector::group("conformance:editor");
+    let publisher = ApproverSelector::group("conformance:publisher");
+    let chain = || ApprovalPolicy::for_slots([editor.clone(), publisher.clone()]);
+    let by = |name: &str, groups: &[&str]| {
+        ApprovalDecision::approve(SubjectRef::human(name)).with_groups(groups.iter().copied())
+    };
+
+    let half = {
+        let fx = Fixture::open(harness, &app).await;
+        let request = fx.submit(chain()).await;
+        assert_eq!(request.policy.slots, [editor.clone(), publisher.clone()]);
+        assert_eq!(
+            code(fx.service.decide(&request.id, request.version, by("eve", &[])).await),
+            "approval.not_an_approver",
+            "someone no slot selects cannot approve"
+        );
+        let ed = fx
+            .service
+            .decide(&request.id, request.version, by("ed", &["conformance:editor"]))
+            .await
+            .expect("ed");
+        assert_eq!(ed.state, ApprovalState::Pending);
+        assert_eq!(ed.open_slots(), [&publisher], "the publisher's slot is open");
+        let second_editor = fx
+            .service
+            .decide(&ed.id, ed.version, by("edna", &["conformance:editor"]))
+            .await
+            .expect("edna");
+        assert_eq!(
+            second_editor.state,
+            ApprovalState::Pending,
+            "two approvals meet the quorum, but no publisher approved"
+        );
+        assert!(!fx.has_decision(&second_editor).await, "the call stays held");
+        second_editor
+    };
+
+    let fx = Fixture::open(harness, &app).await;
+    assert_eq!(fx.service.get(&half.id).await.expect("get"), Some(half.clone()), "restart");
+    let resolved = fx
+        .service
+        .decide(&half.id, half.version, by("paul", &["conformance:publisher"]))
+        .await
+        .expect("paul");
+    assert_eq!(resolved.state, ApprovalState::Approved);
+    assert!(resolved.open_slots().is_empty());
+    assert_eq!(fx.taken(&resolved).await, Some(ToolApproval::approve()), "the call is approved");
+
+    // Eva holds both roles and decides first; Ed, an editor, then completes the chain, with
+    // Eva moved to the publisher's slot.
+    let request = fx.submit(chain()).await;
+    let eva = fx
+        .service
+        .decide(
+            &request.id,
+            request.version,
+            by("eva", &["conformance:editor", "conformance:publisher"]),
+        )
+        .await
+        .expect("eva");
+    assert_eq!(eva.state, ApprovalState::Pending, "one person fills one slot");
+    assert_eq!(
+        code(
+            fx.service
+                .decide(
+                    &eva.id,
+                    eva.version,
+                    by("eva", &["conformance:editor", "conformance:publisher"])
+                )
+                .await
+        ),
+        "approval.already_decided",
+        "and cannot fill the other"
+    );
+    let ed = fx
+        .service
+        .decide(&eva.id, eva.version, by("ed", &["conformance:editor"]))
+        .await
+        .expect("ed");
+    assert_eq!(ed.state, ApprovalState::Approved, "the order of decisions does not matter");
+}
+
+/// Groups from a directory: the person it names approves without asserting a group, one
+/// asserting a group the directory governs but does not give them is refused, inboxes follow
+/// the directory, a delegate acts under the delegator's groups from the directory, and a
+/// group the directory does not govern is kept as asserted.
+pub async fn directory_decides_groups<H: ApprovalStoreHarness + ?Sized>(harness: &H) {
+    #[derive(Debug)]
+    struct Finance(Vec<String>);
+
+    #[async_trait]
+    impl ApproverDirectory for Finance {
+        async fn groups(
+            &self,
+            subject: &SubjectRef,
+            _request: &ApprovalRequest,
+        ) -> Result<Vec<String>> {
+            Ok(if self.0.contains(&subject.id) {
+                vec!["conformance:finance".to_string()]
+            } else {
+                Vec::new()
+            })
+        }
+
+        fn governs(&self, group: &str) -> bool {
+            group == "conformance:finance"
+        }
+    }
+
+    let ana = unique("ana");
+    let carol = unique("carol");
+    let fx = Fixture::new(harness)
+        .await
+        .with_directory(Arc::new(Finance(vec![ana.clone(), carol.clone()])));
+    let request = fx.submit(finance()).await;
+
+    let claimed = member("bo");
+    assert_eq!(
+        code(fx.service.decide(&request.id, request.version, claimed).await),
+        "approval.not_an_approver",
+        "a group the caller asserts does not count"
+    );
+    let ids = |page: crate::InboxPage| page.items.into_iter().map(|r| r.id).collect::<Vec<_>>();
+    let bo_inbox = InboxQuery::for_approver(SubjectRef::human("bo"), ["conformance:finance"]);
+    assert!(ids(fx.service.inbox(bo_inbox).await.expect("inbox")).is_empty());
+    let ana_inbox = InboxQuery::for_approver(SubjectRef::human(&ana), Vec::<String>::new());
+    assert_eq!(
+        ids(fx.service.inbox(ana_inbox).await.expect("inbox")),
+        std::slice::from_ref(&request.id),
+        "the directory's groups fill the inbox"
+    );
+
+    let decided = fx
+        .service
+        .decide(&request.id, request.version, ApprovalDecision::approve(SubjectRef::human(&ana)))
+        .await
+        .expect("ana");
+    assert_eq!(decided.state, ApprovalState::Approved);
+    assert_eq!(decided.decisions[0].approver_groups, ["conformance:finance"], "recorded");
+    assert_eq!(decided.decisions[0].authority_groups, ["conformance:finance"]);
+
+    let dave = SubjectRef::human(unique("dave"));
+    fx.service
+        .delegate(ApprovalDelegation::new(
+            SubjectRef::human(&carol),
+            dave.clone(),
+            DelegationWindow::new(at(Duration::ZERO), at(minutes(60))),
+        ))
+        .await
+        .expect("delegate");
+    let other = fx.submit(finance()).await;
+    let delegated = fx
+        .service
+        .decide(&other.id, other.version, ApprovalDecision::approve(dave))
+        .await
+        .expect("dave decides for carol");
+    assert_eq!(delegated.decisions[0].via_delegation, Some(SubjectRef::human(&carol)));
+    assert_eq!(delegated.decisions[0].authority_groups, ["conformance:finance"]);
+
+    let ops = fx.submit(ApprovalPolicy::new([ApproverSelector::group("conformance:ops")])).await;
+    let operator =
+        ApprovalDecision::approve(SubjectRef::human("olu")).with_groups(["conformance:ops"]);
+    let decided = fx.service.decide(&ops.id, ops.version, operator).await.expect("olu");
+    assert_eq!(decided.state, ApprovalState::Approved, "a group it does not govern is kept");
+}

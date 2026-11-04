@@ -6,9 +6,11 @@ resources, prompt templates, and argument completion. The client discovers that
 catalog and communicates through negotiated protocol methods rather than a
 private integration.
 
-ADK-Rust 2 uses the official `rmcp 3.1` SDK. The client negotiates MCP
-`2025-11-25` by default and reaches `2026-07-28` servers through their legacy
-handshake. See [rmcp compatibility](../tools/mcp-tools.md#rmcp-compatibility).
+ADK-Rust uses the official `rmcp` 3 SDK, re-exported as `adk_tool::mcp::rmcp`.
+A client connects with the `initialize` handshake by default, which servers of
+every protocol revision answer; `ClientLifecycleMode::Auto` and `Discover` opt in
+to the `2026-07-28` `server/discover` lifecycle. See
+[Model Context Protocol](../tools/mcp-tools.md).
 
 ## Where ADK-Rust fits
 
@@ -35,9 +37,9 @@ flowchart LR
 
 `McpToolset` adapts one initialized MCP client connection to ADK-Rust.
 `McpServerManager` owns a changing registry of local stdio child processes and
-aggregates their tools. Applications that publish capabilities can build MCP
-servers with `adk_tool::mcp::rmcp`, which is the exact SDK version used by the
-framework.
+aggregates their tools. `McpServer` (feature `mcp-server`) publishes ADK-Rust tools
+as a Streamable HTTP server with an MCP Server Card; hand-written servers use
+`adk_tool::mcp::rmcp`, which is the exact SDK version used by the framework.
 
 ## Choose the right surface
 
@@ -46,23 +48,26 @@ framework.
 | Connect one known local server | `McpToolset` + `TokioChildProcess` | The application starts the child process |
 | Connect one remote MCP service | `McpHttpClientBuilder` | The remote deployment owns availability |
 | Change local server definitions at runtime | `McpServerManager` | The application owns a local registry and child processes |
-| Publish an MCP server | `adk_tool::mcp::rmcp` | Your service owns schemas, authorization, and side effects |
+| Publish ADK-Rust tools as an MCP server | `McpServer` + `McpRouterBuilder` (`mcp-server`) | Your executor owns authorization and side effects |
+| Publish a hand-written MCP server | `adk_tool::mcp::rmcp` | Your service owns schemas, authorization, and side effects |
 | Keep a deprecated sampling integration working | `mcp-sampling` feature | Compatibility only under SEP-2577 |
 
 ## Implemented capability map
 
 | Capability | ADK-Rust API | Behavior |
 |---|---|---|
-| Tool discovery and calls | `McpToolset`, `Toolset` | Raw schemas and multimodal results are preserved |
+| Tool discovery and calls | `McpToolset`, `Toolset` | Raw schemas within `McpSchemaLimits`, bounded discovery, multimodal results preserved |
 | Tool filtering | `with_filter`, `with_tools` | The model sees only selected tools |
 | Resources and templates | `list_resources`, `list_resource_templates`, `read_resource` | Read context through stable URIs |
 | Prompts | `list_prompts`, `get_prompt` | Resolve reusable server-owned messages |
 | Completion | `complete_prompt_argument`, `complete_resource_argument` | Ask the server for argument suggestions |
 | Resource subscriptions | `subscribe_resource`, `unsubscribe_resource` | Custom handlers receive update notifications |
 | Elicitation | `ElicitationHandler` | Form and URL modes |
-| Tasks | `McpTaskConfig` | Negotiated tool-call task creation, polling, result, and cancellation |
+| Tasks | `AdkClientHandler::with_tasks`, `McpTaskConfig` | Server-decided tool-call tasks: polling, input rounds, and cancellation |
 | Streamable HTTP | `McpHttpClientBuilder` | Timeouts, headers, auth injection, expired-session recovery |
 | Dynamic local registry | `McpServerManager` | Add, update, enable, disable, remove, save, monitor, and restart |
+| Shutdown | `Toolset::close` (from `Runner::close`), `McpServerManager::shutdown` | Ends the session and waits for a stdio server to exit |
+| Publishing tools | `McpServer`, `McpRouterBuilder`, `McpCallExecutor` | Streamable HTTP server, Server Card (SEP-2127), AI Catalog entry |
 | Advanced SDK work | `adk_tool::mcp::rmcp` | Server handlers, transports, notifications, and extension types |
 
 ## Documentation path

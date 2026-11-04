@@ -35,7 +35,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 
 /// Agent-facing OpenRouter options serialized into `GenerateContentConfig::extensions["openrouter"]`.
 ///
@@ -251,13 +251,18 @@ impl Llm for OpenRouterClient {
     )]
     async fn generate_content(
         &self,
-        request: LlmRequest,
+        mut request: LlmRequest,
         stream: bool,
     ) -> Result<LlmResponseStream> {
         let request_options =
             OpenRouterRequestOptions::from_generate_config(request.config.as_ref())?
                 .unwrap_or_default();
         let model_name = effective_model_name(self, &request);
+        // Native items reach this provider only from the turns its own origin marks.
+        adk_core::history::retain_replayable(
+            &mut request.contents,
+            &adk_core::history::ProviderOrigin::new("openrouter", &model_name),
+        );
         let api_mode = request_options.api_mode.unwrap_or(self.config().default_api_mode);
         let usage_span = adk_telemetry::llm_generate_span("openrouter", &model_name, stream);
 
@@ -270,7 +275,12 @@ impl Llm for OpenRouterClient {
             }
         };
 
-        Ok(crate::usage_tracking::with_usage_tracking(response_stream, usage_span))
+        Ok(crate::usage_tracking::with_priced_usage_tracking(
+            response_stream,
+            usage_span,
+            "openrouter",
+            model_name,
+        ))
     }
 }
 
@@ -297,6 +307,11 @@ async fn build_chat_llm_stream(
             let mut final_parts = Vec::new();
             let mut final_finish_reason = None;
             let mut final_usage_metadata = None;
+            // Each chunk carries the log probabilities of its own tokens.
+            let mut logprobs = Vec::new();
+            // A finish reason or `[DONE]` marks a complete response; without one the
+            // answer or a tool call may be truncated.
+            let mut finished = false;
 
             while let Some(item) = native_stream.next().await {
                 match item? {
@@ -306,6 +321,16 @@ async fn build_chat_llm_stream(
                         }
 
                         if let Some(choice) = chunk.choices.first() {
+                            logprobs.extend(
+                                choice
+                                    .logprobs
+                                    .as_ref()
+                                    .and_then(|logprobs| logprobs.get("content"))
+                                    .and_then(Value::as_array)
+                                    .into_iter()
+                                    .flatten()
+                                    .cloned(),
+                            );
                             if let Some(delta) = choice.delta.as_ref() {
                                 let (reasoning_parts, reasoning_metadata) =
                                     chat_message_reasoning_to_parts(delta);
@@ -337,22 +362,30 @@ async fn build_chat_llm_stream(
                                 }
                             }
 
-                            if let Some(finish_reason) = choice
-                                .finish_reason
-                                .as_deref()
-                                .map(chat_finish_reason_from_str)
-                            {
-                                final_parts.extend(state.drain_chat_tool_calls());
-                                final_finish_reason = Some(finish_reason);
+                            if let Some(finish_reason) = choice.finish_reason.as_deref() {
+                                if finish_reason == "error" {
+                                    Err(crate::stream_error::reported(
+                                        "openrouter",
+                                        "model.openrouter.stream_error",
+                                        &Value::Null,
+                                    ))?;
+                                }
+                                final_parts.extend(state.drain_chat_tool_calls()?);
+                                final_finish_reason = Some(chat_finish_reason_from_str(finish_reason));
+                                finished = true;
                             }
                         }
                     }
                     super::stream::OpenRouterChatStreamItem::Done => {
+                        if state.has_pending_tool_calls() {
+                            Err(chat_stream_incomplete("its tool calls finished"))?;
+                        }
+                        finished = true;
                         if let Some(response) = llm_stream_response(
                             std::mem::take(&mut final_parts),
                             final_usage_metadata.take(),
                             final_finish_reason.take(),
-                            None,
+                            logprobs_metadata(std::mem::take(&mut logprobs)),
                             false,
                             true,
                         ) {
@@ -363,11 +396,19 @@ async fn build_chat_llm_stream(
                 }
             }
 
+            if !finished {
+                Err(chat_stream_incomplete(if state.has_pending_tool_calls() {
+                    "its tool calls finished"
+                } else {
+                    "the response finished"
+                }))?;
+            }
+
             if let Some(response) = llm_stream_response(
                 final_parts,
                 final_usage_metadata,
                 final_finish_reason,
-                None,
+                logprobs_metadata(logprobs),
                 false,
                 true,
             ) {
@@ -392,6 +433,15 @@ async fn build_chat_llm_stream(
     }
 }
 
+fn chat_stream_incomplete(unfinished: &str) -> AdkError {
+    crate::stream_error::incomplete(
+        "OpenRouter chat",
+        "model.openrouter.chat_stream_incomplete",
+        unfinished,
+    )
+    .with_provider("openrouter")
+}
+
 async fn build_responses_llm_stream(
     client: &OpenRouterClient,
     request: LlmRequest,
@@ -409,19 +459,17 @@ async fn build_responses_llm_stream(
             })
             .await?;
 
+        // Text and reasoning stream as partial deltas. Tool calls and the complete content
+        // come only with the terminal event, so a stream that ends without one never
+        // yields a tool call, and the terminal content replaces the deltas instead of
+        // repeating them.
         let response_stream = try_stream! {
             let mut native_stream = native_stream;
-            let mut state = ResponsesStreamState::default();
 
             while let Some(item) = native_stream.next().await {
                 match item? {
                     super::stream::OpenRouterResponsesStreamItem::Event(event) => {
                         match event.kind.as_str() {
-                            "response.output_item.added" | "response.output_item.done" => {
-                                if let Some(item) = event.item.as_ref() {
-                                    state.capture_function_call_item(item, event.item_id.as_deref());
-                                }
-                            }
                             "response.output_text.delta" => {
                                 if let Some(delta) = event.delta.as_deref()
                                     && let Some(response) = llm_stream_response(
@@ -453,44 +501,44 @@ async fn build_responses_llm_stream(
                                         yield response;
                                     }
                             }
-                            "response.function_call_arguments.delta" => {
-                                if let (Some(item_id), Some(delta)) =
-                                    (event.item_id.as_deref(), event.delta.as_deref())
-                                {
-                                    state.append_function_call_arguments(item_id, delta);
+                            "response.failed" => {
+                                Err(super::error::response_failed_to_adk_error(
+                                    event.response.as_ref().and_then(|response| response.error.as_ref()),
+                                ))?;
+                            }
+                            "response.completed" | "response.incomplete" => {
+                                let response = event.response.as_ref().ok_or_else(|| {
+                                    AdkError::new(
+                                        ErrorComponent::Model,
+                                        ErrorCategory::Internal,
+                                        "model.openrouter.responses_stream_invalid_event",
+                                        "OpenRouter responses stream ended with a terminal event that carries no response",
+                                    )
+                                    .with_provider("openrouter")
+                                })?;
+                                if let Some(mut mapped) = responses_terminal_to_llm_response(response)? {
+                                    mapped
+                                        .provider_metadata
+                                        .get_or_insert_with(|| json!({}))["content_complete"] = json!(true);
+                                    yield mapped;
                                 }
-                            }
-                            "response.function_call_arguments.done" => {
-                                if let Some(item_id) = event.item_id.as_deref()
-                                    && let Some(part) =
-                                        state.complete_function_call(item_id, event.arguments.as_deref())
-                                        && let Some(response) = llm_stream_response(
-                                            vec![part],
-                                            None,
-                                            Some(FinishReason::Stop),
-                                            None,
-                                            false,
-                                            true,
-                                        ) {
-                                            yield response;
-                                        }
-                            }
-                            "response.completed" => {
-                                if let Some(response) = event.response.as_ref()
-                                    && let Some(mapped) = responses_response_to_llm_response(
-                                        response,
-                                        Some(&state.emitted_function_call_ids),
-                                    ) {
-                                        yield mapped;
-                                    }
+                                return;
                             }
                             _ => {}
                         }
                     }
+                    // `[DONE]` follows the terminal event; on its own it finishes nothing.
                     super::stream::OpenRouterResponsesStreamItem::Done => {}
                     super::stream::OpenRouterResponsesStreamItem::Error(_) => unreachable!(),
                 }
             }
+
+            Err(crate::stream_error::incomplete(
+                "OpenRouter responses",
+                "model.openrouter.responses_stream_incomplete",
+                "the response finished",
+            )
+            .with_provider("openrouter"))?;
         };
 
         Ok(Box::pin(response_stream))
@@ -501,7 +549,7 @@ async fn build_responses_llm_stream(
             async move { client.create_response(native_request).await }
         })
         .await?;
-        let mapped = responses_response_to_llm_response(&response, None);
+        let mapped = responses_terminal_to_llm_response(&response)?;
         let response_stream = try_stream! {
             if let Some(mapped) = mapped {
                 yield mapped;
@@ -512,12 +560,63 @@ async fn build_responses_llm_stream(
     }
 }
 
+/// Maps a finished Responses API payload, failing for a status that is not a finished
+/// answer: `failed`, `cancelled`, or `incomplete` for a reason other than the output limit
+/// or a content filter.
+fn responses_terminal_to_llm_response(
+    response: &OpenRouterResponse,
+) -> Result<Option<LlmResponse>> {
+    let failure = |category: ErrorCategory, code: &'static str, message: &'static str| {
+        AdkError::new(ErrorComponent::Model, category, code, message).with_provider("openrouter")
+    };
+    match response.status.as_deref() {
+        Some("failed") => {
+            return Err(super::error::response_failed_to_adk_error(response.error.as_ref()));
+        }
+        Some("cancelled") => {
+            return Err(failure(
+                ErrorCategory::Cancelled,
+                "model.openrouter.response_cancelled",
+                "OpenRouter response was cancelled",
+            ));
+        }
+        Some("incomplete")
+            if !matches!(
+                response
+                    .incomplete_details
+                    .as_ref()
+                    .and_then(|details| details.get("reason"))
+                    .and_then(Value::as_str),
+                Some("max_output_tokens" | "content_filter")
+            ) =>
+        {
+            return Err(failure(
+                ErrorCategory::Internal,
+                "model.openrouter.response_incomplete",
+                "OpenRouter response is incomplete",
+            ));
+        }
+        _ => {}
+    }
+    responses_response_to_llm_response(response)
+}
+
 fn build_chat_request(
     client: &OpenRouterClient,
     request: &LlmRequest,
     request_options: &OpenRouterRequestOptions,
     stream: bool,
 ) -> Result<OpenRouterChatRequest> {
+    crate::generation_config::reject_unsupported(
+        "openrouter",
+        request.config.as_ref(),
+        crate::generation_config::Supports {
+            stop_sequences: true,
+            seed: true,
+            penalties: true,
+            top_logprobs: true,
+        },
+    )?;
     let mut chat_request = OpenRouterChatRequest {
         model: effective_model_name(client, request),
         messages: adk_contents_to_chat_messages(&request.contents)?,
@@ -587,6 +686,18 @@ fn build_responses_request(
     };
 
     if let Some(config) = request.config.as_ref() {
+        // OpenRouter's Responses API has no `seed`.
+        crate::generation_config::reject_unsupported(
+            "OpenRouter Responses",
+            Some(config),
+            crate::generation_config::Supports {
+                stop_sequences: true,
+                seed: false,
+                penalties: true,
+                top_logprobs: true,
+            },
+        )
+        .map_err(|error| error.with_provider("openrouter"))?;
         apply_generate_config_to_responses_request(&mut responses_request, config, &request.model);
     }
 
@@ -655,11 +766,37 @@ fn chat_plugins_for_request(
     (!plugins.is_empty()).then_some(plugins)
 }
 
+/// The reasoning of one request (spec 3.1 §7.23, §10 C4): the request's `effort` becomes
+/// `reasoning.effort` unless the `openrouter` options already choose an effort, a token
+/// budget, or no reasoning, which are provider-specific and win.
+fn request_reasoning(
+    options: Option<OpenRouterReasoningConfig>,
+    config: &GenerateContentConfig,
+) -> Option<OpenRouterReasoningConfig> {
+    let Some(level) = config.effort else {
+        return options;
+    };
+    let mut reasoning = options.unwrap_or_default();
+    if reasoning.effort.is_some()
+        || reasoning.max_tokens.is_some()
+        || reasoning.enabled == Some(false)
+    {
+        tracing::debug!(
+            effort = %level,
+            "openrouter reasoning options choose the reasoning; the request's effort is ignored"
+        );
+        return Some(reasoning);
+    }
+    reasoning.effort = Some(level.as_str().to_string());
+    Some(reasoning)
+}
+
 fn apply_generate_config_to_chat_request(
     request: &mut OpenRouterChatRequest,
     config: &GenerateContentConfig,
     model_name: &str,
 ) {
+    request.reasoning = request_reasoning(request.reasoning.take(), config);
     request.temperature = config.temperature;
     request.top_p = config.top_p;
     request.max_completion_tokens = config.max_output_tokens;
@@ -692,6 +829,7 @@ fn apply_generate_config_to_responses_request(
     config: &GenerateContentConfig,
     model_name: &str,
 ) {
+    request.reasoning = request_reasoning(request.reasoning.take(), config);
     request.temperature = config.temperature;
     request.top_p = config.top_p;
     request.top_k = config.top_k;
@@ -773,17 +911,16 @@ fn chat_response_to_llm_response(response: &OpenRouterChatResponse) -> LlmRespon
         provider_metadata: (!provider_metadata.is_empty())
             .then_some(Value::Object(provider_metadata)),
         interaction_id: None,
+        model: None,
+        provider: None,
     }
 }
 
 fn responses_response_to_llm_response(
     response: &OpenRouterResponse,
-    emitted_function_call_ids: Option<&HashSet<String>>,
-) -> Option<LlmResponse> {
+) -> Result<Option<LlmResponse>> {
     let mut parts = Vec::new();
     let mut provider_metadata = Map::new();
-    let empty_emitted = HashSet::new();
-    let emitted_function_call_ids = emitted_function_call_ids.unwrap_or(&empty_emitted);
 
     let (reasoning_parts, reasoning_metadata) =
         responses_reasoning_items_to_parts(&response.output);
@@ -793,25 +930,24 @@ fn responses_response_to_llm_response(
     for item in &response.output {
         match item.kind.as_str() {
             "message" => parts.extend(response_message_item_to_parts(item)),
-            "function_call" => {
-                if let Some(part) = response_function_call_part(item) {
-                    let part_id = match &part {
-                        Part::FunctionCall { id, .. } => id.clone(),
-                        _ => None,
-                    };
-                    if part_id
-                        .as_ref()
-                        .is_none_or(|part_id| !emitted_function_call_ids.contains(part_id))
-                    {
-                        parts.push(part);
-                    }
-                }
-            }
+            "function_call" => parts.push(response_function_call_part(item)?),
             _ => {}
         }
     }
 
     merge_metadata_object(&mut provider_metadata, responses_provider_metadata(response));
+    // Requested through `top_logprobs`; the tokens of every `output_text` part, in order.
+    let logprobs: Vec<Value> = response
+        .output
+        .iter()
+        .filter(|item| item.kind == "message")
+        .filter_map(|item| item.content.as_ref().and_then(Value::as_array))
+        .flatten()
+        .filter_map(|part| part.get("logprobs").and_then(Value::as_array))
+        .flatten()
+        .cloned()
+        .collect();
+    merge_metadata_object(&mut provider_metadata, logprobs_metadata(logprobs));
 
     if let Some(previous_response_id) = response.previous_response_id.as_ref() {
         provider_metadata.insert(
@@ -840,10 +976,10 @@ fn responses_response_to_llm_response(
         && citation_metadata.is_none()
         && provider_metadata.is_empty()
     {
-        return None;
+        return Ok(None);
     }
 
-    Some(LlmResponse {
+    Ok(Some(LlmResponse {
         content,
         usage_metadata,
         finish_reason,
@@ -856,7 +992,9 @@ fn responses_response_to_llm_response(
         provider_metadata: (!provider_metadata.is_empty())
             .then_some(Value::Object(provider_metadata)),
         interaction_id: None,
-    })
+        model: None,
+        provider: None,
+    }))
 }
 
 fn chat_content_to_parts(content: Option<&OpenRouterChatMessageContent>) -> Vec<Part> {
@@ -910,16 +1048,33 @@ fn response_message_item_to_parts(item: &OpenRouterResponseOutputItem) -> Vec<Pa
         .collect()
 }
 
-fn response_function_call_part(item: &OpenRouterResponseOutputItem) -> Option<Part> {
-    if item.kind != "function_call" {
-        return None;
+/// Maps a `function_call` output item. An unfinished or unnamed call fails the turn instead
+/// of being dropped; arguments that are not a JSON object are marked with
+/// [`adk_core::invalid_tool_arguments`], so the agent answers the call with an error.
+fn response_function_call_part(item: &OpenRouterResponseOutputItem) -> Result<Part> {
+    let invalid = |message: &'static str| {
+        AdkError::new(
+            ErrorComponent::Model,
+            ErrorCategory::Internal,
+            "model.openrouter.invalid_tool_call",
+            message,
+        )
+        .with_provider("openrouter")
+    };
+    let name = item
+        .name
+        .clone()
+        .ok_or_else(|| invalid("OpenRouter returned a tool call without a name"))?;
+    if item.status.as_deref().is_some_and(|status| status != "completed") {
+        return Err(invalid("OpenRouter returned an unfinished tool call"));
     }
+    let args = crate::tool_args::streamed_tool_arguments(
+        "openrouter",
+        &name,
+        item.arguments.as_deref().unwrap_or_default(),
+    );
 
-    let name = item.name.clone()?;
-    let arguments = item.arguments.as_deref()?;
-    let args = serde_json::from_str(arguments).ok()?;
-
-    Some(Part::FunctionCall {
+    Ok(Part::FunctionCall {
         name,
         args,
         id: item.call_id.clone().or_else(|| item.id.clone()),
@@ -953,6 +1108,12 @@ fn responses_finish_reason(response: &OpenRouterResponse) -> Option<FinishReason
         Some("failed" | "cancelled") => Some(FinishReason::Other),
         _ => None,
     }
+}
+
+/// `{"logprobs": {"content": [...]}}`, the shape a complete chat response carries, or `None`
+/// when no token has one.
+fn logprobs_metadata(logprobs: Vec<Value>) -> Option<Value> {
+    (!logprobs.is_empty()).then(|| json!({"logprobs": {"content": logprobs}}))
 }
 
 fn merge_metadata_object(target: &mut Map<String, Value>, value: Option<Value>) {
@@ -989,6 +1150,8 @@ fn llm_stream_response(
         error_message: None,
         provider_metadata,
         interaction_id: None,
+        model: None,
+        provider: None,
     })
 }
 
@@ -1026,104 +1189,36 @@ impl ChatStreamState {
         }
     }
 
-    fn drain_chat_tool_calls(&mut self) -> Vec<Part> {
-        self.pending_tool_calls
-            .values()
-            .filter_map(|pending| {
-                let name = pending.name.clone()?;
-                let args = serde_json::from_str(&pending.arguments).ok()?;
-                Some(Part::FunctionCall {
-                    name,
-                    args,
-                    id: pending.id.clone(),
-                    thought_signature: None,
-                })
+    fn has_pending_tool_calls(&self) -> bool {
+        !self.pending_tool_calls.is_empty()
+    }
+
+    /// Takes the accumulated tool calls. A call without a name fails the turn instead of
+    /// being dropped; arguments that are not a JSON object are marked with
+    /// [`adk_core::invalid_tool_arguments`].
+    fn drain_chat_tool_calls(&mut self) -> Result<Vec<Part>> {
+        std::mem::take(&mut self.pending_tool_calls)
+            .into_values()
+            .map(|pending| {
+                let name = pending.name.ok_or_else(|| {
+                    AdkError::new(
+                        ErrorComponent::Model,
+                        ErrorCategory::Internal,
+                        "model.openrouter.invalid_tool_call",
+                        "OpenRouter returned a tool call without a name",
+                    )
+                    .with_provider("openrouter")
+                })?;
+                let args = crate::tool_args::streamed_tool_arguments(
+                    "openrouter",
+                    &name,
+                    &pending.arguments,
+                );
+                Ok(Part::FunctionCall { name, args, id: pending.id, thought_signature: None })
             })
-            .collect::<Vec<_>>()
-            .tap(|_| self.pending_tool_calls.clear())
+            .collect()
     }
 }
-
-#[derive(Debug, Default)]
-struct ResponsesStreamState {
-    pending_function_calls: HashMap<String, PendingResponseFunctionCall>,
-    emitted_function_call_ids: HashSet<String>,
-}
-
-#[derive(Debug, Default)]
-struct PendingResponseFunctionCall {
-    id: Option<String>,
-    call_id: Option<String>,
-    name: Option<String>,
-    arguments: String,
-}
-
-impl ResponsesStreamState {
-    fn capture_function_call_item(
-        &mut self,
-        item: &OpenRouterResponseOutputItem,
-        event_item_id: Option<&str>,
-    ) {
-        if item.kind != "function_call" {
-            return;
-        }
-
-        let key = event_item_id
-            .map(ToString::to_string)
-            .or_else(|| item.id.clone())
-            .or_else(|| item.call_id.clone());
-
-        if let Some(key) = key {
-            let pending = self.pending_function_calls.entry(key).or_default();
-            pending.id = item.id.clone();
-            pending.call_id = item.call_id.clone();
-            pending.name = item.name.clone();
-            if let Some(arguments) = item.arguments.as_ref() {
-                pending.arguments = arguments.clone();
-            }
-        }
-    }
-
-    fn append_function_call_arguments(&mut self, item_id: &str, delta: &str) {
-        self.pending_function_calls
-            .entry(item_id.to_string())
-            .or_default()
-            .arguments
-            .push_str(delta);
-    }
-
-    fn complete_function_call(
-        &mut self,
-        item_id: &str,
-        final_arguments: Option<&str>,
-    ) -> Option<Part> {
-        let pending = self.pending_function_calls.entry(item_id.to_string()).or_default();
-        if let Some(final_arguments) = final_arguments {
-            pending.arguments = final_arguments.to_string();
-        }
-
-        let name = pending.name.clone()?;
-        let args = serde_json::from_str(&pending.arguments).ok()?;
-        let id = pending.call_id.clone().or_else(|| pending.id.clone());
-
-        if let Some(identifier) = id.as_ref() {
-            self.emitted_function_call_ids.insert(identifier.clone());
-        } else {
-            self.emitted_function_call_ids.insert(item_id.to_string());
-        }
-
-        Some(Part::FunctionCall { name, args, id, thought_signature: None })
-    }
-}
-
-trait Tap: Sized {
-    fn tap<F: FnOnce(&Self)>(self, function: F) -> Self {
-        function(&self);
-        self
-    }
-}
-
-impl<T> Tap for T {}
 
 #[cfg(test)]
 mod tests {
@@ -1449,8 +1544,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn generate_content_responses_stream_emits_complete_function_call_once_arguments_finish()
-    {
+    async fn generate_content_responses_stream_emits_function_call_with_terminal_response() {
         let server = MockServer::start().await;
 
         Mock::given(method("POST"))
@@ -1459,7 +1553,8 @@ mod tests {
                 "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_weather\",\"name\":\"lookup_weather\",\"arguments\":\"\",\"status\":\"in_progress\"},\"sequence_number\":1}\n\n\
                  data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"delta\":\"{\\\"city\\\":\\\"Na\",\"sequence_number\":2}\n\n\
                  data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"delta\":\"irobi\\\"}\",\"sequence_number\":3}\n\n\
-                 data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_1\",\"sequence_number\":4}\n\n\
+                 data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_1\",\"arguments\":\"{\\\"city\\\":\\\"Nairobi\\\"}\",\"sequence_number\":4}\n\n\
+                 data: {\"type\":\"response.completed\",\"sequence_number\":5,\"response\":{\"id\":\"resp_1\",\"status\":\"completed\",\"output\":[{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_weather\",\"name\":\"lookup_weather\",\"arguments\":\"{\\\"city\\\":\\\"Nairobi\\\"}\",\"status\":\"completed\"}]}}\n\n\
                  data: [DONE]\n\n",
             ))
             .mount(&server)
@@ -1504,6 +1599,7 @@ mod tests {
             other => panic!("expected function call part, got {other:?}"),
         }
 
+        assert_eq!(response.content.as_ref().map(|content| content.parts.len()), Some(1));
         assert!(response.turn_complete);
         assert!(!response.partial);
         assert!(stream.next().await.is_none());
@@ -1550,6 +1646,7 @@ mod tests {
 
         let mut calls: Vec<(Option<String>, String, serde_json::Value)> = state
             .drain_chat_tool_calls()
+            .expect("both calls carry a name and JSON-object arguments")
             .into_iter()
             .map(|p| match p {
                 Part::FunctionCall { id, name, args, .. } => (id, name, args),

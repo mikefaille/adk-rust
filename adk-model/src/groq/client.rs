@@ -4,14 +4,19 @@ use super::config::{GROQ_API_BASE, GroqConfig};
 use super::convert::{self, ChatCompletionRequest, ChatCompletionResponse};
 use crate::retry::{RetryConfig, execute_with_retry, is_retryable_model_error};
 use adk_core::{
-    AdkError, ErrorCategory, ErrorComponent, FinishReason, Llm, LlmRequest, LlmResponse,
-    LlmResponseStream, Part,
+    AdkError, ErrorComponent, FinishReason, Llm, LlmRequest, LlmResponse, LlmResponseStream, Part,
 };
 use async_stream::try_stream;
 use async_trait::async_trait;
 use futures::StreamExt;
 use reqwest::Client;
-use serde_json::Value;
+
+/// Stream that ended, or whose connection failed, before the response finished.
+const INCOMPLETE_STREAM: &str = "model.groq.incomplete_stream";
+/// Stream chunk that is not valid JSON or not a chat completion chunk.
+const INVALID_CHUNK: &str = "model.groq.invalid_chunk";
+/// Error Groq reported inside the stream.
+const STREAM_ERROR: &str = "model.groq.stream_error";
 
 /// Groq client for ultra-fast LLM inference.
 ///
@@ -20,7 +25,7 @@ use serde_json::Value;
 /// ```rust,ignore
 /// use adk_model::groq::{GroqClient, GroqConfig};
 ///
-/// let client = GroqClient::new(GroqConfig::llama70b(
+/// let client = GroqClient::new(GroqConfig::gpt_oss_120b(
 ///     std::env::var("GROQ_API_KEY").unwrap()
 /// ))?;
 /// ```
@@ -34,26 +39,49 @@ impl GroqClient {
     /// Create a new Groq client.
     pub fn new(config: GroqConfig) -> Result<Self, AdkError> {
         crate::catalog::warn_if_obsolete("groq", &config.model);
-        let client = Client::builder()
+        let client = crate::HttpTimeouts::default()
+            .apply(Client::builder())
             .build()
             .map_err(|e| AdkError::model(format!("Failed to create HTTP client: {e}")))?;
 
         Ok(Self { client, config, retry_config: RetryConfig::default() })
     }
 
-    /// Create a client for llama-3.3-70b-versatile model.
+    /// Sets the connect and idle timeouts of the HTTP transport, so a stalled stream fails
+    /// with a `Timeout` error instead of holding the run.
+    ///
+    /// See [`HttpTimeouts`](crate::HttpTimeouts) for the defaults.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use std::time::Duration;
+    ///
+    /// use adk_model::groq::{GroqClient, GroqConfig};
+    /// use adk_model::HttpTimeouts;
+    ///
+    /// let client = GroqClient::new(GroqConfig::new("gsk-key", "openai/gpt-oss-120b"))?
+    ///     .with_timeouts(HttpTimeouts::new(Duration::from_secs(10), Duration::from_secs(120)))?;
+    /// # let _ = client;
+    /// # Ok::<(), adk_core::AdkError>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the Groq HTTP client cannot be built.
+    pub fn with_timeouts(mut self, timeouts: crate::HttpTimeouts) -> Result<Self, AdkError> {
+        self.client = timeouts
+            .apply(Client::builder())
+            .build()
+            .map_err(|e| AdkError::model(format!("Failed to create HTTP client: {e}")))?;
+        Ok(self)
+    }
+
+    /// Create a client for the legacy `llama-3.3-70b-versatile` model.
+    ///
+    /// See [`GroqConfig::llama70b`] for its availability.
     pub fn llama70b(api_key: impl Into<String>) -> Result<Self, AdkError> {
         Self::new(GroqConfig::llama70b(api_key))
-    }
-
-    /// Create a client for llama-3.1-8b-instant model.
-    pub fn llama8b(api_key: impl Into<String>) -> Result<Self, AdkError> {
-        Self::new(GroqConfig::llama8b(api_key))
-    }
-
-    /// Create a client for mixtral-8x7b-32768 model.
-    pub fn mixtral(api_key: impl Into<String>) -> Result<Self, AdkError> {
-        Self::new(GroqConfig::mixtral(api_key))
     }
 
     /// Set the retry configuration (builder pattern).
@@ -80,8 +108,32 @@ impl GroqClient {
     }
 
     /// Build a chat completion request from an LLM request.
-    fn build_request(&self, request: &LlmRequest, stream: bool) -> ChatCompletionRequest {
-        let messages: Vec<_> = request.contents.iter().map(convert::content_to_message).collect();
+    ///
+    /// # Errors
+    ///
+    /// Returns `model.unsupported_config` when the config sets `top_logprobs`, which Groq
+    /// models do not support.
+    fn build_request(
+        &self,
+        request: &LlmRequest,
+        stream: bool,
+    ) -> Result<ChatCompletionRequest, AdkError> {
+        let config = request.config.as_ref();
+        crate::generation_config::reject_unsupported(
+            "groq",
+            config,
+            crate::generation_config::Supports {
+                stop_sequences: true,
+                seed: true,
+                penalties: true,
+                top_logprobs: false,
+            },
+        )?;
+        // A tool message carries only text, so images a tool returned follow it.
+        let messages: Vec<_> = crate::tool_result::with_images(&request.contents)
+            .iter()
+            .flat_map(convert::content_to_messages)
+            .collect();
 
         let tools = if request.tools.is_empty() {
             None
@@ -99,8 +151,20 @@ impl GroqClient {
             .or(self.config.max_tokens);
 
         let include_reasoning = if self.config.reasoning_enabled { Some(true) } else { None };
+        // Groq takes `low`, `medium` and `high` on its GPT-OSS models (spec 3.1 §7.23).
+        let reasoning_effort = config.and_then(|c| c.effort).and_then(|level| {
+            if self.config.model.contains("gpt-oss") {
+                return Some(level.as_str().to_string());
+            }
+            tracing::debug!(
+                model.name = %self.config.model,
+                effort = %level,
+                "model takes no reasoning effort; the request's effort is ignored"
+            );
+            None
+        });
 
-        ChatCompletionRequest {
+        Ok(ChatCompletionRequest {
             model: self.config.model.clone(),
             messages,
             temperature,
@@ -109,12 +173,27 @@ impl GroqClient {
             stream: Some(stream),
             tools,
             include_reasoning,
-        }
+            stop: config.map(|c| c.stop_sequences.clone()).filter(|stop| !stop.is_empty()),
+            seed: config.and_then(|c| c.seed),
+            frequency_penalty: config.and_then(|c| c.frequency_penalty),
+            presence_penalty: config.and_then(|c| c.presence_penalty),
+            reasoning_effort,
+        })
     }
 }
 
 #[async_trait]
 impl Llm for GroqClient {
+    // Groq does not state whether reasoning counts toward `max_completion_tokens`, so the model's output limit bounds every request.
+    fn max_cost_micro_usd(&self, request: &adk_core::LlmRequest) -> Option<u64> {
+        crate::pricing::PricingCatalog::standard().max_cost_micro_usd(
+            Some("groq"),
+            self.name(),
+            request,
+            None,
+        )
+    }
+
     fn name(&self) -> &str {
         &self.config.model
     }
@@ -131,13 +210,18 @@ impl Llm for GroqClient {
     )]
     async fn generate_content(
         &self,
-        request: LlmRequest,
+        mut request: LlmRequest,
         stream: bool,
     ) -> Result<LlmResponseStream, AdkError> {
+        // Native items reach this provider only from the turns its own origin marks.
+        adk_core::history::retain_replayable(
+            &mut request.contents,
+            &adk_core::history::ProviderOrigin::new("groq", &self.config.model),
+        );
         let usage_span = adk_telemetry::llm_generate_span("groq", &self.config.model, stream);
         let api_url = self.api_url();
         let api_key = self.config.api_key.clone();
-        let chat_request = self.build_request(&request, stream);
+        let chat_request = self.build_request(&request, stream)?;
         let client = self.client.clone();
         let retry_config = self.retry_config.clone();
 
@@ -159,7 +243,7 @@ impl Llm for GroqClient {
                         .await
                         .map_err(|e| AdkError::new(
                             ErrorComponent::Model,
-                            ErrorCategory::Unavailable,
+                            crate::http_timeouts::transport_category(&e),
                             "model.groq.request",
                             format!("Groq API request failed: {e}"),
                         ).with_provider("groq"))?;
@@ -167,23 +251,22 @@ impl Llm for GroqClient {
                     if !response.status().is_success() {
                         let status = response.status();
                         let status_code = status.as_u16();
+                        let retry_after = response
+                            .headers()
+                            .get(reqwest::header::RETRY_AFTER)
+                            .and_then(|value| value.to_str().ok())
+                            .and_then(crate::retry::parse_retry_after);
                         let error_text = response.text().await.unwrap_or_default();
-                        let category = match status_code {
-                            401 => ErrorCategory::Unauthorized,
-                            403 => ErrorCategory::Forbidden,
-                            404 => ErrorCategory::NotFound,
-                            408 => ErrorCategory::Timeout,
-                            429 => ErrorCategory::RateLimited,
-                            503 | 529 => ErrorCategory::Unavailable,
-                            _ if status_code >= 500 => ErrorCategory::Internal,
-                            _ => ErrorCategory::InvalidInput,
-                        };
-                        return Err(AdkError::new(
+                        let error = AdkError::new(
                             ErrorComponent::Model,
-                            category,
+                            crate::retry::category_for_status_code(status_code),
                             "model.groq.api_error",
-                            format!("Groq API error (HTTP {status}): {error_text}"),
-                        ).with_upstream_status(status_code).with_provider("groq"));
+                            format!(
+                                "Groq API error (HTTP {status}): {}",
+                                adk_core::upstream_excerpt(&error_text)
+                            ),
+                        ).with_upstream_status(status_code).with_provider("groq");
+                        return Err(crate::retry::with_retry_after(error, retry_after));
                     }
 
                     Ok(response)
@@ -194,186 +277,277 @@ impl Llm for GroqClient {
             if stream {
                 // Streaming mode - process SSE events
                 let mut byte_stream = response.bytes_stream();
-                let mut buffer = String::new();
+                // Bytes, not text: a network chunk can end inside a UTF-8 character.
+                let mut buffer = Vec::new();
+                // A finish reason or `[DONE]` marks a complete response; without one the
+                // answer or a tool call may be truncated.
+                let mut finished = false;
+                let mut ended = false;
 
                 // Accumulate tool calls across chunks
                 let mut tool_call_accumulators: std::collections::HashMap<u32, (String, String, String)> =
                     std::collections::HashMap::new();
 
-                while let Some(chunk_result) = byte_stream.next().await {
-                    let chunk = chunk_result
-                        .map_err(|e| AdkError::model(format!("Stream read error: {e}")))?;
-
-                    buffer.push_str(&String::from_utf8_lossy(&chunk));
+                while !ended {
+                    match byte_stream.next().await {
+                        Some(chunk) => buffer.extend_from_slice(&chunk.map_err(|error| {
+                            crate::stream_error::interrupted("groq", INCOMPLETE_STREAM, &error)
+                        })?),
+                        None => {
+                            ended = true;
+                            // The last line may arrive without its line ending.
+                            buffer.push(b'\n');
+                        }
+                    }
 
                     // Process complete SSE events
-                    while let Some(line_end) = buffer.find('\n') {
-                        let line = buffer[..line_end].trim().to_string();
-                        buffer = buffer[line_end + 1..].to_string();
+                    while let Some(line) = crate::sse::take_line(&mut buffer)? {
+                        let Some(data) = crate::sse::data(&line) else {
+                            continue;
+                        };
 
-                        if line.is_empty() || line == "data: [DONE]" {
+                        if data == "[DONE]" {
+                            if !tool_call_accumulators.is_empty() {
+                                Err(crate::stream_error::incomplete(
+                                    "groq",
+                                    INCOMPLETE_STREAM,
+                                    "its tool calls finished",
+                                ))?;
+                            }
+                            finished = true;
                             continue;
                         }
 
-                        if let Some(data) = line.strip_prefix("data: ") {
-                            match serde_json::from_str::<ChatCompletionResponse>(data) {
-                                Ok(chunk_response) => {
-                                    if let Some(choice) = chunk_response.choices.first() {
-                                        // Handle tool call accumulation
-                                        if let Some(delta) = &choice.delta
-                                            && let Some(tool_calls) = &delta.tool_calls {
-                                                for tc in tool_calls {
-                                                    let index = tc.index;
-                                                    let entry = tool_call_accumulators
-                                                        .entry(index)
-                                                        .or_insert_with(|| {
-                                                            let call_id = tc.id.clone().unwrap_or_else(|| {
-                                                                format!("call_{}", index)
-                                                            });
-                                                            (call_id, String::new(), String::new())
-                                                        });
-
-                                                    if let Some(id) = &tc.id {
-                                                        entry.0 = id.clone();
-                                                    }
-
-                                                    if let Some(func) = &tc.function {
-                                                        if let Some(name) = &func.name {
-                                                            entry.1 = name.clone();
-                                                        }
-                                                        if let Some(args_chunk) = &func.arguments {
-                                                            entry.2.push_str(args_chunk);
-                                                        }
-                                                    }
-                                                }
-                                            }
-
-                                        // Check for finish
-                                        if choice.finish_reason.is_some() {
-                                            let finish_reason = choice.finish_reason.as_ref().map(|fr| {
-                                                match fr.as_str() {
-                                                    "stop" => FinishReason::Stop,
-                                                    "length" => FinishReason::MaxTokens,
-                                                    "tool_calls" => FinishReason::Stop,
-                                                    "content_filter" => FinishReason::Safety,
-                                                    _ => FinishReason::Stop,
-                                                }
+                        let parsed = serde_json::from_str::<serde_json::Value>(data);
+                        // A cut-off trailer after a finished response loses nothing.
+                        if parsed.is_err() && ended && finished {
+                            continue;
+                        }
+                        let value = parsed.map_err(|error| {
+                            crate::stream_error::undecodable("groq", INVALID_CHUNK, &error)
+                        })?;
+                        if let Some(error) = value.get("error").filter(|error| !error.is_null()) {
+                            Err(crate::stream_error::reported("groq", STREAM_ERROR, error))?;
+                        }
+                        // A chunk that does not decode can be the one finishing the turn,
+                        // so it fails the stream rather than dropping its tool calls.
+                        let chunk_response: ChatCompletionResponse = serde_json::from_value(value)
+                            .map_err(|error| {
+                                crate::stream_error::undecodable("groq", INVALID_CHUNK, &error)
+                            })?;
+                        if let Some(choice) = chunk_response.choices.first() {
+                            // Handle tool call accumulation
+                            if let Some(delta) = &choice.delta
+                                && let Some(tool_calls) = &delta.tool_calls {
+                                    for tc in tool_calls {
+                                        let index = tc.index;
+                                        let entry = tool_call_accumulators
+                                            .entry(index)
+                                            .or_insert_with(|| {
+                                                let call_id = tc.id.clone().unwrap_or_else(|| {
+                                                    format!("call_{}", index)
+                                                });
+                                                (call_id, String::new(), String::new())
                                             });
 
-                                            // Emit tool calls if any
-                                            if !tool_call_accumulators.is_empty() {
-                                                let mut sorted_calls: Vec<_> =
-                                                    tool_call_accumulators.drain().collect();
-                                                sorted_calls.sort_by_key(|(idx, _)| *idx);
+                                        if let Some(id) = &tc.id {
+                                            entry.0 = id.clone();
+                                        }
 
-                                                let tool_calls: Vec<_> = sorted_calls
-                                                    .into_iter()
-                                                    .map(|(_, (id, name, args_str))| {
-                                                        let args: Value =
-                                                            serde_json::from_str(&args_str)
-                                                                .unwrap_or(serde_json::json!({}));
-                                                        (id, name, args)
-                                                    })
-                                                    .collect();
-
-                                                yield convert::create_tool_call_response(
-                                                    tool_calls,
-                                                    finish_reason,
-                                                );
-                                                continue;
+                                        if let Some(func) = &tc.function {
+                                            if let Some(name) = &func.name {
+                                                entry.1 = name.clone();
                                             }
+                                            if let Some(args_chunk) = &func.arguments {
+                                                entry.2.push_str(args_chunk);
+                                            }
+                                        }
+                                    }
+                                }
 
-                                            // Emit final response
-                                            let mut parts = Vec::new();
+                            // Check for finish
+                            if let Some(reason) = choice.finish_reason.as_deref() {
+                                if reason == "error" {
+                                    Err(crate::stream_error::reported(
+                                        "groq",
+                                        STREAM_ERROR,
+                                        &serde_json::Value::Null,
+                                    ))?;
+                                }
+                                finished = true;
+                                let finish_reason = Some(match reason {
+                                    "stop" | "tool_calls" => FinishReason::Stop,
+                                    "length" => FinishReason::MaxTokens,
+                                    "content_filter" => FinishReason::Safety,
+                                    _ => FinishReason::Other,
+                                });
 
-                                            if let Some(delta) = &choice.delta
-                                                && let Some(text) = &delta.content
-                                                    && !text.is_empty() {
-                                                        parts.push(Part::Text { text: text.clone() });
-                                                    }
+                                // Emit tool calls if any
+                                if !tool_call_accumulators.is_empty() {
+                                    let mut sorted_calls: Vec<_> =
+                                        tool_call_accumulators.drain().collect();
+                                    sorted_calls.sort_by_key(|(idx, _)| *idx);
 
+                                    let tool_calls = sorted_calls
+                                        .into_iter()
+                                        .map(|(_, (id, name, args_str))| {
+                                            let args = crate::tool_args::streamed_tool_arguments(
+                                                "groq",
+                                                &name,
+                                                &args_str,
+                                            );
+                                            (id, name, args)
+                                        })
+                                        .collect::<Vec<_>>();
+
+                                    let mut response = convert::create_tool_call_response(
+                                        tool_calls,
+                                        finish_reason,
+                                    );
+                                    response.usage_metadata = chunk_response.usage_metadata();
+                                    yield response;
+                                    continue;
+                                }
+
+                                // Emit final response
+                                let mut parts = Vec::new();
+
+                                if let Some(delta) = &choice.delta
+                                    && let Some(text) = &delta.content
+                                        && !text.is_empty() {
+                                            parts.push(Part::Text { text: text.clone() });
+                                        }
+
+                                yield LlmResponse {
+                                    content: if parts.is_empty() {
+                                        None
+                                    } else {
+                                        Some(adk_core::Content {
+                                            role: "model".to_string(),
+                                            parts,
+                                        })
+                                    },
+                                    usage_metadata: chunk_response.usage_metadata(),
+                                    finish_reason,
+                                    citation_metadata: None,
+                                    partial: false,
+                                    turn_complete: true,
+                                    interrupted: false,
+                                    error_code: None,
+                                    error_message: None,
+                                    provider_metadata: None,
+                                    interaction_id: None,
+                                    model: None,
+                                    provider: None,
+                                };
+                            } else {
+                                // Emit partial text content
+                                if let Some(delta) = &choice.delta
+                                    && let Some(text) = &delta.content
+                                        && !text.is_empty() {
                                             yield LlmResponse {
-                                                content: if parts.is_empty() {
-                                                    None
-                                                } else {
-                                                    Some(adk_core::Content {
-                                                        role: "model".to_string(),
-                                                        parts,
-                                                    })
-                                                },
-                                                usage_metadata: chunk_response.usage.map(|u| {
-                                                    let mut meta = adk_core::UsageMetadata {
-                                                        prompt_token_count: u.prompt_tokens as i32,
-                                                        candidates_token_count: u.completion_tokens as i32,
-                                                        total_token_count: u.total_tokens as i32,
-                                                        ..Default::default()
-                                                    };
-                                                    if let Some(ref details) = u.prompt_tokens_details {
-                                                        meta.cache_read_input_token_count = details.cached_tokens.map(|t| t as i32);
-                                                    }
-                                                    if let Some(ref details) = u.completion_tokens_details {
-                                                        meta.thinking_token_count = details.reasoning_tokens.map(|t| t as i32);
-                                                    }
-                                                    meta
+                                                content: Some(adk_core::Content {
+                                                    role: "model".to_string(),
+                                                    parts: vec![Part::Text {
+                                                        text: text.clone(),
+                                                    }],
                                                 }),
-                                                finish_reason,
+                                                usage_metadata: None,
+                                                finish_reason: None,
                                                 citation_metadata: None,
-                                                partial: false,
-                                                turn_complete: true,
+                                                partial: true,
+                                                turn_complete: false,
                                                 interrupted: false,
                                                 error_code: None,
                                                 error_message: None,
                                                 provider_metadata: None,
                                                 interaction_id: None,
+                                                model: None,
+                                                provider: None,
                                             };
-                                        } else {
-                                            // Emit partial text content
-                                            if let Some(delta) = &choice.delta
-                                                && let Some(text) = &delta.content
-                                                    && !text.is_empty() {
-                                                        yield LlmResponse {
-                                                            content: Some(adk_core::Content {
-                                                                role: "model".to_string(),
-                                                                parts: vec![Part::Text {
-                                                                    text: text.clone(),
-                                                                }],
-                                                            }),
-                                                            usage_metadata: None,
-                                                            finish_reason: None,
-                                                            citation_metadata: None,
-                                                            partial: true,
-                                                            turn_complete: false,
-                                                            interrupted: false,
-                                                            error_code: None,
-                                                            error_message: None,
-                                                            provider_metadata: None,
-                                                            interaction_id: None,
-                                                        };
-                                                    }
                                         }
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::warn!("Failed to parse Groq chunk: {} - {}", e, data);
-                                }
                             }
                         }
                     }
                 }
+                if !finished {
+                    Err(crate::stream_error::incomplete(
+                        "groq",
+                        INCOMPLETE_STREAM,
+                        if tool_call_accumulators.is_empty() {
+                            "the response finished"
+                        } else {
+                            "its tool calls finished"
+                        },
+                    ))?;
+                }
             } else {
                 // Non-streaming mode
-                let response_text = response.text().await
-                    .map_err(|e| AdkError::model(format!("Failed to read response: {e}")))?;
+                let response_text = response.text().await.map_err(|e| AdkError::new(
+                    ErrorComponent::Model,
+                    crate::http_timeouts::transport_category(&e),
+                    "model.groq.request",
+                    format!("Failed to read response: {e}"),
+                ).with_provider("groq"))?;
 
                 let chat_response: ChatCompletionResponse = serde_json::from_str(&response_text)
                     .map_err(|e| AdkError::model(format!(
-                        "Failed to parse response: {e} - {response_text}"
+                        "Failed to parse response: {}",
+                        adk_core::json_error_summary(&e)
                     )))?;
 
                 yield convert::from_response(&chat_response);
             }
         };
 
-        Ok(crate::usage_tracking::with_usage_tracking(Box::pin(response_stream), usage_span))
+        Ok(crate::usage_tracking::with_priced_usage_tracking(
+            Box::pin(response_stream),
+            usage_span,
+            "groq",
+            &self.config.model,
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use adk_core::{Content, GenerateContentConfig};
+
+    fn request(config: GenerateContentConfig) -> LlmRequest {
+        let mut request =
+            LlmRequest::new("qwen/qwen3.8-27b", vec![Content::new("user").with_text("hi")]);
+        request.config = Some(config);
+        request
+    }
+
+    #[test]
+    fn stop_seed_and_penalties_are_sent_and_logprobs_are_rejected() {
+        let client = GroqClient::new(GroqConfig::new("test-key", "qwen/qwen3.8-27b")).unwrap();
+        let built = client
+            .build_request(
+                &request(GenerateContentConfig {
+                    stop_sequences: vec!["END".to_string()],
+                    seed: Some(42),
+                    presence_penalty: Some(0.5),
+                    frequency_penalty: Some(0.25),
+                    ..Default::default()
+                }),
+                false,
+            )
+            .unwrap();
+        let wire = serde_json::to_value(built).unwrap();
+        assert_eq!(wire["stop"], serde_json::json!(["END"]));
+        assert_eq!(wire["seed"], 42);
+        assert_eq!(wire["presence_penalty"], 0.5);
+        assert_eq!(wire["frequency_penalty"], 0.25);
+
+        let error = client
+            .build_request(
+                &request(GenerateContentConfig { top_logprobs: Some(2), ..Default::default() }),
+                false,
+            )
+            .expect_err("Groq models do not return log probabilities");
+        assert_eq!(error.code, "model.unsupported_config");
     }
 }

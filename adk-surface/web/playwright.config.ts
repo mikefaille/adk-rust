@@ -1,0 +1,312 @@
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { defineConfig } from "@playwright/test";
+import type { PlaywrightTestConfig } from "@playwright/test";
+
+// Each surface's end-to-end tests run as one project against its own scripted kernel, an
+// example of adk-surface on its own port (spec 3.3 §5). Each run starts every example in a new,
+// empty workspace, so a rerun never finds the files of the last one. Per project, with its
+// prefix (`HOME`, `TRAY`, `MEMORY`, …): `<PREFIX>_E2E_PORT` moves the port; `<PREFIX>_E2E_BIN`
+// starts an example already built instead of `cargo run` (a project served by a command reads
+// its own variables: `MEMORY_E2E_BIN` names the `adk-rust` that `memory-kernel.sh` runs);
+// `<PREFIX>_E2E_URL` points the project at a server already running, with
+// `<PREFIX>_E2E_WORKSPACE` naming that server's workspace. Playwright starts the servers one
+// after another before the first test, so `npm run e2e:build` (`e2e/build-servers.mjs`) builds
+// them all first and none compiles while the servers before it wait.
+interface Surface {
+  /** The project's name: `npx playwright test --project <name>`. */
+  name: string;
+  /** The prefix of its environment variables. */
+  prefix: string;
+  /** The adk-surface example it runs against, unless `command` serves it. */
+  example?: string;
+  /** The command that serves it instead of an example, given the port and the workspace. */
+  command?: string;
+  /** What `command` builds before it serves, for `npm run e2e:build` to build first. */
+  build?: string;
+  /** The adk-surface features the example needs; `web` unless named. */
+  features?: string;
+  /** The host the page is opened at: `127.0.0.1` unless named; `localhost` where WebAuthn needs a domain. */
+  host?: string;
+  /** Its default port. */
+  port: number;
+  /** Its tests under `e2e/`. */
+  testMatch: string[];
+  /** The page the server is ready at. */
+  ready: string;
+  /** The example's arguments after its port and workspace. */
+  args?: string;
+  /** What the project's browser runs with. */
+  use?: PlaywrightTestConfig["use"];
+  /** Stopped with SIGTERM, so its command cleans up, rather than killed outright. */
+  stopsCleanly?: boolean;
+}
+
+/** The `adk-rust` that `memory-kernel.sh` and `agents-kernel.sh` serve. */
+const scriptedKernel = "cargo build -p adk-cli --features scripted-model,audit-sql --bin adk-rust";
+
+const surfaces: Surface[] = [
+  {
+    name: "home",
+    prefix: "HOME",
+    example: "scripted_home",
+    port: 8791,
+    testMatch: ["held-call.spec.ts", "today.spec.ts"],
+    ready: "/ui/",
+  },
+  {
+    name: "tray",
+    prefix: "TRAY",
+    example: "scripted_tray",
+    port: 8792,
+    testMatch: ["tray.spec.ts"],
+    ready: "/ui/tray",
+    args: "--code-turn",
+  },
+  {
+    // Memory and rules over `adk-rust up` with a scripted model (`e2e/memory-kernel.sh`), whose
+    // harness keeps the facts, the standing rules and the signed record the page reads.
+    name: "memory",
+    prefix: "MEMORY",
+    command: "bash adk-surface/web/e2e/memory-kernel.sh",
+    build: scriptedKernel,
+    // 8792 is taken by the tray and the voice view.
+    port: 8796,
+    stopsCleanly: true,
+    testMatch: ["memory.spec.ts"],
+    ready: "/ui/",
+  },
+  {
+    // The phone pairs, sets up its passkey and confirms a high-risk call (spec 3.3 §5.4,
+    // §8.2): a passkey's relying party is the page's domain, so the page is opened at
+    // `localhost`, never an IP address.
+    name: "phone",
+    prefix: "PHONE",
+    example: "scripted_phone",
+    features: "mobile",
+    host: "localhost",
+    port: 8799,
+    testMatch: ["phone.spec.ts"],
+    ready: "/ui/",
+  },
+  {
+    // The app shell's layout over the web home's example (`e2e/fixture-server.sh`): no page
+    // scroll at any size, panes that scroll inside themselves, the tray panel's too.
+    name: "shell",
+    prefix: "SHELL",
+    command: "bash adk-surface/web/e2e/fixture-server.sh",
+    port: 8800,
+    testMatch: ["shell.spec.ts"],
+    ready: "/ui/fixture.html",
+  },
+  {
+    // The voice view (spec 3.3 §5.6): Chromium's fake microphone plays a tone recorded here, and
+    // grants the microphone and the camera without asking.
+    name: "voice",
+    prefix: "VOICE",
+    example: "scripted_voice_home",
+    port: 8797,
+    testMatch: ["voice.spec.ts"],
+    ready: "/ui/voice",
+    features: "web,voice",
+    use: {
+      launchOptions: {
+        args: [
+          "--use-fake-ui-for-media-stream",
+          "--use-fake-device-for-media-stream",
+          `--use-file-for-fake-audio-capture=${toneWav()}`,
+        ],
+      },
+    },
+  },
+  {
+    // Agents a person adds over `adk-rust up` with a scripted model (`e2e/agents-kernel.sh`),
+    // whose first turn suggests one (spec 3.3 §5.7).
+    name: "agents",
+    prefix: "AGENTS",
+    command: "bash adk-surface/web/e2e/agents-kernel.sh",
+    build: scriptedKernel,
+    // 8792, 8796, 8797, 8799 and 8800 are taken.
+    port: 8801,
+    testMatch: ["agents.spec.ts"],
+    ready: "/ui/",
+  },
+  {
+    // The website's views (spec 3.5 §8.2): a fresh site claimed and onboarded to release 1.
+    name: "website",
+    prefix: "WEBSITE",
+    example: "scripted_website",
+    features: "website",
+    // 8791 to 8801 are taken.
+    port: 8803,
+    testMatch: ["website.spec.ts"],
+    ready: "/api/surface/website/setup",
+  },
+  {
+    // The same site a week after launch: the site view, the weekly review and the web editor.
+    name: "website-live",
+    prefix: "WEBSITE_LIVE",
+    example: "scripted_website",
+    features: "website",
+    port: 8804,
+    testMatch: ["website-live.spec.ts"],
+    ready: "/api/surface/website/setup",
+    args: "--live",
+  },
+  {
+    // Screen actions (spec 3.3 §2 item 7): an agent's request answered on its card, then
+    // Snooze on Coming up with a real pointer, over a scripted kernel.
+    name: "verbs",
+    prefix: "VERBS",
+    example: "scripted_verbs",
+    features: "web,verb-ui",
+    port: 8812,
+    testMatch: ["verbs.spec.ts"],
+    ready: "/ui/",
+  },
+  {
+    // The workflow observer (spec 3.3 §12): approve, rewind and fork the invoice-run graph,
+    // whose charge goes to a counting provider on the same server.
+    name: "workflow",
+    prefix: "WORKFLOW",
+    example: "scripted_workflow",
+    features: "web,workflow",
+    port: 8795,
+    testMatch: ["workflow.spec.ts"],
+    ready: "/ui/",
+  },
+  {
+    // Agent-drawn UI (spec 3.3 §6.1 `genui`, §12 "Governed form"): Finance draws the invoice
+    // form, the person sends it, and the call waits for them.
+    name: "genui",
+    prefix: "GENUI",
+    example: "scripted_genui",
+    features: "web,genui",
+    // 8791 to 8804 are taken.
+    port: 8805,
+    testMatch: ["genui.spec.ts"],
+    ready: "/ui/",
+  },
+  {
+    // Every state of the agent-drawn UI concepts over the web home's example, light and dark.
+    name: "genui-states",
+    prefix: "GENUI_STATES",
+    command: "bash adk-surface/web/e2e/fixture-server.sh",
+    port: 8806,
+    testMatch: ["genui-states.spec.ts"],
+    ready: "/ui/fixture.html",
+  },
+  {
+    // Apps from MCP servers (spec 3.3 §6.1 `genui-apps`): Weather's app framed sandboxed over
+    // the web home's example, every concept state, light and dark.
+    name: "genui-apps",
+    prefix: "GENUI_APPS",
+    command: "bash adk-surface/web/e2e/fixture-server.sh",
+    port: 8810,
+    testMatch: ["genui-apps.spec.ts"],
+    ready: "/ui/fixture.html",
+  },
+];
+
+/** One second of a 440 Hz tone, 16 kHz mono PCM16, for Chromium's fake microphone. */
+function toneWav(): string {
+  const rate = 16_000;
+  const samples = new Int16Array(rate).map((_, i) => Math.round(Math.sin((2 * Math.PI * 440 * i) / rate) * 8_000));
+  const header = Buffer.alloc(44);
+  header.write("RIFF", 0);
+  header.writeUInt32LE(36 + samples.byteLength, 4);
+  header.write("WAVEfmt ", 8);
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(1, 22);
+  header.writeUInt32LE(rate, 24);
+  header.writeUInt32LE(rate * 2, 28);
+  header.writeUInt16LE(2, 32);
+  header.writeUInt16LE(16, 34);
+  header.write("data", 36);
+  header.writeUInt32LE(samples.byteLength, 40);
+  const path = join(tmpdir(), "adk-voice-e2e-tone.wav");
+  writeFileSync(path, Buffer.concat([header, Buffer.from(samples.buffer)]));
+  return path;
+}
+
+function env(surface: Surface, name: string): string | undefined {
+  return process.env[`${surface.prefix}_E2E_${name}`];
+}
+
+/** Where each project's server runs and what it writes to. */
+const servers = surfaces.map((surface) => {
+  const url = env(surface, "URL");
+  if (url && !env(surface, "WORKSPACE")) {
+    throw new Error(`${surface.prefix}_E2E_URL needs ${surface.prefix}_E2E_WORKSPACE: the workspace that server writes to`);
+  }
+  // The runner's workers load this file again and keep the workspace the first load made.
+  const workspace = env(surface, "WORKSPACE") ?? mkdtempSync(join(tmpdir(), `adk-${surface.name}-e2e-`));
+  process.env[`${surface.prefix}_E2E_WORKSPACE`] = workspace;
+  const port = Number(env(surface, "PORT") ?? surface.port);
+  // A command reads `<PREFIX>_E2E_BIN` itself, as the binary it runs.
+  const command =
+    surface.command ??
+    env(surface, "BIN") ??
+    `cargo run -p adk-surface --features ${surface.features ?? "web"} --example ${surface.example} --`;
+  // What `npm run e2e:build` builds: the example `cargo run` would build, with its features.
+  const build = env(surface, "BIN")
+    ? undefined
+    : surface.command
+      ? surface.build
+      : `cargo build -p adk-surface --features ${surface.features ?? "web"} --example ${surface.example}`;
+  return {
+    surface,
+    url: url ?? `http://${surface.host ?? "127.0.0.1"}:${port}`,
+    // Readiness is checked on the address the server binds.
+    ready: url ?? `http://127.0.0.1:${port}`,
+    external: url !== undefined,
+    port,
+    workspace,
+    command,
+    build,
+  };
+});
+
+// `--project <name>` starts only the servers of the projects named, so running one surface's
+// tests never builds every other surface's example.
+const named = process.argv.flatMap((arg, index, all) =>
+  arg === "--project" ? [all[index + 1]] : arg.startsWith("--project=") ? [arg.slice("--project=".length)] : [],
+);
+
+const started = servers
+  .filter((server) => !server.external)
+  .filter((server) => named.length === 0 || named.includes(server.surface.name));
+
+/** The builds of the servers this run starts, in order and once each (`npm run e2e:build`). */
+export const builds = [...new Set(started.flatMap((server) => (server.build ? [server.build] : [])))];
+
+const webServer: PlaywrightTestConfig["webServer"] = started.map((server) => ({
+  command: `${server.command} ${server.port} ${server.workspace} ${server.surface.args ?? ""}`.trim(),
+  cwd: "../..",
+  url: `${server.ready}${server.surface.ready}`,
+  reuseExistingServer: false,
+  timeout: 20 * 60_000,
+  stdout: "pipe" as const,
+  ...(server.surface.stopsCleanly ? { gracefulShutdown: { signal: "SIGTERM" as const, timeout: 15_000 } } : {}),
+}));
+
+export default defineConfig({
+  testDir: "e2e",
+  timeout: 60_000,
+  retries: 0,
+  workers: 1,
+  reporter: process.env.CI ? [["list"], ["html", { open: "never" }]] : "list",
+  use: {
+    // A local run uses the installed Chrome; CI installs Playwright's Chromium.
+    ...(process.env.CI ? {} : { channel: "chrome" }),
+    trace: "retain-on-failure",
+  },
+  projects: servers.map((server) => ({
+    name: server.surface.name,
+    testMatch: server.surface.testMatch,
+    use: { ...server.surface.use, baseURL: server.url },
+  })),
+  webServer,
+});

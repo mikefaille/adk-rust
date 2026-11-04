@@ -1,6 +1,4 @@
 //! # adk-session
-#![allow(clippy::result_large_err)]
-#![deny(missing_docs)]
 //!
 //! Session management and state persistence for ADK agents.
 //!
@@ -9,20 +7,39 @@
 //! This crate provides session and state management:
 //!
 //! - [`InMemorySessionService`] - Simple in-memory session storage
-//! - `VertexAiSessionService` - Vertex AI Session API backend (`vertex-session` feature)
+//! - `SqliteSessionService`, `PostgresSessionService`, `RedisSessionService`,
+//!   `MongoSessionService`, `Neo4jSessionService`, `FirestoreSessionService`, and
+//!   `VertexAiSessionService` - database backends, each behind its feature
+//! - `EncryptedSession` - AES-256-GCM encryption over any backend (`encrypted-session` feature)
+//! - Durable stores for every backend: spend ledgers, action ledgers, approval stores, audit log
+//!   stores, the lease, run, schedule, and governance state stores of the durable runtime, and
+//!   the subject registries and consent stores of [`adk_core::subject`]
+//! - [`SessionSubjectData`] - A subject's sessions, exported and erased through any backend
 //! - [`Session`] - Conversation session with state and events
 //! - [`State`] - Key-value state with typed prefixes
 //! - [`SessionService`] - Trait for custom session backends
 //!
 //! ## Quick Start
 //!
-//! ```rust,no_run
-//! use adk_session::InMemorySessionService;
+//! ```rust
+//! use adk_session::{CreateRequest, InMemorySessionService, SessionService};
 //!
+//! # #[tokio::main(flavor = "current_thread")]
+//! # async fn main() -> adk_core::Result<()> {
 //! let service = InMemorySessionService::new();
 //!
-//! // Sessions are created and managed by the Runner
-//! // State is accessed via the session
+//! // Create the session before a Runner runs against it.
+//! let session = service
+//!     .create(CreateRequest {
+//!         app_name: "my_app".into(),
+//!         user_id: "user".into(),
+//!         session_id: Some("session".into()),
+//!         state: Default::default(),
+//!     })
+//!     .await?;
+//! assert_eq!(session.id(), "session");
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ## State Prefixes
@@ -31,16 +48,40 @@
 //!
 //! | Prefix | Constant | Purpose |
 //! |--------|----------|---------|
-//! | `user:` | [`KEY_PREFIX_USER`] | User preferences |
-//! | `app:` | [`KEY_PREFIX_APP`] | Application state |
-//! | `temp:` | [`KEY_PREFIX_TEMP`] | Temporary data |
+//! | `user:` | [`KEY_PREFIX_USER`] | Shared by every session of the user |
+//! | `app:` | [`KEY_PREFIX_APP`] | Shared by every session of the app |
+//! | `temp:` | [`KEY_PREFIX_TEMP`] | Not persisted |
+#![allow(clippy::result_large_err)]
+#![deny(missing_docs)]
 
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+/// SQL-backed approval stores for calls held for confirmation.
+pub mod approval;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+/// SQL-backed audit log stores for signed, Merkle-hashed audit logs.
+pub mod audit_log;
+/// A session service that writes nothing lasting for a subject without its consent.
+pub mod consent_gate;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+mod durable_sql;
 /// Event types and the [`Events`] trait for accessing session event history.
 pub mod event;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+/// SQL-backed governance state stores for a kill switch shared by every replica.
+pub mod governance_state;
 /// In-memory session backend for testing and lightweight use cases.
 pub mod inmemory;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+/// SQL-backed lease stores with fencing epochs.
+pub mod lease;
 /// Schema migration utilities for database-backed session stores.
 pub mod migration;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+/// SQL-backed durable run queues.
+pub mod run_store;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+/// SQL-backed schedule stores.
+pub mod schedule;
 /// Session service trait and request/response types.
 pub mod service;
 /// The [`Session`] trait and state key prefix constants.
@@ -49,35 +90,111 @@ pub mod session;
 pub mod state;
 /// Shared utilities for extracting and merging state deltas across backends.
 pub mod state_utils;
+/// The session family's adapter for subject export and erasure.
+pub mod subject;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+/// SQL-backed subject registries and consent stores.
+pub mod subject_sql;
+
+#[cfg(any(feature = "redis", feature = "mongodb", feature = "neo4j", feature = "firestore"))]
+mod durable_common;
+#[cfg(any(feature = "mongodb", feature = "neo4j", feature = "firestore"))]
+mod durable_transitions;
+#[cfg(any(feature = "redis", feature = "mongodb", feature = "neo4j", feature = "firestore"))]
+mod subject_common;
 
 #[cfg(feature = "encrypted-session")]
 /// AES-256-GCM encrypted session wrapper with key rotation.
 pub mod encrypted;
 #[cfg(feature = "encrypted-session")]
+/// Approval arguments and decisions sealed at rest (spec 3.1 §7.12, §10 S5).
+pub mod encrypted_approval;
+#[cfg(feature = "encrypted-session")]
 /// Encryption key management for encrypted sessions.
 pub mod encryption_key;
+#[cfg(feature = "encrypted-session")]
+/// The `adk-enc:v1:` envelope other stores wrap their payloads with (spec 3.1 §10 S5).
+pub mod envelope;
 #[cfg(feature = "firestore")]
 /// Google Cloud Firestore session backend.
 pub mod firestore;
+#[cfg(feature = "firestore")]
+/// Firestore-backed audit log store for signed, Merkle-hashed audit logs.
+pub mod firestore_audit_log;
+#[cfg(feature = "firestore")]
+/// Firestore-backed lease, run, schedule, and governance state stores.
+pub mod firestore_runtime;
+#[cfg(feature = "firestore")]
+/// Firestore-backed spend ledger, action ledger, and approval store.
+pub mod firestore_stores;
 #[cfg(feature = "mongodb")]
 /// MongoDB session backend.
 pub mod mongodb;
+#[cfg(feature = "mongodb")]
+/// MongoDB-backed audit log store for signed, Merkle-hashed audit logs.
+pub mod mongodb_audit_log;
+#[cfg(feature = "mongodb")]
+/// MongoDB-backed lease, run, schedule, and governance state stores.
+pub mod mongodb_runtime;
+#[cfg(feature = "mongodb")]
+/// MongoDB-backed spend ledger, action ledger, and approval store.
+pub mod mongodb_stores;
 #[cfg(feature = "neo4j")]
 /// Neo4j graph database session backend.
 pub mod neo4j;
+#[cfg(feature = "neo4j")]
+/// Neo4j-backed audit log store for signed, Merkle-hashed audit logs.
+pub mod neo4j_audit_log;
+#[cfg(feature = "neo4j")]
+/// Neo4j-backed lease, run, schedule, and governance state stores.
+pub mod neo4j_runtime;
+#[cfg(feature = "neo4j")]
+/// Neo4j-backed spend ledger, action ledger, and approval store.
+pub mod neo4j_stores;
 #[cfg(feature = "postgres")]
 /// PostgreSQL session backend.
 pub mod postgres;
+#[cfg(feature = "postgres")]
+/// PostgreSQL-backed action ledger for non-idempotent tool calls.
+pub mod postgres_action_ledger;
 #[cfg(feature = "redis")]
 /// Redis session backend with TTL support.
 pub mod redis;
+#[cfg(feature = "redis")]
+/// Redis-backed audit log store for signed, Merkle-hashed audit logs.
+pub mod redis_audit_log;
+#[cfg(feature = "redis")]
+/// Redis-backed lease, run, schedule, and governance state stores.
+pub mod redis_runtime;
+#[cfg(feature = "redis")]
+/// Redis-backed spend ledger, action ledger, and approval store.
+pub mod redis_stores;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+/// SQL-backed spend ledgers shared by model calls and payments.
+pub mod spend;
 #[cfg(feature = "sqlite")]
 /// SQLite session backend.
 pub mod sqlite;
+#[cfg(feature = "sqlite")]
+/// SQLite-backed action ledger for non-idempotent tool calls.
+pub mod sqlite_action_ledger;
+#[cfg(feature = "firestore")]
+/// Firestore-backed subject registry and consent store.
+pub mod subject_firestore;
+#[cfg(feature = "mongodb")]
+/// MongoDB-backed subject registry and consent store.
+pub mod subject_mongodb;
+#[cfg(feature = "neo4j")]
+/// Neo4j-backed subject registry and consent store.
+pub mod subject_neo4j;
+#[cfg(feature = "redis")]
+/// Redis-backed subject registry and consent store.
+pub mod subject_redis;
 #[cfg(feature = "vertex-session")]
 /// Vertex AI Session API backend.
 pub mod vertex;
 
+pub use consent_gate::ConsentGatedSessionService;
 pub use event::{Event, EventActions, Events};
 pub use inmemory::InMemorySessionService;
 pub use service::{
@@ -86,12 +203,91 @@ pub use service::{
 pub use session::{KEY_PREFIX_APP, KEY_PREFIX_TEMP, KEY_PREFIX_USER, Session};
 pub use state::{ReadonlyState, State};
 pub use state_utils::{extract_state_deltas, merge_states};
+pub use subject::SessionSubjectData;
+#[cfg(feature = "firestore")]
+pub use subject_firestore::{FirestoreConsentStore, FirestoreSubjectRegistry};
+#[cfg(feature = "mongodb")]
+pub use subject_mongodb::{MongoConsentStore, MongoSubjectRegistry};
+#[cfg(feature = "neo4j")]
+pub use subject_neo4j::{Neo4jConsentStore, Neo4jSubjectRegistry};
+#[cfg(feature = "redis")]
+pub use subject_redis::{RedisConsentStore, RedisSubjectRegistry};
+#[cfg(feature = "postgres")]
+pub use subject_sql::{PostgresConsentStore, PostgresSubjectRegistry};
+#[cfg(feature = "sqlite")]
+pub use subject_sql::{SqliteConsentStore, SqliteSubjectRegistry};
 
+#[cfg(feature = "postgres")]
+pub use approval::PostgresApprovalStore;
+#[cfg(feature = "sqlite")]
+pub use approval::SqliteApprovalStore;
+#[cfg(feature = "postgres")]
+pub use audit_log::PostgresAuditLogStore;
+#[cfg(feature = "sqlite")]
+pub use audit_log::SqliteAuditLogStore;
+#[cfg(feature = "firestore")]
+pub use firestore_audit_log::FirestoreAuditLogStore;
+#[cfg(feature = "firestore")]
+pub use firestore_runtime::{
+    FirestoreGovernanceStateStore, FirestoreLeaseStore, FirestoreRunStore, FirestoreScheduleStore,
+};
+#[cfg(feature = "firestore")]
+pub use firestore_stores::{FirestoreActionLedger, FirestoreApprovalStore, FirestoreSpendLedger};
+#[cfg(feature = "postgres")]
+pub use governance_state::PostgresGovernanceStateStore;
+#[cfg(feature = "sqlite")]
+pub use governance_state::SqliteGovernanceStateStore;
+#[cfg(feature = "postgres")]
+pub use lease::PostgresLeaseStore;
+#[cfg(feature = "sqlite")]
+pub use lease::SqliteLeaseStore;
+#[cfg(feature = "mongodb")]
+pub use mongodb_audit_log::MongoAuditLogStore;
+#[cfg(feature = "mongodb")]
+pub use mongodb_runtime::{
+    MongoGovernanceStateStore, MongoLeaseStore, MongoRunStore, MongoScheduleStore,
+};
+#[cfg(feature = "mongodb")]
+pub use mongodb_stores::{MongoActionLedger, MongoApprovalStore, MongoSpendLedger};
+#[cfg(feature = "neo4j")]
+pub use neo4j_audit_log::Neo4jAuditLogStore;
+#[cfg(feature = "neo4j")]
+pub use neo4j_runtime::{
+    Neo4jGovernanceStateStore, Neo4jLeaseStore, Neo4jRunStore, Neo4jScheduleStore,
+};
+#[cfg(feature = "neo4j")]
+pub use neo4j_stores::{Neo4jActionLedger, Neo4jApprovalStore, Neo4jSpendLedger};
+#[cfg(feature = "postgres")]
+pub use postgres_action_ledger::PostgresActionLedger;
+#[cfg(feature = "redis")]
+pub use redis_audit_log::RedisAuditLogStore;
+#[cfg(feature = "redis")]
+pub use redis_runtime::{
+    RedisGovernanceStateStore, RedisLeaseStore, RedisRunStore, RedisScheduleStore,
+};
+#[cfg(feature = "redis")]
+pub use redis_stores::{RedisActionLedger, RedisApprovalStore, RedisSpendLedger};
+#[cfg(feature = "postgres")]
+pub use run_store::PostgresRunStore;
+#[cfg(feature = "sqlite")]
+pub use run_store::SqliteRunStore;
+#[cfg(feature = "postgres")]
+pub use schedule::PostgresScheduleStore;
+#[cfg(feature = "sqlite")]
+pub use schedule::SqliteScheduleStore;
+#[cfg(feature = "postgres")]
+pub use spend::PostgresSpendLedger;
+#[cfg(feature = "sqlite")]
+pub use spend::SqliteSpendLedger;
 #[cfg(feature = "sqlite")]
 pub use sqlite::SqliteSessionService;
+#[cfg(feature = "sqlite")]
+pub use sqlite_action_ledger::SqliteActionLedger;
 
 #[cfg(feature = "encrypted-session")]
 pub use encrypted::EncryptedSession;
+#[cfg(feature = "encrypted-session")]
+pub use encrypted_approval::EncryptedApprovalStore;
 #[cfg(feature = "encrypted-session")]
 pub use encryption_key::EncryptionKey;
 #[cfg(feature = "firestore")]
@@ -109,7 +305,7 @@ pub use postgres::PostgresSessionService;
 #[cfg(feature = "redis")]
 pub use redis::{
     RedisSessionConfig, RedisSessionService, app_state_key, events_key, index_key, session_key,
-    user_state_key,
+    updated_index_key, user_state_key,
 };
 #[cfg(feature = "vertex-session")]
 pub use vertex::{VertexAiSessionConfig, VertexAiSessionService};

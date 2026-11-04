@@ -17,9 +17,16 @@ readme = "README.md"
 default = []
 acp = ["dep:axum", "dep:tokio", "dep:uuid"]
 acp-experimental = ["acp", "dep:hmac"]
-ap2 = []
+ap2 = ["dep:tokio"]
 ap2-a2a = ["ap2"]
 ap2-mcp = ["ap2"]
+# The owner-funded wallet, its rails, anomaly alarms and reconciliation (spec 3.5 §7.14).
+wallet = ["dep:awp-types", "dep:futures", "dep:tokio", "dep:uuid"]
+# Durable `WalletStore` backends (spec 3.5 §7.14). Each turns on `wallet` and the same backend of
+# adk-session, whose spend ledger caps the categories across instances.
+sqlite = ["wallet", "dep:sqlx", "sqlx/sqlite", "adk-session/sqlite", "serde_json/float_roundtrip"]
+postgres = ["wallet", "dep:sqlx", "sqlx/postgres", "sqlx/tls-rustls-aws-lc-rs", "adk-session/postgres", "serde_json/float_roundtrip"]
+redis = ["wallet", "dep:fred", "adk-session/redis", "serde_json/float_roundtrip"]
 
 [dependencies]
 adk-core.workspace = true
@@ -29,7 +36,10 @@ adk-guardrail.workspace = true
 adk-memory.workspace = true
 adk-session.workspace = true
 async-trait.workspace = true
+awp-types = { workspace = true, optional = true }
 chrono.workspace = true
+# The wallet store conformance suite races decisions on one payment (spec 3.5 §7.14).
+futures = { workspace = true, optional = true }
 hex.workspace = true
 regex.workspace = true
 serde.workspace = true
@@ -37,14 +47,27 @@ serde_json.workspace = true
 sha2.workspace = true
 hmac = { version = "0.12", optional = true }
 thiserror.workspace = true
+tracing.workspace = true
 tokio = { workspace = true, features = ["sync"], optional = true }
 uuid = { workspace = true, optional = true }
 axum = { version = "0.8", features = ["macros"], optional = true }
+fred = { version = "10", optional = true, features = ["i-scripts"] }
+sqlx = { workspace = true, optional = true, features = ["runtime-tokio"] }
 
 [dev-dependencies]
+# Internal dev-deps are path-only (no version) so cargo strips them from the
+# published manifest — they can never block or reorder a crates.io publish.
+adk-agent = { path = "../adk-agent", default-features = false }
+adk-runner = { path = "../adk-runner", default-features = false }
+adk-model = { path = "../adk-model", default-features = false, features = ["anthropic"] }
+dotenvy = "0.15"
+futures = { workspace = true }
+hmac = "0.12"
 http-body-util = "0.1"
 jsonschema = { workspace = true }
+proptest = "1.5"
 serde_yaml = "0.9"
+tempfile = "3"
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time"] }
 tower = { version = "0.5", features = ["util"] }
 trybuild = "1"

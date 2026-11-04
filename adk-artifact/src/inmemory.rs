@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-const USER_SCOPED_KEY: &str = "user";
+const USER_SCOPED_KEY: &str = USER_SCOPE_SESSION_ID;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct ArtifactKey {
@@ -43,7 +43,7 @@ impl InMemoryArtifactService {
 
     fn validate_file_name(file_name: &str) -> Result<()> {
         if file_name.is_empty() {
-            return Err(adk_core::AdkError::artifact("invalid artifact file name: empty name"));
+            return Err(invalid_file_name(file_name, "the name is empty"));
         }
 
         // Prevent path traversal and path-like names; artifacts are logical keys, not paths.
@@ -53,24 +53,23 @@ impl InMemoryArtifactService {
             || file_name == ".."
             || file_name.contains("..")
         {
-            return Err(adk_core::AdkError::artifact(format!(
-                "invalid artifact file name '{}': path separators and traversal patterns are not allowed",
-                file_name
-            )));
+            return Err(invalid_file_name(
+                file_name,
+                "path separators and traversal patterns are not allowed",
+            ));
         }
 
         Ok(())
     }
 
     fn find_latest_version(
-        &self,
+        artifacts: &HashMap<ArtifactKey, Part>,
         app_name: &str,
         user_id: &str,
         session_id: &str,
         file_name: &str,
     ) -> Option<(i64, Part)> {
-        let artifacts = self.artifacts.read().unwrap();
-        let mut versions: Vec<_> = artifacts
+        artifacts
             .iter()
             .filter(|(k, _)| {
                 k.app_name == app_name
@@ -78,10 +77,8 @@ impl InMemoryArtifactService {
                     && k.session_id == session_id
                     && k.file_name == file_name
             })
-            .collect();
-
-        versions.sort_by_key(|b| std::cmp::Reverse(b.0.version));
-        versions.first().map(|(k, v)| (k.version, (*v).clone()))
+            .max_by_key(|(k, _)| k.version)
+            .map(|(k, v)| (k.version, v.clone()))
     }
 }
 
@@ -95,25 +92,37 @@ impl Default for InMemoryArtifactService {
 impl ArtifactService for InMemoryArtifactService {
     async fn save(&self, req: SaveRequest) -> Result<SaveResponse> {
         Self::validate_file_name(&req.file_name)?;
+        check_session_id(&req.session_id)?;
         let session_id = Self::get_session_id(&req.session_id, &req.file_name);
 
-        let version = if let Some(v) = req.version {
-            v
-        } else {
-            let latest =
-                self.find_latest_version(&req.app_name, &req.user_id, &session_id, &req.file_name);
-            latest.map(|(v, _)| v + 1).unwrap_or(1)
-        };
-
-        let key = ArtifactKey {
+        // One write lock spans choosing the version and inserting it, so concurrent saves
+        // never pick the same version.
+        let mut artifacts = self.artifacts.write().unwrap();
+        let mut key = ArtifactKey {
             app_name: req.app_name,
             user_id: req.user_id,
             session_id,
             file_name: req.file_name,
-            version,
+            version: 0,
         };
-
-        let mut artifacts = self.artifacts.write().unwrap();
+        key.version = match req.version {
+            Some(version) => version,
+            None => artifacts
+                .keys()
+                .filter(|k| {
+                    k.app_name == key.app_name
+                        && k.user_id == key.user_id
+                        && k.session_id == key.session_id
+                        && k.file_name == key.file_name
+                })
+                .map(|k| k.version)
+                .max()
+                .map_or(1, |latest| latest + 1),
+        };
+        if artifacts.contains_key(&key) {
+            return Err(version_exists(&key.file_name, key.version));
+        }
+        let version = key.version;
         artifacts.insert(key, req.part);
 
         Ok(SaveResponse { version })
@@ -121,6 +130,7 @@ impl ArtifactService for InMemoryArtifactService {
 
     async fn load(&self, req: LoadRequest) -> Result<LoadResponse> {
         Self::validate_file_name(&req.file_name)?;
+        check_session_id(&req.session_id)?;
         let session_id = Self::get_session_id(&req.session_id, &req.file_name);
 
         if let Some(version) = req.version {
@@ -135,13 +145,19 @@ impl ArtifactService for InMemoryArtifactService {
             let artifacts = self.artifacts.read().unwrap();
             let part = artifacts
                 .get(&key)
-                .ok_or_else(|| adk_core::AdkError::artifact("artifact not found"))?;
+                .ok_or_else(|| artifact_not_found(&key.file_name, Some(version)))?;
 
             Ok(LoadResponse { part: part.clone() })
         } else {
-            let (_, part) = self
-                .find_latest_version(&req.app_name, &req.user_id, &session_id, &req.file_name)
-                .ok_or_else(|| adk_core::AdkError::artifact("artifact not found"))?;
+            let artifacts = self.artifacts.read().unwrap();
+            let (_, part) = Self::find_latest_version(
+                &artifacts,
+                &req.app_name,
+                &req.user_id,
+                &session_id,
+                &req.file_name,
+            )
+            .ok_or_else(|| artifact_not_found(&req.file_name, None))?;
 
             Ok(LoadResponse { part })
         }
@@ -149,6 +165,7 @@ impl ArtifactService for InMemoryArtifactService {
 
     async fn delete(&self, req: DeleteRequest) -> Result<()> {
         Self::validate_file_name(&req.file_name)?;
+        check_session_id(&req.session_id)?;
         let session_id = Self::get_session_id(&req.session_id, &req.file_name);
 
         let mut artifacts = self.artifacts.write().unwrap();
@@ -175,6 +192,7 @@ impl ArtifactService for InMemoryArtifactService {
     }
 
     async fn list(&self, req: ListRequest) -> Result<ListResponse> {
+        check_session_id(&req.session_id)?;
         let artifacts = self.artifacts.read().unwrap();
         let mut file_names = std::collections::HashSet::new();
 
@@ -193,8 +211,38 @@ impl ArtifactService for InMemoryArtifactService {
         Ok(ListResponse { file_names: sorted })
     }
 
+    async fn list_user(&self, app_name: &str, user_id: &str) -> Result<Vec<UserArtifact>> {
+        let artifacts = self.artifacts.read().unwrap();
+        let mut found: Vec<(&ArtifactKey, &Part)> = artifacts
+            .iter()
+            .filter(|(key, _)| key.app_name == app_name && key.user_id == user_id)
+            .collect();
+        found.sort_by_key(|(key, _)| *key);
+        Ok(found
+            .into_iter()
+            .map(|(key, part)| {
+                let (mime_type, size) = part_summary(part);
+                UserArtifact {
+                    session_id: (key.session_id != USER_SCOPED_KEY).then(|| key.session_id.clone()),
+                    file_name: key.file_name.clone(),
+                    version: key.version,
+                    mime_type,
+                    size,
+                }
+            })
+            .collect())
+    }
+
+    async fn delete_user(&self, app_name: &str, user_id: &str) -> Result<u64> {
+        let mut artifacts = self.artifacts.write().unwrap();
+        let before = artifacts.len();
+        artifacts.retain(|key, _| !(key.app_name == app_name && key.user_id == user_id));
+        Ok((before - artifacts.len()) as u64)
+    }
+
     async fn versions(&self, req: VersionsRequest) -> Result<VersionsResponse> {
         Self::validate_file_name(&req.file_name)?;
+        check_session_id(&req.session_id)?;
         let session_id = Self::get_session_id(&req.session_id, &req.file_name);
         let artifacts = self.artifacts.read().unwrap();
 
@@ -210,7 +258,7 @@ impl ArtifactService for InMemoryArtifactService {
             .collect();
 
         if versions.is_empty() {
-            return Err(adk_core::AdkError::artifact("artifact not found"));
+            return Err(artifact_not_found(&req.file_name, None));
         }
 
         versions.sort_by(|a, b| b.cmp(a));

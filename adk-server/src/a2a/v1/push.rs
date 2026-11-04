@@ -8,6 +8,7 @@
 use std::net::IpAddr;
 use std::time::Duration;
 
+use adk_core::egress::is_non_public;
 use async_trait::async_trait;
 use serde::Serialize;
 
@@ -21,6 +22,33 @@ const MAX_RETRIES: u32 = 3;
 
 /// Delay in seconds for each retry attempt (exponential backoff).
 const RETRY_DELAYS: &[u64] = &[1, 2, 4];
+
+/// Upper bound on one webhook delivery attempt, from connect to response.
+const DELIVERY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Upper bound on establishing the connection for one delivery attempt.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// A client under `policy` that follows no redirect and bounds each attempt.
+fn guarded_client(
+    policy: adk_core::egress::EgressPolicy,
+) -> Result<adk_core::egress::GuardedClient, String> {
+    adk_core::egress::GuardedClient::builder(policy)
+        .timeout(DELIVERY_TIMEOUT)
+        .connect_timeout(CONNECT_TIMEOUT)
+        .redirects(0)
+        .build()
+        .map_err(|error| error.to_string())
+}
+
+/// The client of a sender.
+enum PushClient {
+    /// [`HttpPushNotificationSender::new`]'s: public addresses only, checked when it connects
+    /// as well as on the URL, or why it could not be built.
+    Guarded(Result<adk_core::egress::GuardedClient, String>),
+    /// A caller's own, from [`HttpPushNotificationSender::with_client`].
+    Custom(reqwest::Client),
+}
 
 /// Async trait for delivering push notifications to webhook endpoints.
 ///
@@ -72,22 +100,33 @@ impl PushNotificationSender for NoOpPushNotificationSender {
 
 /// HTTP-based push notification sender with retry and SSRF validation.
 ///
-/// Uses `reqwest::Client` to POST JSON payloads to webhook URLs. Retries
-/// up to 3 times with exponential backoff (1s, 2s, 4s) on failure. Validates
-/// webhook URLs to reject private IP ranges and localhost (SSRF prevention).
+/// POSTs JSON payloads to webhook URLs. Retries up to 3 times with exponential backoff
+/// (1s, 2s, 4s) on failure. Validates webhook URLs with [`validate_webhook_url`] before
+/// every delivery (SSRF prevention), and [`new`](Self::new)'s client checks every address a
+/// webhook's host resolves to when it connects, so a name pointed at an internal address is
+/// refused too.
 pub struct HttpPushNotificationSender {
-    client: reqwest::Client,
+    client: PushClient,
 }
 
 impl HttpPushNotificationSender {
-    /// Creates a new sender with a default `reqwest::Client`.
+    /// Creates a new sender whose client reaches public addresses only — the URL's and every
+    /// address its host resolves to — follows no redirect, ignores proxy settings, gives up
+    /// on an attempt after 10 seconds and on a connection after 5 seconds. When that client
+    /// cannot be built, every delivery fails; no unguarded client is used in its place.
     pub fn new() -> Self {
-        Self { client: reqwest::Client::new() }
+        let public = adk_core::egress::EgressPolicy::public_only().with_plain_http();
+        Self { client: PushClient::Guarded(guarded_client(public)) }
     }
 
     /// Creates a new sender with a custom `reqwest::Client`.
+    ///
+    /// The client should disable redirects (`reqwest::redirect::Policy::none()`)
+    /// and set a timeout: URL validation covers the registered URL only, so a
+    /// followed redirect, or a host name resolving to an internal address, can reach an
+    /// address the validation would have refused. [`new`](Self::new)'s client checks both.
     pub fn with_client(client: reqwest::Client) -> Self {
-        Self { client }
+        Self { client: PushClient::Custom(client) }
     }
 
     /// Sends a JSON payload to the given URL with retry logic.
@@ -100,11 +139,24 @@ impl HttpPushNotificationSender {
         validate_webhook_url(url)?;
 
         for attempt in 0..=MAX_RETRIES {
-            let mut request = self.client.post(url).json(body);
+            let request = match &self.client {
+                PushClient::Guarded(Ok(client)) => client.post(url).map_err(|denial| {
+                    A2aError::InvalidParams { message: format!("webhook URL refused: {denial}") }
+                })?,
+                PushClient::Guarded(Err(reason)) => {
+                    return Err(A2aError::PushDeliveryFailed { message: reason.clone() });
+                }
+                PushClient::Custom(client) => client.post(url),
+            };
+            let mut request = request.json(body);
 
             // Add Bearer auth if configured
             if let Some(ref auth) = config.authentication {
-                request = request.header("Authorization", format!("Bearer {}", auth.credentials));
+                // `credentials` became Option<String> in a2a-protocol-types 0.12:
+                // omit the header entirely rather than sending "Bearer None".
+                if let Some(ref credentials) = auth.credentials {
+                    request = request.header("Authorization", format!("Bearer {credentials}"));
+                }
             }
 
             // Add notification token if configured
@@ -176,12 +228,28 @@ impl PushNotificationSender for HttpPushNotificationSender {
 
 /// Validates a webhook URL to prevent SSRF attacks.
 ///
-/// Rejects URLs that resolve to:
-/// - Private IP ranges: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
-/// - Loopback addresses: 127.0.0.0/8, ::1
-/// - Localhost hostname
+/// Rejects URLs whose host is a literal address of any class but
+/// [`AddressClass::Public`](adk_core::egress::AddressClass::Public) — loopback, private,
+/// link-local, cloud metadata, reserved, and IPv6 forms embedding such an IPv4 address — or a
+/// `localhost` name.
 ///
-/// Returns `A2aError::InvalidParams` for invalid or rejected URLs.
+/// The URL parser normalizes alternative IPv4 spellings (`0x7f.1`, `2130706433`)
+/// before the check. Host names other than `localhost` are not resolved here;
+/// put the sender behind an egress proxy when webhook hosts are untrusted.
+///
+/// # Example
+///
+/// ```rust
+/// use adk_server::a2a::v1::push::validate_webhook_url;
+///
+/// assert!(validate_webhook_url("https://hooks.example.com/a2a").is_ok());
+/// assert!(validate_webhook_url("http://169.254.169.254/latest/meta-data").is_err());
+/// ```
+///
+/// # Errors
+///
+/// Returns `A2aError::InvalidParams` for an unparseable URL, a URL without a host,
+/// or a host in one of the ranges above.
 pub fn validate_webhook_url(url: &str) -> Result<(), A2aError> {
     let parsed = reqwest::Url::parse(url)
         .map_err(|e| A2aError::InvalidParams { message: format!("invalid webhook URL: {e}") })?;
@@ -190,55 +258,25 @@ pub fn validate_webhook_url(url: &str) -> Result<(), A2aError> {
         message: "webhook URL has no host".to_string(),
     })?;
 
-    // Reject localhost hostname
-    if host.eq_ignore_ascii_case("localhost") {
+    // IPv6 hosts are serialized in brackets, e.g. `[::1]`.
+    let unbracketed = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host);
+    if let Ok(ip) = unbracketed.parse::<IpAddr>() {
+        if is_non_public(ip) {
+            return Err(A2aError::InvalidParams {
+                message: format!("webhook URL must not target a non-public address: {ip}"),
+            });
+        }
+        return Ok(());
+    }
+
+    let name = host.trim_end_matches('.').to_ascii_lowercase();
+    if name == "localhost" || name.ends_with(".localhost") {
         return Err(A2aError::InvalidParams {
             message: "webhook URL must not target localhost".to_string(),
         });
     }
 
-    // Check if host is an IP address
-    if let Ok(ip) = host.parse::<IpAddr>()
-        && is_private_or_loopback(&ip)
-    {
-        return Err(A2aError::InvalidParams {
-            message: format!("webhook URL must not target private/loopback address: {ip}"),
-        });
-    }
-
-    // Also check bracketed IPv6 (e.g., [::1])
-    let trimmed = host.trim_start_matches('[').trim_end_matches(']');
-    if trimmed != host
-        && let Ok(ip) = trimmed.parse::<IpAddr>()
-        && is_private_or_loopback(&ip)
-    {
-        return Err(A2aError::InvalidParams {
-            message: format!("webhook URL must not target private/loopback address: {ip}"),
-        });
-    }
-
     Ok(())
-}
-
-/// Returns `true` if the IP address is in a private range or is a loopback address.
-fn is_private_or_loopback(ip: &IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => {
-            let octets = v4.octets();
-            // 127.0.0.0/8 (loopback)
-            octets[0] == 127
-            // 10.0.0.0/8
-            || octets[0] == 10
-            // 172.16.0.0/12
-            || (octets[0] == 172 && (16..=31).contains(&octets[1]))
-            // 192.168.0.0/16
-            || (octets[0] == 192 && octets[1] == 168)
-        }
-        IpAddr::V6(v6) => {
-            // ::1 (loopback)
-            v6.is_loopback()
-        }
-    }
 }
 
 #[cfg(test)]
@@ -311,6 +349,113 @@ mod tests {
         assert!(validate_webhook_url("://missing-scheme").is_err());
     }
 
+    /// Every form here reaches a host-local, internal, or metadata address.
+    #[test]
+    fn test_validate_rejects_every_non_public_form() {
+        let blocked = [
+            // 0.0.0.0/8 — routes to the local host on most stacks
+            "http://0.0.0.0/hook",
+            "http://0.1.2.3/hook",
+            // 169.254.0.0/16 — link-local, including cloud metadata
+            "http://169.254.169.254/latest/meta-data",
+            "http://169.254.0.1/hook",
+            // 100.64.0.0/10 — carrier-grade NAT shared space
+            "http://100.64.0.1/hook",
+            "http://100.127.255.254/hook",
+            // Multicast and broadcast
+            "http://224.0.0.1/hook",
+            "http://255.255.255.255/hook",
+            // Alternative IPv4 spellings the URL parser normalizes
+            "http://2130706433/hook",
+            "http://0x7f.1/hook",
+            "http://0177.0.0.1/hook",
+            // IPv6 unspecified, unique-local (fc00::/7), link-local (fe80::/10), site-local
+            "http://[::]/hook",
+            "http://[fc00::1]/hook",
+            "http://[fd12:3456:789a::1]/hook",
+            "http://[fe80::1]/hook",
+            "http://[febf::1]/hook",
+            "http://[fec0::1]/hook",
+            "http://[ff02::1]/hook",
+            // IPv4-mapped, IPv4-compatible, and NAT64 forms of blocked IPv4 ranges
+            "http://[::ffff:127.0.0.1]/hook",
+            "http://[::ffff:169.254.169.254]/hook",
+            "http://[::ffff:10.0.0.1]/hook",
+            "http://[::ffff:7f00:1]/hook",
+            "http://[::127.0.0.1]/hook",
+            "http://[64:ff9b::a9fe:a9fe]/hook",
+            // localhost names
+            "http://localhost./hook",
+            "http://api.localhost/hook",
+        ];
+        for url in blocked {
+            assert!(validate_webhook_url(url).is_err(), "{url} must be rejected");
+        }
+    }
+
+    #[test]
+    fn test_validate_accepts_public_neighbours_of_blocked_ranges() {
+        let allowed = [
+            "http://100.63.255.255/hook",
+            "http://100.128.0.1/hook",
+            "http://169.253.0.1/hook",
+            "http://1.0.0.1/hook",
+            "http://[2001:4860:4860::8888]/hook",
+            "http://[::ffff:8.8.8.8]/hook",
+            "http://[64:ff9b::808:808]/hook",
+            "http://[fbff::1]/hook",
+            "https://notlocalhost.example/hook",
+        ];
+        for url in allowed {
+            assert!(validate_webhook_url(url).is_ok(), "{url} must be accepted");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_push_client_does_not_follow_redirects() {
+        use std::io::{Read, Write};
+
+        // The redirect target stands in for an internal service; nothing may connect to it.
+        let target = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        target.set_nonblocking(true).unwrap();
+        let target_addr = target.local_addr().unwrap();
+
+        let redirector = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let redirector_addr = redirector.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = redirector.accept().unwrap();
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request);
+            let response = format!(
+                "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{target_addr}/internal\r\n\
+                 Content-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        // The sender's client configuration, with loopback admitted to reach the test server.
+        let client =
+            guarded_client(adk_core::egress::EgressPolicy::allow_private_networks()).unwrap();
+        let response = tokio::time::timeout(
+            Duration::from_secs(5),
+            client
+                .post(&format!("http://{redirector_addr}/hook"))
+                .unwrap()
+                .json(&serde_json::json!({}))
+                .send(),
+        )
+        .await
+        .expect("the redirect must not be followed to a target that never answers")
+        .unwrap();
+        server.join().unwrap();
+
+        assert_eq!(response.status(), reqwest::StatusCode::TEMPORARY_REDIRECT);
+        assert!(
+            matches!(target.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock),
+            "the redirect target must never be contacted"
+        );
+    }
+
     // ── Push notification auth header tests ───────────────────────────────
 
     fn make_status_event() -> TaskStatusUpdateEvent {
@@ -359,7 +504,7 @@ mod tests {
         let mut config = TaskPushNotificationConfig::new("task-1", "https://example.com/hook");
         config.authentication = Some(AuthenticationInfo {
             scheme: "bearer".to_string(),
-            credentials: "my-token".to_string(),
+            credentials: Some("my-token".to_string()),
         });
         let event = make_status_event();
         assert!(
@@ -384,7 +529,7 @@ mod tests {
         let mut config = TaskPushNotificationConfig::new("task-1", "https://example.com/hook");
         config.authentication = Some(AuthenticationInfo {
             scheme: "bearer".to_string(),
-            credentials: "my-token".to_string(),
+            credentials: Some("my-token".to_string()),
         });
         config.token = Some("notification-secret".to_string());
         let event = make_status_event();

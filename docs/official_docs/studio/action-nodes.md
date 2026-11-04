@@ -1,6 +1,14 @@
 # Action Nodes
 
-Non-LLM programmatic nodes for deterministic workflow operations. Action nodes complement LLM agents by handling data transformation, API integrations, control flow, and automation logic.
+Non-LLM programmatic nodes for deterministic workflow operations in [ADK Studio](studio.md). Action nodes complement LLM agents by handling data transformation, API integrations, control flow, and automation logic.
+
+> **Note:** This page describes `adk-studio` 1.0.1, which is developed in
+> [zavora-ai/adk-studio](https://github.com/zavora-ai/adk-studio) and built on the ADK-Rust 1.0
+> crates.
+
+> **Note:** ADK Studio is retired in favour of the [workflow observer](../surfaces/workflow.md),
+> which watches graph agents' runs, steps and forks on the web home's Runs tab (spec 3.3 §13
+> decision 12). This page describes the last Studio release.
 
 ## Overview
 
@@ -12,22 +20,22 @@ All action nodes share a set of standard properties for error handling, tracing,
 
 ## Available Nodes
 
-| Node | Icon | Color | Description |
-|------|------|-------|-------------|
-| **Trigger** | 🎯 | Indigo | Workflow entry point (manual, webhook, schedule, event) |
-| **HTTP** | 🌐 | Blue | Make HTTP requests to external APIs |
-| **Set** | 📝 | Purple | Define and manipulate workflow state variables |
-| **Transform** | ⚙️ | Pink | Transform data using expressions or built-in operations |
-| **Switch** | 🔀 | Amber | Conditional branching based on conditions |
-| **Loop** | 🔄 | Emerald | Iterate over arrays or repeat operations |
-| **Merge** | 🔗 | Cyan | Combine multiple branches back into single flow |
-| **Wait** | ⏱️ | Gray | Pause workflow for duration or condition |
-| **Code** | 💻 | Red | Execute custom JavaScript in sandboxed runtime |
-| **Database** | 🗄️ | Teal | Database operations (PostgreSQL, MySQL, SQLite, MongoDB, Redis) |
-| **Email** | 📧 | Rose | Send emails via SMTP or monitor via IMAP |
-| **Notification** | 🔔 | Orange | Send to Slack, Discord, Teams, or webhooks |
-| **RSS** | 📡 | Lime | Monitor RSS/Atom feeds for new entries |
-| **File** | 📁 | Sky | File operations on local or cloud storage (S3, GCS, Azure) |
+| Node | Icon | Description |
+|------|------|-------------|
+| **Trigger** | 🎯 | Workflow entry point (manual, webhook, schedule, event) |
+| **HTTP** | 🌐 | Make HTTP requests to external APIs |
+| **Set** | 📝 | Define and manipulate workflow state variables |
+| **Transform** | ⚙️ | Transform data using expressions or built-in operations |
+| **Switch** | 🔀 | Conditional branching based on conditions |
+| **Loop** | 🔄 | Iterate over arrays or repeat operations |
+| **Merge** | 🔗 | Combine multiple branches back into single flow |
+| **Wait** | ⏱️ | Pause workflow for duration or condition |
+| **Code** | 💻 | Run authored Rust (in the `adk-code` sandbox in Studio, as a native function in generated code), or JavaScript and TypeScript transforms through `boa_engine` in generated code |
+| **Database** | 🗄️ | Database operations (PostgreSQL, MySQL, SQLite, MongoDB, Redis) |
+| **Email** | 📧 | Send emails via SMTP or monitor via IMAP |
+| **Notification** | 🔔 | Send to Slack, Discord, Teams, or webhooks |
+| **RSS** | 📡 | Monitor RSS/Atom feeds for new entries |
+| **File** | 📁 | File operations on local or cloud storage (S3, GCS, Azure) |
 
 ---
 
@@ -234,13 +242,15 @@ Pauses workflow execution.
 
 ### Code Node 💻
 
-Executes custom JavaScript in a sandboxed `boa_engine` runtime. Graph state is injected as the global `input` object.
+Runs authored Rust, the primary path: Studio executes it in the `adk-code` sandbox, and generated
+code embeds it as a native function. JavaScript and TypeScript transforms run through an embedded
+`boa_engine` runtime in generated code; Studio's own runner refuses them.
 
 **Configuration:**
 
 | Property | Type | Description |
 |----------|------|-------------|
-| `language` | javascript, typescript | Code language |
+| `language` | rust, javascript, typescript | Code language |
 | `code` | string | Code to execute |
 | `sandbox` | object | Security limits (network, filesystem, memory, time) |
 
@@ -347,40 +357,10 @@ Action nodes compile to production Rust code alongside LLM agents. Dependencies 
 | HTTP | `reqwest` | Async HTTP requests with auth, headers, body, JSONPath extraction |
 | Database | `sqlx` / `mongodb` / `redis` | Connection pools, parameterized queries, Redis commands |
 | Email | `lettre` / `imap` | SMTP send with TLS; IMAP monitoring with search filters |
-| Code | `boa_engine` | Embedded JavaScript execution with graph state as `input` object |
+| Code | `boa_engine` (JavaScript and TypeScript only) | Authored Rust embedded as a native function; JavaScript and TypeScript transforms through `boa_engine` |
 | Set | native | Variable assignment (literal, expression, secret) |
 | Transform | native | Map, filter, sort, reduce, flatten, group, pick, merge, template |
 | Merge | native | Branch combination (waitAll, waitAny, append) |
-
-All generated code uses `adk-graph` `FunctionNode` closures with `GraphError::NodeExecutionFailed` for error handling.
-
-**Example generated code (HTTP node):**
-
-```rust
-let http_node = FunctionNode::new("fetch_data", |ctx| async move {
-    let client = reqwest::Client::new();
-    let resp = client.get("https://api.example.com/data")
-        .bearer_auth(&ctx.get("API_TOKEN").unwrap_or_default())
-        .send().await
-        .map_err(|e| GraphError::NodeExecutionFailed {
-            node: "fetch_data".into(),
-            message: e.to_string(),
-        })?;
-    let body: serde_json::Value = resp.json().await?;
-    Ok(NodeOutput::new().with_update("apiData", body))
-});
-```
-
-**Example generated code (Code node):**
-
-```rust
-let code_node = FunctionNode::new("process", |ctx| async move {
-    let mut js_ctx = boa_engine::Context::default();
-    // Graph state injected as global `input` object
-    // User code executed in thread-isolated sandbox
-    Ok(NodeOutput::new().with_update("result", output))
-});
-```
 
 ---
 

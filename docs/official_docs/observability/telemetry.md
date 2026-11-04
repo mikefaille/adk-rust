@@ -79,7 +79,7 @@ Control logging verbosity using the `RUST_LOG` environment variable:
 | Level | Description | Use Case |
 |-------|-------------|----------|
 | `error` | Only errors | Production (minimal) |
-| `warn` | Warnings and errors | Production (default) |
+| `warn` | Warnings and errors | Production |
 | `info` | Informational messages | Development, staging |
 | `debug` | Detailed debugging info | Local development |
 | `trace` | Very verbose tracing | Deep debugging |
@@ -104,7 +104,8 @@ team spans for the server's session telemetry interface.
 
 ### In-process session telemetry
 
-Servers can expose zero-infrastructure traces through the embedded runtime UI:
+Servers can expose zero-infrastructure traces at `GET /api/debug/trace/session/{id}`, which the
+[web home's developer panel](../surfaces/web-home.md#the-developer-panel) draws:
 
 ```rust
 let exporter = adk_telemetry::init_with_adk_exporter("my-agent")?;
@@ -123,6 +124,114 @@ Calling `init_with_adk_exporter` more than once returns the same registered
 exporter. If another global telemetry mode was initialized first, it returns an
 actionable error instead of a disconnected exporter that can never receive
 spans.
+
+The exporter's retention is bounded. It holds up to `DEFAULT_MAX_SPANS` (10,000)
+spans and evicts the least recently stored one beyond that. Build your own
+exporter to change the bound or add a TTL:
+
+```rust
+use std::sync::Arc;
+use std::time::Duration;
+
+use adk_telemetry::AdkSpanExporter;
+
+let exporter = Arc::new(
+    AdkSpanExporter::new()
+        .with_max_spans(2_000)
+        .with_ttl(Duration::from_secs(15 * 60)),
+);
+```
+
+Every span of a run carries the run's `adk.app_name` and `adk.user_id`, inherited
+from `agent.execute`, so the debug routes refuse another user's model and tool
+spans as well as their agent spans.
+
+### Payloads in spans and logs
+
+Model requests, model responses, and tool arguments and results carry user text
+and tool data, so they stay out of telemetry by default:
+
+| `RunConfig::record_payloads` | `call_llm` span fields and DEBUG `tool_call`/`tool_result` logs |
+|------------------------------|------------------------------------------------------------------|
+| `false` (default) | `[omitted: set RunConfig::record_payloads to record payloads]` |
+| `true` | The JSON payload, truncated to `trace_payload_max_bytes` |
+| `true` with the `record-payloads` feature | The full JSON payload |
+
+Enable recording only where traces are as protected as the conversations
+themselves, such as local debugging:
+
+```rust
+use adk_core::RunConfig;
+
+let run_config = RunConfig { record_payloads: true, ..RunConfig::default() };
+```
+
+### Errors in spans and logs
+
+Error messages follow the same rule as payloads. A provider's 400 response can echo the
+prompt, a tool error can quote a connection string, and a guardrail denial quotes the
+argument it refused, so each failure is logged in two parts:
+
+| Part | Logged | Example |
+|------|--------|---------|
+| Diagnostics: component, category, code, upstream status, provider, provider code, request ID | Always, as `error`, from `AdkError::diagnostics()` | `model.invalid_input (model.gemini.bad_request); status 400; provider gemini` |
+| Message text: `error.message`, a guardrail's `reason` | Only with `record_payloads`, under the same truncation | `[omitted: set RunConfig::record_payloads to record payloads]` |
+
+| Source | What is logged |
+|--------|----------------|
+| `LlmAgent` model calls, streams, and provider-reported errors | Diagnostics, plus the message under `record_payloads` |
+| `LlmAgent` toolset, tool, and callback failures | Diagnostics, plus the message under `record_payloads` |
+| `LlmAgent` refused tool calls (DEBUG `tool call refused`) | The refusal reason under `record_payloads` |
+| `adk-guardrail` tool guardrail denials, revisions, and content transforms | Guardrail name, tool, and severity; never the reason |
+| `adk-model` clients, the retry loop, and `adk-gemini` | Diagnostics only; clients see no `RunConfig` |
+| `adk-runner` cache creation and compaction failures | Diagnostics only |
+
+The error returned to the caller keeps its message, but a message that quotes an upstream
+body carries at most `adk_core::UPSTREAM_EXCERPT_BYTES` (512 bytes) of it, and an
+undecodable response is described by `adk_core::json_error_summary` — its error class and
+position — rather than quoted. Log a caller-side error the same way:
+
+```rust
+use adk_core::AdkError;
+
+fn log_failure(error: &AdkError) {
+    tracing::warn!(error = %error.diagnostics(), "turn failed");
+}
+```
+
+### Keeping one run out of a trace
+
+`record_payloads` is read from each run's `RunConfig`, so it holds inside any caller span.
+To keep a run's spans and events out of the caller's trace entirely, drive the run with
+`NoSubscriber`. The runner and agent execute in the task that polls the stream, so nothing
+the run records reaches the caller's subscriber, while the caller's own events around it
+still do:
+
+```rust
+use adk_core::{AdkError, Content, Result};
+use adk_runner::Runner;
+use futures::StreamExt;
+use tracing::instrument::WithSubscriber;
+
+async fn run_untraced(runner: &Runner, session_id: &str, text: &str) -> Result<usize> {
+    async {
+        let mut events = runner
+            .run_str("user", session_id, Content::new("user").with_text(text))
+            .await?;
+        let mut count = 0;
+        while let Some(event) = events.next().await {
+            event?;
+            count += 1;
+        }
+        Ok::<_, AdkError>(count)
+    }
+    .with_subscriber(tracing::subscriber::NoSubscriber::default())
+    .await
+}
+```
+
+Tasks that a tool or toolset spawns, such as an MCP client's connection task, record with
+the global subscriber.
 
 ## Logging Macros
 
@@ -288,7 +397,7 @@ record_llm_usage(&LlmUsage {
 });
 ```
 
-All ADK model providers (Gemini, OpenAI, Anthropic, Ollama, Bedrock, DeepSeek, Groq, Azure AI, and all OpenAI-compatible providers) automatically record token usage on every `generate_content` call. No manual instrumentation is needed — the tracking is built into the provider layer.
+The `adk-model` provider clients (Gemini, OpenAI, Anthropic, Ollama, Bedrock, DeepSeek, Groq, Azure AI, OpenRouter, and OpenAI-compatible endpoints) open a `gen_ai.generate` span, with `gen_ai.system`, `gen_ai.request.model`, and `gen_ai.request.stream`, for every `generate_content` call and record the usage the provider reports. No manual instrumentation is needed.
 
 Recorded span fields follow [OpenTelemetry GenAI conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/):
 
@@ -380,6 +489,7 @@ ADK-Rust components automatically emit telemetry when the telemetry system is in
 
 ```rust
 use adk_rust::prelude::*;
+use adk_rust::Launcher;
 use adk_telemetry::init_telemetry;
 use std::sync::Arc;
 
@@ -418,12 +528,21 @@ See the [adk-playground](https://github.com/zavora-ai/adk-playground) repo for a
 
 ## Custom Telemetry in Tools
 
-Add telemetry to custom tools:
+Add telemetry to custom tools. `#[instrument]` expands to `tracing::` paths, so the crate needs
+`tracing` as a dependency alongside `adk-telemetry`, `schemars`, `serde`, and `serde_json`:
 
 ```rust
 use adk_rust::prelude::*;
 use adk_telemetry::{info, instrument, tool_execute_span};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+
+#[derive(Deserialize, Serialize, JsonSchema)]
+struct WeatherArgs {
+    /// City to look up
+    location: String,
+}
 
 #[instrument(skip(ctx))]
 async fn weather_tool_impl(
@@ -449,15 +568,9 @@ async fn weather_tool_impl(
 let weather_tool = FunctionTool::new(
     "get_weather",
     "Get current weather for a location",
-    json!({
-        "type": "object",
-        "properties": {
-            "location": {"type": "string"}
-        },
-        "required": ["location"]
-    }),
     weather_tool_impl,
-);
+)
+.with_parameters_schema::<WeatherArgs>();
 ```
 
 ## Custom Telemetry in Callbacks
@@ -555,10 +668,12 @@ export RUST_LOG=warn,my_app=info
 
 1. Verify OTLP endpoint is reachable
 2. Check collector is running and accepting connections
-3. Call `shutdown_telemetry()` before application exit to flush pending spans
+3. Call `shutdown_telemetry()` before application exit. It flushes and shuts down
+   every tracer and meter provider `init_with_otlp`, `build_otlp_layer`, and
+   `init_with_gcp` built, including the one the tracing layer holds
 4. Check for network/firewall issues
 
-For the embedded runtime UI, check `services.telemetryStatus`. `configured`
+For the web home's developer panel, check `services.telemetryStatus`. `configured`
 means the exporter is attached but the selected session has not produced a
 retained runtime span; `collecting` confirms the collector has received data.
 

@@ -1,9 +1,9 @@
 //! Redis-backed memory service.
 //!
-//! Provides [`RedisMemoryService`], a [`MemoryService`](crate::MemoryService) implementation
+//! Provides [`RedisMemoryService`], a [`MemoryService`] implementation
 //! that stores memory entries in Redis with keyword-based search. Redis does not
-//! natively support vector similarity search, so this backend uses word-overlap
-//! matching similar to [`InMemoryMemoryService`](crate::InMemoryMemoryService).
+//! natively support vector similarity search, so this backend uses the same word-overlap
+//! matching and ranking as [`InMemoryMemoryService`](crate::InMemoryMemoryService).
 //!
 //! # Data Model
 //!
@@ -13,6 +13,10 @@
 //! | `mem_idx:{app}:{user}` | Set | Session IDs with stored memories (global) |
 //! | `mem:{app}:{user}:p:{project}:{session}` | List | JSON-encoded memory entries (project-scoped) |
 //! | `mem_idx:{app}:{user}:p:{project}` | Set | Session IDs with stored memories (project-scoped) |
+//!
+//! Each `{segment}` is percent-encoded (`%` → `%25`, `:` → `%3A`) so an identifier
+//! containing `:` cannot spill into the next segment. Identifiers without either
+//! character produce the same keys as before the encoding was introduced.
 //!
 //! # Example
 //!
@@ -26,6 +30,7 @@
 //! let service = RedisMemoryService::new(config).await?;
 //! ```
 
+use crate::key::{decode_segment, encode_segment, escape_glob};
 use crate::service::*;
 use adk_core::Result;
 use async_trait::async_trait;
@@ -46,22 +51,53 @@ pub struct RedisMemoryConfig {
 
 /// Redis key for memory entries: `mem:{app}:{user}:{session}`.
 fn entries_key(app: &str, user: &str, session: &str) -> String {
-    format!("mem:{app}:{user}:{session}")
+    format!("mem:{}:{}:{}", encode_segment(app), encode_segment(user), encode_segment(session))
 }
 
 /// Redis key for session index: `mem_idx:{app}:{user}`.
 fn index_key(app: &str, user: &str) -> String {
-    format!("mem_idx:{app}:{user}")
+    format!("mem_idx:{}:{}", encode_segment(app), encode_segment(user))
 }
 
 /// Redis key for project-scoped memory entries: `mem:{app}:{user}:p:{project}:{session}`.
 fn project_entries_key(app: &str, user: &str, project: &str, session: &str) -> String {
-    format!("mem:{app}:{user}:p:{project}:{session}")
+    format!(
+        "mem:{}:{}:p:{}:{}",
+        encode_segment(app),
+        encode_segment(user),
+        encode_segment(project),
+        encode_segment(session)
+    )
 }
 
 /// Redis key for project session index: `mem_idx:{app}:{user}:p:{project}`.
 fn project_index_key(app: &str, user: &str, project: &str) -> String {
-    format!("mem_idx:{app}:{user}:p:{project}")
+    format!(
+        "mem_idx:{}:{}:p:{}",
+        encode_segment(app),
+        encode_segment(user),
+        encode_segment(project)
+    )
+}
+
+/// `SCAN` pattern for every entry list of one user, global and project-scoped.
+///
+/// The `:` after the user segment stops `alice` from matching `alice2`, and the
+/// glob escaping stops a user id such as `*` from matching every user.
+fn user_entries_pattern(app: &str, user: &str) -> String {
+    format!("mem:{}:{}:*", escape_glob(&encode_segment(app)), escape_glob(&encode_segment(user)))
+}
+
+/// `SCAN` pattern for every project index set of one user.
+///
+/// The global index key `mem_idx:{app}:{user}` has no suffix, so callers delete
+/// it by name rather than through this pattern.
+fn user_project_indexes_pattern(app: &str, user: &str) -> String {
+    format!(
+        "mem_idx:{}:{}:p:*",
+        escape_glob(&encode_segment(app)),
+        escape_glob(&encode_segment(user))
+    )
 }
 
 /// Serializable wrapper for a memory entry stored in Redis.
@@ -79,7 +115,7 @@ struct StoredEntry {
 /// `(app_name, user_id, session_id)`. Search uses word-overlap matching
 /// across all sessions for a given app and user.
 ///
-/// For vector similarity search, use [`PostgresMemoryService`](crate::PostgresMemoryService)
+/// For vector similarity search, use `PostgresMemoryService`
 /// or [`Neo4jMemoryService`](crate::Neo4jMemoryService) instead.
 ///
 /// # Example
@@ -113,13 +149,13 @@ impl RedisMemoryService {
         Ok(Self { client, ttl: config.ttl })
     }
 
-    /// Search entries in a single Redis list key, appending matches to `memories`.
+    /// Scores the entries of one Redis list key against the query, appending matches.
     async fn search_entries_in_key(
         &self,
         key: &str,
         query_words: &HashSet<String>,
-        limit: usize,
-        memories: &mut Vec<MemoryEntry>,
+        min_score: f32,
+        matches: &mut Vec<(f32, MemoryEntry)>,
     ) -> Result<()> {
         let raw_entries: Vec<String> = self
             .client
@@ -133,19 +169,16 @@ impl RedisMemoryService {
                 Err(_) => continue,
             };
             let text = crate::text::extract_text(&stored.content);
-            let entry_words = crate::text::extract_words(&text);
-            if entry_words.is_empty() {
-                continue;
-            }
-            if query_words.iter().any(|w| entry_words.contains(w)) {
-                memories.push(MemoryEntry {
-                    content: stored.content,
-                    author: stored.author,
-                    timestamp: stored.timestamp,
-                });
-                if memories.len() >= limit {
-                    return Ok(());
-                }
+            let score = crate::text::match_score(query_words, &crate::text::extract_words(&text));
+            if score > 0.0 && score >= min_score {
+                matches.push((
+                    score,
+                    MemoryEntry {
+                        content: stored.content,
+                        author: stored.author,
+                        timestamp: stored.timestamp,
+                    },
+                ));
             }
         }
 
@@ -229,12 +262,15 @@ impl MemoryService for RedisMemoryService {
     #[instrument(skip_all, fields(app_name = %req.app_name, user_id = %req.user_id))]
     async fn search(&self, req: SearchRequest) -> Result<SearchResponse> {
         let limit = req.limit.unwrap_or(10);
+        let min_score = req.min_score.unwrap_or(0.0);
         let query_words = crate::text::extract_words(&req.query);
         if query_words.is_empty() {
             return Ok(SearchResponse { memories: Vec::new() });
         }
 
-        let mut memories = Vec::new();
+        // Every entry in scope is scored before any is returned, so the best matches win
+        // regardless of the order Redis returns sessions in.
+        let mut matches = Vec::new();
 
         // Always query the global index
         let idx = index_key(&req.app_name, &req.user_id);
@@ -246,10 +282,7 @@ impl MemoryService for RedisMemoryService {
 
         for sid in &session_ids {
             let key = entries_key(&req.app_name, &req.user_id, sid);
-            self.search_entries_in_key(&key, &query_words, limit, &mut memories).await?;
-            if memories.len() >= limit {
-                return Ok(SearchResponse { memories });
-            }
+            self.search_entries_in_key(&key, &query_words, min_score, &mut matches).await?;
         }
 
         // When project_id is Some, also query the project index
@@ -263,42 +296,73 @@ impl MemoryService for RedisMemoryService {
 
             for sid in &proj_session_ids {
                 let key = project_entries_key(&req.app_name, &req.user_id, project_id, sid);
-                self.search_entries_in_key(&key, &query_words, limit, &mut memories).await?;
-                if memories.len() >= limit {
-                    return Ok(SearchResponse { memories });
-                }
+                self.search_entries_in_key(&key, &query_words, min_score, &mut matches).await?;
             }
         }
 
-        Ok(SearchResponse { memories })
+        Ok(SearchResponse { memories: crate::text::rank_matches(matches, limit) })
+    }
+
+    #[instrument(skip_all, fields(app_name = %app_name, user_id = %user_id))]
+    async fn export_user(&self, app_name: &str, user_id: &str) -> Result<Vec<UserMemory>> {
+        // Reads the keys `delete_user` removes: `{session}` or `p:{project}:{session}`
+        // after the user's prefix, each segment percent-encoded.
+        let prefix = format!("mem:{}:{}:", encode_segment(app_name), encode_segment(user_id));
+        let mut memories = Vec::new();
+        for key in self.scan_keys(&user_entries_pattern(app_name, user_id)).await? {
+            let Some(rest) = key.strip_prefix(&prefix) else { continue };
+            let segments: Vec<&str> = rest.split(':').collect();
+            let (project_id, session) = match segments.as_slice() {
+                [session] => (None, *session),
+                ["p", project, session] => (Some(decode_segment(project)), *session),
+                _ => continue,
+            };
+            let session = decode_segment(session);
+            let raw_entries: Vec<String> = self
+                .client
+                .lrange(&key, 0, -1)
+                .await
+                .map_err(|e| adk_core::AdkError::memory(format!("lrange failed: {e}")))?;
+            for raw in raw_entries {
+                let stored: StoredEntry = serde_json::from_str(&raw).map_err(|e| {
+                    adk_core::AdkError::memory(format!("stored entry is corrupt: {e}"))
+                })?;
+                memories.push(UserMemory {
+                    entry: MemoryEntry {
+                        content: stored.content,
+                        author: stored.author,
+                        timestamp: stored.timestamp,
+                    },
+                    session_id: (session != "__direct__").then(|| session.clone()),
+                    project_id: project_id.clone(),
+                });
+            }
+        }
+        memories.sort_by_key(|memory| memory.entry.timestamp);
+        Ok(memories)
     }
 
     #[instrument(skip_all, fields(app_name = %app_name, user_id = %user_id))]
     async fn delete_user(&self, app_name: &str, user_id: &str) -> Result<()> {
-        // Use SCAN to find all keys matching mem:{app}:{user}:* (global + project entries)
-        let entry_pattern = format!("mem:{app_name}:{user_id}:*");
-        let entry_keys = self.scan_keys(&entry_pattern).await?;
+        let entry_keys = self.scan_keys(&user_entries_pattern(app_name, user_id)).await?;
+        let project_idx_keys =
+            self.scan_keys(&user_project_indexes_pattern(app_name, user_id)).await?;
 
-        // Use SCAN to find all index keys matching mem_idx:{app}:{user}*
-        // This covers both `mem_idx:{app}:{user}` and `mem_idx:{app}:{user}:p:{project}`
-        let idx_pattern = format!("mem_idx:{app_name}:{user_id}*");
-        let idx_keys = self.scan_keys(&idx_pattern).await?;
-
-        let all_keys: Vec<String> = entry_keys.into_iter().chain(idx_keys).collect();
-
-        if !all_keys.is_empty() {
-            let pipeline = self.client.pipeline();
-            for key in &all_keys {
-                pipeline
-                    .del::<(), _>(key)
-                    .await
-                    .map_err(|e| adk_core::AdkError::memory(format!("del failed: {e}")))?;
-            }
+        let pipeline = self.client.pipeline();
+        for key in entry_keys.iter().chain(&project_idx_keys) {
             pipeline
-                .all::<()>()
+                .del::<(), _>(key)
                 .await
-                .map_err(|e| adk_core::AdkError::memory(format!("pipeline exec failed: {e}")))?;
+                .map_err(|e| adk_core::AdkError::memory(format!("del failed: {e}")))?;
         }
+        pipeline
+            .del::<(), _>(index_key(app_name, user_id))
+            .await
+            .map_err(|e| adk_core::AdkError::memory(format!("del failed: {e}")))?;
+        pipeline
+            .all::<()>()
+            .await
+            .map_err(|e| adk_core::AdkError::memory(format!("pipeline exec failed: {e}")))?;
 
         Ok(())
     }
@@ -568,6 +632,142 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
+    /// Redis `stringmatchlen` glob semantics: `*`, `?`, `[...]` (with `^` and
+    /// ranges) and `\` escapes.
+    fn glob_match(pattern: &[u8], text: &[u8]) -> bool {
+        match pattern.split_first() {
+            None => text.is_empty(),
+            Some((b'*', rest)) => (0..=text.len()).any(|i| glob_match(rest, &text[i..])),
+            Some((b'?', rest)) => !text.is_empty() && glob_match(rest, &text[1..]),
+            Some((b'\\', [escaped, rest @ ..])) => {
+                text.first() == Some(escaped) && glob_match(rest, &text[1..])
+            }
+            Some((b'[', rest)) => {
+                let Some(&target) = text.first() else { return false };
+                let (negate, mut rest) = match rest.split_first() {
+                    Some((b'^', tail)) => (true, tail),
+                    _ => (false, rest),
+                };
+                let mut matched = false;
+                loop {
+                    match rest {
+                        [] => return false,
+                        [b']', tail @ ..] => {
+                            rest = tail;
+                            break;
+                        }
+                        [b'\\', c, tail @ ..] => {
+                            matched |= *c == target;
+                            rest = tail;
+                        }
+                        [lo, b'-', hi, tail @ ..] if *hi != b']' => {
+                            matched |= (*lo..=*hi).contains(&target);
+                            rest = tail;
+                        }
+                        [c, tail @ ..] => {
+                            matched |= *c == target;
+                            rest = tail;
+                        }
+                    }
+                }
+                matched != negate && glob_match(rest, &text[1..])
+            }
+            Some((c, rest)) => text.first() == Some(c) && glob_match(rest, &text[1..]),
+        }
+    }
+
+    fn matches(pattern: &str, key: &str) -> bool {
+        glob_match(pattern.as_bytes(), key.as_bytes())
+    }
+
+    /// The keys `delete_user` finds by pattern for one user.
+    fn scanned_keys_of(app: &str, user: &str) -> Vec<String> {
+        vec![
+            entries_key(app, user, "s1"),
+            project_entries_key(app, user, "proj", "s1"),
+            project_index_key(app, user, "proj"),
+        ]
+    }
+
+    fn matched_by_delete_user(app: &str, user: &str, key: &str) -> bool {
+        matches(&user_entries_pattern(app, user), key)
+            || matches(&user_project_indexes_pattern(app, user), key)
+    }
+
+    #[test]
+    fn test_matcher_detects_the_pre_fix_over_match() {
+        // The pattern used before the fix had no delimiter after the user segment.
+        assert!(matches("mem_idx:app:alice*", "mem_idx:app:alice2"));
+    }
+
+    #[test]
+    fn test_delete_user_patterns_do_not_match_prefix_sharing_users() {
+        for key in scanned_keys_of("app", "alice") {
+            assert!(matched_by_delete_user("app", "alice", &key), "{key} not matched");
+        }
+        for other in ["alice2", "alice-admin", "alice:x", "alic", "bob"] {
+            for key in scanned_keys_of("app", other).into_iter().chain([index_key("app", other)]) {
+                assert!(!matched_by_delete_user("app", "alice", &key), "alice matched {key}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_glob_metacharacter_user_ids_match_only_themselves() {
+        for hostile in ["*", "?????", "[a-z]*", "\\*", "a*"] {
+            for key in scanned_keys_of("app", hostile) {
+                assert!(matched_by_delete_user("app", hostile, &key), "{key} not matched");
+            }
+            for victim in ["alice", "bob", "a", "abcde"] {
+                for key in scanned_keys_of("app", victim) {
+                    assert!(
+                        !matched_by_delete_user("app", hostile, &key),
+                        "{hostile:?} pattern matched {key}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_glob_metacharacter_app_names_match_only_themselves() {
+        assert!(matched_by_delete_user("*", "alice", &entries_key("*", "alice", "s1")));
+        assert!(!matched_by_delete_user("*", "alice", &entries_key("other", "alice", "s1")));
+    }
+
+    #[test]
+    fn test_colon_in_identifiers_does_not_collide() {
+        assert_ne!(entries_key("a:b", "c", "s"), entries_key("a", "b:c", "s"));
+        assert_ne!(index_key("a:b", "c"), index_key("a", "b:c"));
+        assert_ne!(
+            project_entries_key("a:b", "c", "p", "s"),
+            project_entries_key("a", "b:c", "p", "s")
+        );
+        assert_ne!(project_index_key("a", "b:p", "x"), project_index_key("a", "b", "p:x"));
+        // A global session id shaped like a project suffix stays global.
+        assert_ne!(entries_key("a", "u", "p:proj:s"), project_entries_key("a", "u", "proj", "s"));
+        // A user id containing `:` is not swept up by a shorter user's pattern.
+        assert!(!matched_by_delete_user("a", "b", &entries_key("a", "b:c", "s")));
+    }
+
+    #[test]
+    fn test_encoded_keys() {
+        assert_eq!(
+            [
+                entries_key("a:b", "100%", "s"),
+                index_key("a:b", "100%"),
+                project_entries_key("a", "u", "p:1", "s"),
+                project_index_key("a", "u", "p:1"),
+            ],
+            [
+                "mem:a%3Ab:100%25:s".to_string(),
+                "mem_idx:a%3Ab:100%25".to_string(),
+                "mem:a:u:p:p%3A1:s".to_string(),
+                "mem_idx:a:u:p:p%3A1".to_string(),
+            ]
+        );
+    }
+
     /// Generate valid app/user/session/project identifiers (non-empty, alphanumeric).
     fn arb_identifier() -> impl Strategy<Value = String> {
         "[a-z][a-z0-9]{0,9}".prop_map(|s| s)
@@ -589,8 +789,8 @@ mod tests {
             let key = entries_key(&app, &user, &session);
             let expected = format!("mem:{app}:{user}:{session}");
             prop_assert_eq!(&key, &expected);
-            // Global key must NOT contain ":p:" project infix
-            prop_assert!(!key.contains(":p:"), "global entries key must not contain :p: infix");
+            // No project infix: exactly the prefix and three segments (an identifier may be "p").
+            prop_assert_eq!(key.split(':').count(), 4, "global entries key has a project infix");
         }
 
         /// **Feature: project-scoped-memory, Property 6: Redis Key Generation Correctness**
@@ -605,7 +805,7 @@ mod tests {
             let key = index_key(&app, &user);
             let expected = format!("mem_idx:{app}:{user}");
             prop_assert_eq!(&key, &expected);
-            prop_assert!(!key.contains(":p:"), "global index key must not contain :p: infix");
+            prop_assert_eq!(key.split(':').count(), 3, "global index key has a project infix");
         }
 
         /// **Feature: project-scoped-memory, Property 6: Redis Key Generation Correctness**

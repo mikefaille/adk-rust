@@ -1,0 +1,116 @@
+[package]
+name = "adk-website"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "A prebuilt AWP 2.0 website for ADK-Rust: site kinds, a team of eight agents, agent-led onboarding, themes, capability packs, playbooks, jobs, alarms and the weekly review"
+homepage.workspace = true
+repository.workspace = true
+documentation = "https://docs.rs/adk-website"
+readme = "README.md"
+keywords = ["adk", "awp", "website", "agent", "cms"]
+categories = ["web-programming", "asynchronous"]
+include = ["src/**/*", "tests/**/*", "playbooks/**/*", "packs/**/*", "Cargo.toml", "README.md"]
+
+# Spec 3.5 §7.1, D-14: the product is the default build. It holds no framework code (D-1):
+# everything it runs comes from the harness, the kernel, the site pipeline and the wallet.
+[features]
+default = []
+
+[[bin]]
+name = "adk-website"
+path = "src/bin/adk-website.rs"
+
+[dependencies]
+adk-core.workspace = true
+# `TeamSpec` with delegate edges (spec 3.5 §7.19).
+adk-agent = { workspace = true, features = ["ambient", "team-tools"] }
+adk-auth = { workspace = true, features = ["web-bot-auth"] }
+# The contract, keys and charter documents, and `awp verify` (spec 3.5 §7.2, §7.7).
+adk-awp = { workspace = true, features = ["signing", "verify"] }
+adk-deploy.workspace = true
+# The inbox drivers' in-thread replies (spec 3.5 §7.10, §7.13).
+adk-drivers.workspace = true
+adk-devtools.workspace = true
+# The sequential analysis of the site's experiments (spec 3.5 §7.12).
+adk-eval = { workspace = true, features = ["experiments"] }
+# The website runtime: preset, toolsets, partitions, ladder, onboarding machinery (WP I).
+adk-harness = { workspace = true, features = ["website", "sqlite"] }
+adk-kernel = { workspace = true, features = ["charter", "channels"] }
+# The wallet, and the AP2 merchant side the site takes payments with (spec 3.5 §7.5, §7.14);
+# a served site keeps its wallet's payments in `data/wallet.db`.
+adk-payments = { workspace = true, features = ["wallet", "ap2", "sqlite"] }
+# The AP2 desk's in-memory evidence journal, for tests and sandboxes.
+adk-artifact.workspace = true
+# `WorkflowExecutor` for the site's deterministic jobs (spec 3.5 §7.20); the agent edge and
+# its SQLite stores (spec 3.5 §7.9), whose beacon counts experiments and KPIs read (§7.12);
+# the webhook ingress a content repository's pushes arrive through (§7.8.2).
+adk-server = { workspace = true, features = ["background", "awp", "awp-sqlite", "webhook-ingress"] }
+# The back office's runners, which the served kernel hosts (spec 3.5 §7.19, §7.22).
+adk-runner.workspace = true
+# The context the owner's channel runs the back office's media intake in (spec 3.5 S18).
+adk-tool.workspace = true
+adk-session = { workspace = true, features = ["sqlite"] }
+# Migration sources, freeze, quarantine and probes for onboarding and the Guardian (§7.8);
+# `awp verify` against the preview in the launch gate (§7.8.1).
+adk-site = { workspace = true, features = ["migrate", "verify"] }
+awp-types.workspace = true
+async-trait.workspace = true
+axum = "0.8"
+chrono.workspace = true
+# The Inbox reads its turn's events (spec 3.5 §7.19).
+futures.workspace = true
+# Quiet hours in the owner's IANA time zone (spec 3.5 §7.21).
+chrono-tz = "0.10"
+# Delegated key files (private JWKs) and secrets made on first start (spec 3.5 D-11).
+base64 = "0.22"
+bytes = "1"
+getrandom = "0.3"
+zeroize = "1.8.2"
+# The third-party script check parses generated HTML, as the launch gate does.
+scraper = "0.25"
+# The CalDAV calendar driver: its HTTP client and its multistatus answers (spec 3.5 §7.5).
+quick-xml = "0.41"
+reqwest.workspace = true
+# JSON Schema of the owner's views, for the surfaces' generated types (spec 3.5 §7.16 `ui`).
+schemars = { version = "1.0", features = ["chrono04"] }
+# Advisory version ranges against the edge's lockfile (spec 3.5 §7.20, S10), and pack versions
+# (spec 3.5 §7.23).
+semver = "1"
+serde.workspace = true
+# A playbook revision's diff of its text (spec 3.5 §7.15).
+similar = "3"
+# The edge's SQLite stores in a served project (spec 3.5 §7.9).
+sqlx = { workspace = true, features = ["sqlite"] }
+serde_json.workspace = true
+# Capability pack refusals (spec 3.5 §7.23).
+thiserror.workspace = true
+toml.workspace = true
+tokio = { workspace = true, features = ["fs", "macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+# Agency mode dispatches each request to its site's edge by host (spec 3.5 A-I22).
+tower = { version = "0.5", features = ["util"] }
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
+url = "2.5"
+uuid.workspace = true
+
+[dev-dependencies]
+# Internal dev-deps are path-only (no version) so cargo strips them from the published
+# manifest. `anthropic` for the live onboarding interview.
+adk-model = { path = "../adk-model", default-features = false, features = ["anthropic"] }
+adk-skill = { path = "../adk-skill" }
+dotenvy = "0.15"
+futures.workspace = true
+# GitHub's push signature in the content repository's tests (spec 3.5 §7.8.2).
+hex.workspace = true
+hmac = "0.12"
+proptest = "1.5"
+sha2.workspace = true
+tempfile = "3"
+tokio = { workspace = true, features = ["full"] }
+
+[package.metadata.docs.rs]
+all-features = true

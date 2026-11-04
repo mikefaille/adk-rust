@@ -8,7 +8,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! adk-auth = { version = "2.1.0", features = ["sso"] }
+//! adk-auth = { version = "3.0.0", features = ["sso"] }
 //! ```
 //!
 //! # Quick Start
@@ -26,6 +26,8 @@ mod error;
 mod jwks;
 mod mapper;
 mod sso_access;
+#[cfg(all(test, feature = "sso"))]
+mod test_issuer;
 mod validator;
 
 pub use claims::{Audience, TokenClaims};

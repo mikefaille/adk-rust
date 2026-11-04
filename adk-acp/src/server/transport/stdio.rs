@@ -11,7 +11,9 @@ use agent_client_protocol::schema::v1::{
     PromptResponse, ResumeSessionRequest, ResumeSessionResponse, SetSessionConfigOptionRequest,
     SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse,
 };
-use agent_client_protocol::{Agent, Client, ConnectTo, ConnectionTo, Error, Responder, Stdio};
+use agent_client_protocol::{
+    Agent, ByteStreams, Client, ConnectTo, ConnectionTo, Error, Responder,
+};
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -28,6 +30,7 @@ pub struct StdioTransport {
     capabilities: AgentCapabilities,
     agent_name: String,
     agent_title: String,
+    shutdown_timeout: std::time::Duration,
 }
 
 impl StdioTransport {
@@ -38,6 +41,7 @@ impl StdioTransport {
             capabilities: CapabilitiesBuilder::build(config),
             agent_name: config.agent_name.clone(),
             agent_title: config.agent_description.clone(),
+            shutdown_timeout: config.shutdown_timeout,
         }
     }
 }
@@ -50,27 +54,101 @@ impl Transport for StdioTransport {
         shutdown: CancellationToken,
     ) -> Result<(), AcpServerError> {
         info!(agent = %self.agent_name, "official ACP v1 stdio transport started");
-        let connection = serve_connection(
+        // `ByteStreams` flushes its output when the connection finishes, which the SDK's
+        // `Stdio` does not, so answers sent during a graceful shutdown reach the client
+        // before the process exits.
+        let stdio = ByteStreams::new(
+            blocking::Unblock::new(std::io::stdout()),
+            blocking::Unblock::new(std::io::stdin()),
+        );
+        serve_until_shutdown(
             handler,
             self.capabilities.clone(),
             self.agent_name.clone(),
             self.agent_title.clone(),
-            Stdio::new(),
-        );
+            stdio,
+            shutdown,
+            self.shutdown_timeout,
+        )
+        .await
+    }
+}
 
-        tokio::select! {
-            result = connection => result.map_err(|error| AcpServerError::Transport(error.to_string())),
-            _ = shutdown.cancelled() => Ok(()),
+/// How long the last answers may take to reach a client after a graceful shutdown drained
+/// the running prompts, should the client stop reading.
+const SHUTDOWN_FLUSH_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Serves the connection until the client closes it or `shutdown` fires.
+///
+/// After shutdown the connection stays open while running prompts finish, so their answers
+/// reach the client, for at most `shutdown_timeout`; the prompts still running then are
+/// cancelled, and the connection closes once its output is written. New sessions and
+/// prompts are refused from the moment shutdown fires.
+pub(crate) async fn serve_until_shutdown<C>(
+    handler: Arc<AcpSessionHandler>,
+    capabilities: AgentCapabilities,
+    name: String,
+    title: String,
+    component: C,
+    shutdown: CancellationToken,
+    shutdown_timeout: std::time::Duration,
+) -> Result<(), AcpServerError>
+where
+    C: ConnectTo<Agent> + 'static,
+{
+    let drained = {
+        let (handler, shutdown) = (handler.clone(), shutdown.clone());
+        async move {
+            shutdown.cancelled().await;
+            handler.drain_sessions(shutdown_timeout).await;
+        }
+    };
+    let connection = serve_connection_until(handler, capabilities, name, title, component, drained);
+    let deadline = async {
+        shutdown.cancelled().await;
+        tokio::time::sleep(shutdown_timeout + SHUTDOWN_FLUSH_GRACE).await;
+    };
+    tokio::select! {
+        result = connection => result.map_err(|error| AcpServerError::Transport(error.to_string())),
+        () = deadline => {
+            warn!("the ACP client did not take the final answers before shutdown completed");
+            Ok(())
         }
     }
 }
 
+/// Serves the connection until the client closes it.
+#[cfg(test)]
 pub(crate) async fn serve_connection<C>(
     handler: Arc<AcpSessionHandler>,
     initialize_capabilities: AgentCapabilities,
     initialize_name: String,
     initialize_title: String,
     component: C,
+) -> Result<(), Error>
+where
+    C: ConnectTo<Agent> + 'static,
+{
+    serve_connection_until(
+        handler,
+        initialize_capabilities,
+        initialize_name,
+        initialize_title,
+        component,
+        std::future::pending(),
+    )
+    .await
+}
+
+/// Serves the connection until the client closes it or `stop` completes, then closes it
+/// once the answers already given are written.
+async fn serve_connection_until<C>(
+    handler: Arc<AcpSessionHandler>,
+    initialize_capabilities: AgentCapabilities,
+    initialize_name: String,
+    initialize_title: String,
+    component: C,
+    stop: impl std::future::Future<Output = ()>,
 ) -> Result<(), Error>
 where
     C: ConnectTo<Agent> + 'static,
@@ -152,6 +230,8 @@ where
                     let cancellation = responder.cancellation();
                     let spawned_connection = connection.clone();
                     connection.spawn(async move {
+                        // Held until the answer is queued, so a shutdown drain waits for it.
+                        let _running = handler.running_prompt();
                         let session_id = request.session_id.clone();
                         let cancellation_handler = handler.clone();
                         let work = handler.handle_prompt(request, spawned_connection);
@@ -390,7 +470,13 @@ where
             },
             agent_client_protocol::on_receive_request!(),
         )
-        .connect_to(component)
+        .connect_with(component, async move |connection: ConnectionTo<Client>| {
+            tokio::select! {
+                () = connection.incoming_closed() => {}
+                () = stop => {}
+            }
+            Ok(())
+        })
         .await
 }
 
@@ -913,6 +999,8 @@ mod tests {
                             tool_name: "delete_file".to_string(),
                             function_call_id: Some("call-1".to_string()),
                             args: serde_json::json!({"path": "/tmp/report.csv"}),
+                            acting: None,
+                            origin: None,
                         });
                         yield Ok(event);
                     }
@@ -949,6 +1037,33 @@ mod tests {
             applied_decision: applied_decision.clone(),
             executed: executed.clone(),
         });
+        let turn = drive_permission_prompt(agent, "delete the report", answer).await;
+        let applied_decision = *applied_decision.lock().expect("decision lock");
+        let executed = *executed.lock().expect("executed lock");
+        PermissionFlowResult {
+            stop_reason: turn.stop_reason,
+            streamed_text: turn.streamed_text,
+            applied_decision,
+            executed,
+            permission_tool_call_id: turn.permission_tool_call_ids.first().cloned(),
+        }
+    }
+
+    /// What the client observed during one permission-gated prompt turn.
+    struct PermissionPrompt {
+        stop_reason: StopReason,
+        streamed_text: Vec<String>,
+        /// The tool call ID of every `session/request_permission` request, in order.
+        permission_tool_call_ids: Vec<String>,
+    }
+
+    /// Sends `prompt` to an ACP server for `agent` and answers every
+    /// `session/request_permission` request with `answer`.
+    async fn drive_permission_prompt(
+        agent: Arc<dyn AdkAgent>,
+        prompt: &'static str,
+        answer: Answer,
+    ) -> PermissionPrompt {
         let session_service: Arc<dyn adk_session::SessionService> =
             Arc::new(adk_session::InMemorySessionService::new());
         let config = AcpServerConfigBuilder::new()
@@ -963,8 +1078,8 @@ mod tests {
 
         let streamed = Arc::new(Mutex::new(Vec::<String>::new()));
         let streamed_for_client = streamed.clone();
-        let captured_call_id = Arc::new(Mutex::new(None::<String>));
-        let captured_for_client = captured_call_id.clone();
+        let captured_call_ids = Arc::new(Mutex::new(Vec::<String>::new()));
+        let captured_for_client = captured_call_ids.clone();
         let (server_channel, client_channel) = Channel::duplex();
 
         let server = serve_connection(
@@ -992,8 +1107,10 @@ mod tests {
                       _connection: ConnectionTo<Agent>| {
                     let captured = captured_for_client.clone();
                     async move {
-                        *captured.lock().expect("captured lock") =
-                            Some(request.tool_call.tool_call_id.to_string());
+                        captured
+                            .lock()
+                            .expect("captured lock")
+                            .push(request.tool_call.tool_call_id.to_string());
                         let outcome = match answer {
                             Answer::Allow => {
                                 let option = request
@@ -1036,7 +1153,7 @@ mod tests {
                 let prompt = connection
                     .send_request(PromptRequest::new(
                         session.session_id.clone(),
-                        vec![ContentBlock::Text(TextContent::new("delete the report"))],
+                        vec![ContentBlock::Text(TextContent::new(prompt))],
                     ))
                     .block_task()
                     .await?;
@@ -1052,16 +1169,8 @@ mod tests {
         let _ = server_task.await;
 
         let streamed_text = streamed.lock().expect("streamed lock").clone();
-        let applied_decision = *applied_decision.lock().expect("decision lock");
-        let executed = *executed.lock().expect("executed lock");
-        let permission_tool_call_id = captured_call_id.lock().expect("captured lock").clone();
-        PermissionFlowResult {
-            stop_reason,
-            streamed_text,
-            applied_decision,
-            executed,
-            permission_tool_call_id,
-        }
+        let permission_tool_call_ids = captured_call_ids.lock().expect("captured lock").clone();
+        PermissionPrompt { stop_reason, streamed_text, permission_tool_call_ids }
     }
 
     /// **Feature: acp-v1-full-support, Property 8: Permission correlation**
@@ -1122,6 +1231,113 @@ mod tests {
         );
         assert!(!result.executed, "tool must not execute when the permission request is cancelled");
         assert_eq!(result.permission_tool_call_id.as_deref(), Some("call-1"));
+    }
+
+    /// Replays one tool call, then answers every later request with text.
+    struct CallOnceModel {
+        requests: Arc<Mutex<Vec<adk_core::LlmRequest>>>,
+    }
+
+    #[async_trait]
+    impl adk_core::Llm for CallOnceModel {
+        fn name(&self) -> &str {
+            "call-once"
+        }
+
+        async fn generate_content(
+            &self,
+            request: adk_core::LlmRequest,
+            _stream: bool,
+        ) -> AdkResult<adk_core::LlmResponseStream> {
+            let first = {
+                let mut requests = self.requests.lock().expect("requests lock");
+                requests.push(request);
+                requests.len() == 1
+            };
+            let content = if first {
+                Content {
+                    role: "model".to_string(),
+                    parts: vec![adk_core::Part::FunctionCall {
+                        name: "delete_file".to_string(),
+                        args: serde_json::json!({"path": "/tmp/report.csv"}),
+                        id: Some("call-1".to_string()),
+                        thought_signature: None,
+                    }],
+                }
+            } else {
+                // The model never issues the call again after it was held.
+                Content::new("model").with_text("report handled")
+            };
+            let response = adk_core::LlmResponse {
+                content: Some(content),
+                turn_complete: true,
+                ..Default::default()
+            };
+            Ok(Box::pin(futures::stream::iter([Ok(response)])))
+        }
+    }
+
+    struct DeleteFile {
+        executions: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl adk_core::Tool for DeleteFile {
+        fn name(&self) -> &str {
+            "delete_file"
+        }
+
+        fn description(&self) -> &str {
+            "Deletes a file"
+        }
+
+        async fn execute(
+            &self,
+            _ctx: Arc<dyn adk_core::ToolContext>,
+            _args: serde_json::Value,
+        ) -> AdkResult<serde_json::Value> {
+            self.executions.fetch_add(1, Ordering::SeqCst);
+            Ok(serde_json::json!({"deleted": true}))
+        }
+    }
+
+    /// An approved call held by a real `LlmAgent` executes exactly once on the
+    /// resume run, although the model never issues it again, and the model then
+    /// sees exactly one response for the call: the real result.
+    #[tokio::test]
+    async fn permission_allow_resumes_the_held_call_without_the_model_reissuing_it() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let executions = Arc::new(AtomicUsize::new(0));
+        let agent = adk_agent::LlmAgentBuilder::new("confirming-agent")
+            .model(Arc::new(CallOnceModel { requests: requests.clone() }))
+            .tool(Arc::new(DeleteFile { executions: executions.clone() }))
+            .require_tool_confirmation("delete_file")
+            .build()
+            .expect("agent");
+
+        let turn =
+            drive_permission_prompt(Arc::new(agent), "delete the report", Answer::Allow).await;
+
+        assert_eq!(turn.stop_reason, StopReason::EndTurn);
+        assert_eq!(turn.permission_tool_call_ids, vec!["call-1".to_string()], "asked once");
+        assert_eq!(executions.load(Ordering::SeqCst), 1, "the approved call executes once");
+        let requests = requests.lock().expect("requests lock");
+        assert_eq!(requests.len(), 2, "one model call per run");
+        let responses: Vec<_> = requests[1]
+            .contents
+            .iter()
+            .flat_map(|content| &content.parts)
+            .filter_map(|part| match part {
+                adk_core::Part::FunctionResponse { function_response, id, .. } => {
+                    Some((id.clone(), function_response.response.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            responses,
+            vec![(Some("call-1".to_string()), serde_json::json!({"deleted": true}))]
+        );
     }
 
     /// Session controls used by the mode/config integration tests: two modes
@@ -2007,5 +2223,771 @@ mod tests {
             .expect("official ACP client completed");
         server_task.abort();
         let _ = server_task.await;
+    }
+
+    /// Raw JSON-RPC lines in and out of `serve_connection`, standing in for an
+    /// editor on stdin/stdout. Dropping the returned sender is stdin EOF.
+    type RawServer = (
+        futures::channel::mpsc::UnboundedSender<std::io::Result<String>>,
+        futures::channel::mpsc::UnboundedReceiver<String>,
+        tokio::task::JoinHandle<Result<(), Error>>,
+    );
+
+    fn raw_server(agent: Arc<dyn AdkAgent>) -> RawServer {
+        use futures::SinkExt as _;
+        let (_, session_service) = mock_agent_and_session();
+        let config = AcpServerConfigBuilder::new()
+            .agent(agent)
+            .session_service(session_service)
+            .agent_name("raw-agent")
+            .build()
+            .expect("valid config");
+        let capabilities = CapabilitiesBuilder::build(&config);
+        let handler =
+            Arc::new(AcpSessionHandler::new(&config, CancellationToken::new()).expect("handler"));
+        let (in_tx, in_rx) = futures::channel::mpsc::unbounded::<std::io::Result<String>>();
+        let (out_tx, out_rx) = futures::channel::mpsc::unbounded::<String>();
+        let lines = agent_client_protocol::Lines::new(
+            out_tx.sink_map_err(|error| std::io::Error::other(error.to_string())),
+            in_rx,
+        );
+        let server = tokio::spawn(serve_connection(
+            handler,
+            capabilities,
+            "raw-agent".into(),
+            String::new(),
+            lines,
+        ));
+        (in_tx, out_rx, server)
+    }
+
+    async fn response_to(
+        out: &mut futures::channel::mpsc::UnboundedReceiver<String>,
+        id: u64,
+    ) -> serde_json::Value {
+        use futures::StreamExt as _;
+        loop {
+            let line = tokio::time::timeout(std::time::Duration::from_secs(5), out.next())
+                .await
+                .expect("no response within 5s")
+                .expect("output closed");
+            let message: serde_json::Value = serde_json::from_str(&line).expect("json line");
+            if message["id"] == id {
+                return message;
+            }
+        }
+    }
+
+    fn open_session_lines(cwd: &str) -> [String; 2] {
+        [
+            serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": 1}})
+            .to_string(),
+            serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "session/new",
+                "params": {"cwd": cwd, "mcpServers": []}})
+            .to_string(),
+        ]
+    }
+
+    #[tokio::test]
+    async fn server_returns_when_the_editor_closes_stdin_while_idle() {
+        let (agent, _) = mock_agent_and_session();
+        let (in_tx, mut out, server) = raw_server(agent);
+        let cwd = std::env::current_dir().expect("cwd").display().to_string();
+        let [init, new] = open_session_lines(&cwd);
+        in_tx.unbounded_send(Ok(init)).expect("send");
+        assert_eq!(response_to(&mut out, 1).await["result"]["protocolVersion"], 1);
+        in_tx.unbounded_send(Ok(new)).expect("send");
+        assert!(response_to(&mut out, 2).await["result"]["sessionId"].is_string());
+        drop(in_tx);
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .expect("server did not return after stdin EOF")
+            .expect("server task");
+        assert!(result.is_ok(), "got {result:?}");
+    }
+
+    /// Answers after `delay`, and signals when a prompt starts.
+    struct SlowAgent {
+        started: Arc<Notify>,
+        delay: std::time::Duration,
+    }
+
+    #[async_trait]
+    impl AdkAgent for SlowAgent {
+        fn name(&self) -> &str {
+            "slow-agent"
+        }
+
+        fn description(&self) -> &str {
+            "Answers after a pause"
+        }
+
+        fn sub_agents(&self) -> &[Arc<dyn AdkAgent>] {
+            &[]
+        }
+
+        async fn run(&self, ctx: Arc<dyn InvocationContext>) -> AdkResult<EventStream> {
+            self.started.notify_one();
+            let (delay, invocation) = (self.delay, ctx.invocation_id().to_string());
+            Ok(Box::pin(futures::stream::once(async move {
+                tokio::time::sleep(delay).await;
+                let mut event = Event::new(&invocation);
+                event.set_content(Content::new("model").with_text("slow answer"));
+                Ok(event)
+            })))
+        }
+    }
+
+    /// Serves one raw connection under `serve_until_shutdown`, with an open session and a
+    /// prompt (id 3) the agent has started.
+    async fn prompt_then_shut_down(
+        agent: Arc<dyn AdkAgent>,
+        started: &Notify,
+        shutdown_timeout: std::time::Duration,
+    ) -> (
+        futures::channel::mpsc::UnboundedSender<std::io::Result<String>>,
+        futures::channel::mpsc::UnboundedReceiver<String>,
+        tokio::task::JoinHandle<Result<(), AcpServerError>>,
+    ) {
+        use futures::SinkExt as _;
+        let (_, session_service) = mock_agent_and_session();
+        let config = AcpServerConfigBuilder::new()
+            .agent(agent)
+            .session_service(session_service)
+            .agent_name("raw-agent")
+            .build()
+            .expect("valid config");
+        let capabilities = CapabilitiesBuilder::build(&config);
+        let shutdown = CancellationToken::new();
+        let handler = Arc::new(AcpSessionHandler::new(&config, shutdown.clone()).expect("handler"));
+        let (in_tx, in_rx) = futures::channel::mpsc::unbounded::<std::io::Result<String>>();
+        let (out_tx, mut out) = futures::channel::mpsc::unbounded::<String>();
+        let lines = agent_client_protocol::Lines::new(
+            out_tx.sink_map_err(|error| std::io::Error::other(error.to_string())),
+            in_rx,
+        );
+        let server = tokio::spawn(serve_until_shutdown(
+            handler,
+            capabilities,
+            "raw-agent".into(),
+            String::new(),
+            lines,
+            shutdown.clone(),
+            shutdown_timeout,
+        ));
+
+        let cwd = std::env::current_dir().expect("cwd").display().to_string();
+        let [init, new] = open_session_lines(&cwd);
+        in_tx.unbounded_send(Ok(init)).expect("send");
+        response_to(&mut out, 1).await;
+        in_tx.unbounded_send(Ok(new)).expect("send");
+        let session_id = response_to(&mut out, 2).await["result"]["sessionId"].clone();
+        in_tx
+            .unbounded_send(Ok(serde_json::json!({"jsonrpc": "2.0", "id": 3,
+                "method": "session/prompt",
+                "params": {"sessionId": session_id,
+                    "prompt": [{"type": "text", "text": "hi"}]}})
+            .to_string()))
+            .expect("send");
+        tokio::time::timeout(std::time::Duration::from_secs(5), started.notified())
+            .await
+            .expect("prompt did not start");
+        shutdown.cancel();
+        (in_tx, out, server)
+    }
+
+    #[tokio::test]
+    async fn a_prompt_running_at_shutdown_is_answered_within_the_shutdown_timeout() {
+        let started = Arc::new(Notify::new());
+        let agent = Arc::new(SlowAgent {
+            started: started.clone(),
+            delay: std::time::Duration::from_millis(300),
+        });
+        let (_in_tx, mut out, server) =
+            prompt_then_shut_down(agent, &started, std::time::Duration::from_secs(5)).await;
+
+        let response = response_to(&mut out, 3).await;
+        assert_eq!(response["result"]["stopReason"], "end_turn", "got {response}");
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .expect("server did not stop after the prompt finished")
+            .expect("server task");
+        assert!(result.is_ok(), "got {result:?}");
+    }
+
+    #[tokio::test]
+    async fn a_prompt_still_running_at_the_shutdown_timeout_is_cut_off() {
+        let started = Arc::new(Notify::new());
+        let agent: Arc<dyn AdkAgent> = Arc::new(PendingAgent { started: started.clone() });
+        let (_in_tx, _out, server) =
+            prompt_then_shut_down(agent, &started, std::time::Duration::from_millis(100)).await;
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), server)
+            .await
+            .expect("server did not stop at the shutdown timeout")
+            .expect("server task");
+        assert!(result.is_ok(), "got {result:?}");
+    }
+
+    #[tokio::test]
+    async fn server_returns_when_the_editor_closes_stdin_mid_prompt() {
+        let started = Arc::new(Notify::new());
+        let agent: Arc<dyn AdkAgent> = Arc::new(PendingAgent { started: started.clone() });
+        let (in_tx, mut out, server) = raw_server(agent);
+        let cwd = std::env::current_dir().expect("cwd").display().to_string();
+        let [init, new] = open_session_lines(&cwd);
+        in_tx.unbounded_send(Ok(init)).expect("send");
+        response_to(&mut out, 1).await;
+        in_tx.unbounded_send(Ok(new)).expect("send");
+        let session_id = response_to(&mut out, 2).await["result"]["sessionId"].clone();
+        in_tx
+            .unbounded_send(Ok(serde_json::json!({"jsonrpc": "2.0", "id": 3,
+                "method": "session/prompt",
+                "params": {"sessionId": session_id,
+                    "prompt": [{"type": "text", "text": "wait"}]}})
+            .to_string()))
+            .expect("send");
+        tokio::time::timeout(std::time::Duration::from_secs(5), started.notified())
+            .await
+            .expect("prompt did not start");
+        drop(in_tx);
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .expect("server did not return after stdin EOF during a running prompt")
+            .expect("server task");
+        assert!(result.is_ok(), "got {result:?}");
+    }
+
+    #[tokio::test]
+    async fn server_errors_keep_their_json_rpc_codes_on_the_wire() {
+        let (agent, _) = mock_agent_and_session();
+        let (in_tx, mut out, _server) = raw_server(agent);
+        let cwd = std::env::current_dir().expect("cwd").display().to_string();
+        let [init, _] = open_session_lines(&cwd);
+        in_tx.unbounded_send(Ok(init)).expect("send");
+        response_to(&mut out, 1).await;
+        in_tx
+            .unbounded_send(Ok(serde_json::json!({"jsonrpc": "2.0", "id": 7,
+                "method": "session/prompt",
+                "params": {"sessionId": "no-such-session",
+                    "prompt": [{"type": "text", "text": "hi"}]}})
+            .to_string()))
+            .expect("send");
+        let response = response_to(&mut out, 7).await;
+        assert_eq!(response["error"]["code"], -32602, "got {response}");
+        assert!(response["error"]["data"].is_string(), "got {response}");
+    }
+
+    // ----- "Always allow" as a standing rule (spec 3.3 §10 A1) -----
+
+    /// Answers remembered as rules over a tool and its exact arguments; `publish` calls
+    /// are never remembered. Also the run's tool policy, as a harness's standing rules are.
+    #[derive(Debug, Default)]
+    struct RememberedAnswers {
+        rules: Mutex<Vec<(String, serde_json::Value, ToolConfirmationDecision)>>,
+        owners: Mutex<Vec<adk_core::ApprovalScope>>,
+    }
+
+    #[async_trait]
+    impl crate::server::StandingPermissions for RememberedAnswers {
+        async fn offer(
+            &self,
+            _scope: &adk_core::ApprovalScope,
+            request: &ToolConfirmationRequest,
+        ) -> Option<crate::server::StandingOffer> {
+            (request.tool_name != "publish").then(|| {
+                crate::server::StandingOffer::new(format!(
+                    "for this command ({})",
+                    request.args["command"].as_str().unwrap_or_default()
+                ))
+            })
+        }
+
+        async fn standing_decision(
+            &self,
+            _scope: &adk_core::ApprovalScope,
+            request: &ToolConfirmationRequest,
+        ) -> Option<ToolConfirmationDecision> {
+            self.rule_for(&request.tool_name, &request.args)
+        }
+
+        async fn remember(
+            &self,
+            scope: &adk_core::ApprovalScope,
+            request: &ToolConfirmationRequest,
+            decision: ToolConfirmationDecision,
+        ) -> AdkResult<()> {
+            self.owners.lock().expect("owners lock").push(scope.clone());
+            self.rules.lock().expect("rules lock").push((
+                request.tool_name.clone(),
+                request.args.clone(),
+                decision,
+            ));
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl adk_core::ToolPolicy for RememberedAnswers {
+        async fn evaluate(
+            &self,
+            request: &adk_core::ToolPolicyRequest,
+        ) -> adk_core::PolicyDecision {
+            match self.rule_for(&request.tool_name, &request.args) {
+                Some(ToolConfirmationDecision::Approve) => adk_core::PolicyDecision::Allow,
+                Some(ToolConfirmationDecision::Deny) => {
+                    adk_core::PolicyDecision::Deny { reason: "always denied".into() }
+                }
+                None => adk_core::PolicyDecision::RequireApproval { reason: "ask first".into() },
+            }
+        }
+    }
+
+    impl RememberedAnswers {
+        /// The decision of the rule covering `tool` with a command that starts with the same
+        /// two words, as a harness's command-prefix rule covers it.
+        fn rule_for(
+            &self,
+            tool: &str,
+            args: &serde_json::Value,
+        ) -> Option<ToolConfirmationDecision> {
+            let prefix = |args: &serde_json::Value| -> Vec<String> {
+                args["command"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .split_whitespace()
+                    .take(2)
+                    .map(str::to_string)
+                    .collect()
+            };
+            self.rules
+                .lock()
+                .expect("rules lock")
+                .iter()
+                .find(|(rule_tool, rule_args, _)| {
+                    rule_tool == tool && prefix(rule_args) == prefix(args)
+                })
+                .map(|(_, _, decision)| *decision)
+        }
+    }
+
+    /// An agent run under the remembered answers as its tool policy.
+    struct GovernedAgent {
+        inner: Arc<dyn AdkAgent>,
+        rules: Arc<RememberedAnswers>,
+    }
+
+    #[async_trait]
+    impl AdkAgent for GovernedAgent {
+        fn name(&self) -> &str {
+            self.inner.name()
+        }
+
+        fn description(&self) -> &str {
+            self.inner.description()
+        }
+
+        fn sub_agents(&self) -> &[Arc<dyn AdkAgent>] {
+            self.inner.sub_agents()
+        }
+
+        fn configure_run(&self, _agent_name: &str, config: &mut adk_core::RunConfig) {
+            config.tool_policy = Some(self.rules.clone());
+        }
+
+        async fn run(&self, ctx: Arc<dyn InvocationContext>) -> AdkResult<EventStream> {
+            self.inner.run(ctx).await
+        }
+    }
+
+    /// Replies with the scripted contents in order.
+    struct ScriptModel(Mutex<std::collections::VecDeque<Content>>);
+
+    #[async_trait]
+    impl adk_core::Llm for ScriptModel {
+        fn name(&self) -> &str {
+            "script"
+        }
+
+        async fn generate_content(
+            &self,
+            _request: adk_core::LlmRequest,
+            _stream: bool,
+        ) -> AdkResult<adk_core::LlmResponseStream> {
+            let content = self
+                .0
+                .lock()
+                .expect("script lock")
+                .pop_front()
+                .unwrap_or_else(|| Content::new("model").with_text("script exhausted"));
+            let response = adk_core::LlmResponse {
+                content: Some(content),
+                turn_complete: true,
+                ..Default::default()
+            };
+            Ok(Box::pin(futures::stream::iter([Ok(response)])))
+        }
+    }
+
+    /// Records each command it runs.
+    struct CommandTool {
+        name: &'static str,
+        ran: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl adk_core::Tool for CommandTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn description(&self) -> &str {
+            "Runs a command"
+        }
+
+        async fn execute(
+            &self,
+            _ctx: Arc<dyn adk_core::ToolContext>,
+            args: serde_json::Value,
+        ) -> AdkResult<serde_json::Value> {
+            let command = args["command"].as_str().unwrap_or_default().to_string();
+            self.ran.lock().expect("ran lock").push(format!("{}: {command}", self.name));
+            Ok(serde_json::json!({"ok": true}))
+        }
+    }
+
+    fn call(id: &str, tool: &str, command: &str) -> Content {
+        Content {
+            role: "model".to_string(),
+            parts: vec![adk_core::Part::FunctionCall {
+                name: tool.to_string(),
+                args: serde_json::json!({"command": command}),
+                id: Some(id.to_string()),
+                thought_signature: None,
+            }],
+        }
+    }
+
+    /// The options a client prefers for its `n`th permission request, best first.
+    type Preference = fn(usize) -> &'static [PermissionOptionKind];
+
+    /// "Always allow" when it is offered, otherwise "Allow once".
+    fn always_then_once(_: usize) -> &'static [PermissionOptionKind] {
+        &[PermissionOptionKind::AllowAlways, PermissionOptionKind::AllowOnce]
+    }
+
+    /// Sends each prompt in one session and answers every permission request with
+    /// "Always allow" when it is offered, otherwise "Allow once"; returns every request.
+    async fn drive_prompts(
+        config: AcpServerConfig,
+        prompts: &'static [&'static str],
+    ) -> Vec<RequestPermissionRequest> {
+        drive_prompts_with(config, prompts, always_then_once).await
+    }
+
+    /// Sends each prompt in one session and answers the `n`th permission request with the
+    /// first option `prefer(n)` names that is offered; returns every request.
+    async fn drive_prompts_with(
+        config: AcpServerConfig,
+        prompts: &'static [&'static str],
+        prefer: Preference,
+    ) -> Vec<RequestPermissionRequest> {
+        let capabilities = CapabilitiesBuilder::build(&config);
+        let handler =
+            Arc::new(AcpSessionHandler::new(&config, CancellationToken::new()).expect("handler"));
+        let asked = Arc::new(Mutex::new(Vec::<RequestPermissionRequest>::new()));
+        let asked_by_client = asked.clone();
+        let (server_channel, client_channel) = Channel::duplex();
+        let server =
+            serve_connection(handler, capabilities, "governed".into(), "".into(), server_channel);
+        let client = Client
+            .builder()
+            .on_receive_request(
+                move |request: RequestPermissionRequest,
+                      responder: Responder<RequestPermissionResponse>,
+                      _connection: ConnectionTo<Agent>| {
+                    let asked = asked_by_client.clone();
+                    async move {
+                        let index = asked.lock().expect("asked lock").len();
+                        let choice = prefer(index)
+                            .iter()
+                            .find_map(|kind| {
+                                request.options.iter().find(|option| option.kind == *kind)
+                            })
+                            .expect("a preferred option")
+                            .option_id
+                            .clone();
+                        asked.lock().expect("asked lock").push(request);
+                        responder.respond(RequestPermissionResponse::new(
+                            RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
+                                choice,
+                            )),
+                        ))
+                    }
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_with(client_channel, move |connection: ConnectionTo<Agent>| async move {
+                connection
+                    .send_request(InitializeRequest::new(ProtocolVersion::V1))
+                    .block_task()
+                    .await?;
+                let cwd = std::env::current_dir().expect("absolute cwd");
+                let session =
+                    connection.send_request(NewSessionRequest::new(cwd)).block_task().await?;
+                for prompt in prompts {
+                    let response = connection
+                        .send_request(PromptRequest::new(
+                            session.session_id.clone(),
+                            vec![ContentBlock::Text(TextContent::new(*prompt))],
+                        ))
+                        .block_task()
+                        .await?;
+                    assert_eq!(response.stop_reason, StopReason::EndTurn);
+                }
+                Ok(())
+            });
+        let server_task = tokio::spawn(server);
+        tokio::time::timeout(std::time::Duration::from_secs(5), client)
+            .await
+            .expect("prompts completed before timeout")
+            .expect("official ACP client completed");
+        server_task.abort();
+        let _ = server_task.await;
+        asked.lock().expect("asked lock").clone()
+    }
+
+    /// An ACP client picks "Always allow" for the test command: the answer becomes a rule
+    /// for the session's person, the next identical call runs without asking, and a publish
+    /// call, which may never be remembered, is still asked about and offered no "always".
+    #[tokio::test]
+    async fn always_allow_creates_a_rule_and_the_next_identical_call_is_not_asked() {
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        let model = ScriptModel(Mutex::new(
+            [
+                call("call-1", "run_command", "cargo test"),
+                Content::new("model").with_text("tests pass"),
+                call("call-2", "run_command", "cargo test"),
+                Content::new("model").with_text("tests pass again"),
+                call("call-3", "publish", "cargo publish"),
+                Content::new("model").with_text("published"),
+            ]
+            .into(),
+        ));
+        let inner = adk_agent::LlmAgentBuilder::new("governed")
+            .model(Arc::new(model))
+            .tool(Arc::new(CommandTool { name: "run_command", ran: ran.clone() }))
+            .tool(Arc::new(CommandTool { name: "publish", ran: ran.clone() }))
+            .build()
+            .expect("agent");
+        let rules = Arc::new(RememberedAnswers::default());
+        let config = AcpServerConfigBuilder::new()
+            .agent(Arc::new(GovernedAgent { inner: Arc::new(inner), rules: rules.clone() }))
+            .session_service(Arc::new(adk_session::InMemorySessionService::new()))
+            .agent_name("governed")
+            .user_id("alice")
+            .standing_permissions(rules.clone())
+            .build()
+            .expect("valid config");
+
+        let asked = drive_prompts(config, &["run the tests", "run them again", "publish it"]).await;
+
+        let asked_about: Vec<(String, Vec<PermissionOptionKind>)> = asked
+            .iter()
+            .map(|request| {
+                (
+                    request.tool_call.tool_call_id.to_string(),
+                    request.options.iter().map(|option| option.kind).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            asked_about,
+            [
+                (
+                    "call-1".to_string(),
+                    vec![
+                        PermissionOptionKind::AllowOnce,
+                        PermissionOptionKind::AllowAlways,
+                        PermissionOptionKind::RejectOnce,
+                        PermissionOptionKind::RejectAlways,
+                    ]
+                ),
+                // call-2 is not asked about: the rule allows it.
+                (
+                    "call-3".to_string(),
+                    vec![PermissionOptionKind::AllowOnce, PermissionOptionKind::RejectOnce]
+                ),
+            ]
+        );
+        assert_eq!(
+            asked[0].options[1].name, "Always allow for this command (cargo test)",
+            "the option says what it covers"
+        );
+        assert_eq!(
+            *ran.lock().expect("ran lock"),
+            ["run_command: cargo test", "run_command: cargo test", "publish: cargo publish"]
+        );
+        assert_eq!(
+            *rules.rules.lock().expect("rules lock"),
+            [(
+                "run_command".to_string(),
+                serde_json::json!({"command": "cargo test"}),
+                ToolConfirmationDecision::Approve
+            )],
+            "one rule, from the one 'always' answer"
+        );
+        let owners = rules.owners.lock().expect("owners lock");
+        assert_eq!(
+            (owners[0].app_name.as_str(), owners[0].user_id.as_str()),
+            ("governed", "alice")
+        );
+    }
+
+    /// Review of #1029, finding 7: a rule remembered for an earlier call of a batch decides the
+    /// later calls it covers, so the person is never asked a question whose answer the rule
+    /// would override.
+    #[tokio::test]
+    async fn a_rule_remembered_mid_batch_decides_the_later_calls_it_covers() {
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        let batch = Content {
+            role: "model".to_string(),
+            parts: ["call-1", "call-2"]
+                .iter()
+                .zip(["cargo test -p a", "cargo test -p b"])
+                .map(|(id, command)| adk_core::Part::FunctionCall {
+                    name: "run_command".to_string(),
+                    args: serde_json::json!({"command": command}),
+                    id: Some((*id).to_string()),
+                    thought_signature: None,
+                })
+                .collect(),
+        };
+        let model = ScriptModel(Mutex::new(
+            [batch, Content::new("model").with_text("both packages pass")].into(),
+        ));
+        let inner = adk_agent::LlmAgentBuilder::new("governed")
+            .model(Arc::new(model))
+            .tool(Arc::new(CommandTool { name: "run_command", ran: ran.clone() }))
+            .build()
+            .expect("agent");
+        let rules = Arc::new(RememberedAnswers::default());
+        let config = AcpServerConfigBuilder::new()
+            .agent(Arc::new(GovernedAgent { inner: Arc::new(inner), rules: rules.clone() }))
+            .session_service(Arc::new(adk_session::InMemorySessionService::new()))
+            .agent_name("governed")
+            .user_id("alice")
+            .standing_permissions(rules.clone())
+            .build()
+            .expect("valid config");
+
+        // "Always allow" for the first call; "Deny" for any call asked about after it.
+        fn first_always_then_deny(index: usize) -> &'static [PermissionOptionKind] {
+            if index == 0 {
+                &[PermissionOptionKind::AllowAlways]
+            } else {
+                &[PermissionOptionKind::RejectOnce]
+            }
+        }
+        let asked =
+            drive_prompts_with(config, &["test both packages"], first_always_then_deny).await;
+
+        let asked_about: Vec<String> =
+            asked.iter().map(|request| request.tool_call.tool_call_id.to_string()).collect();
+        assert_eq!(asked_about, ["call-1"], "the rule decides call-2; it is not asked about");
+        assert_eq!(
+            *ran.lock().expect("ran lock"),
+            ["run_command: cargo test -p a", "run_command: cargo test -p b"]
+        );
+    }
+
+    /// Runs one turn in which the model holds `cargo test -p a` (call-1) and
+    /// `cargo test -p b` (call-2), answering the `n`th permission request as `prefer(n)`
+    /// says; returns the calls asked about, the commands run, and the rules remembered.
+    async fn run_two_call_batch(
+        prefer: Preference,
+    ) -> (Vec<String>, Vec<String>, Vec<(String, serde_json::Value, ToolConfirmationDecision)>)
+    {
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        let batch = Content {
+            role: "model".to_string(),
+            parts: ["call-1", "call-2"]
+                .iter()
+                .zip(["cargo test -p a", "cargo test -p b"])
+                .map(|(id, command)| adk_core::Part::FunctionCall {
+                    name: "run_command".to_string(),
+                    args: serde_json::json!({"command": command}),
+                    id: Some((*id).to_string()),
+                    thought_signature: None,
+                })
+                .collect(),
+        };
+        let model =
+            ScriptModel(Mutex::new([batch, Content::new("model").with_text("done")].into()));
+        let inner = adk_agent::LlmAgentBuilder::new("governed")
+            .model(Arc::new(model))
+            .tool(Arc::new(CommandTool { name: "run_command", ran: ran.clone() }))
+            .build()
+            .expect("agent");
+        let rules = Arc::new(RememberedAnswers::default());
+        let config = AcpServerConfigBuilder::new()
+            .agent(Arc::new(GovernedAgent { inner: Arc::new(inner), rules: rules.clone() }))
+            .session_service(Arc::new(adk_session::InMemorySessionService::new()))
+            .agent_name("governed")
+            .user_id("alice")
+            .standing_permissions(rules.clone())
+            .build()
+            .expect("valid config");
+        let asked = drive_prompts_with(config, &["test both packages"], prefer).await;
+        let asked =
+            asked.iter().map(|request| request.tool_call.tool_call_id.to_string()).collect();
+        let ran = ran.lock().expect("ran lock").clone();
+        let remembered = rules.rules.lock().expect("rules lock").clone();
+        (asked, ran, remembered)
+    }
+
+    /// Wave 2 review, finding 1: "Always allow" on a later call of a batch never runs an
+    /// earlier call of the same batch the person denied; the rule is remembered once the
+    /// batch has run.
+    #[tokio::test]
+    async fn always_allow_later_in_a_batch_never_overrides_an_earlier_deny() {
+        fn deny_then_always_allow(index: usize) -> &'static [PermissionOptionKind] {
+            if index == 0 {
+                &[PermissionOptionKind::RejectOnce]
+            } else {
+                &[PermissionOptionKind::AllowAlways]
+            }
+        }
+        let (asked, ran, remembered) = run_two_call_batch(deny_then_always_allow).await;
+        assert_eq!(asked, ["call-1", "call-2"]);
+        assert_eq!(ran, ["run_command: cargo test -p b"], "the denied call-1 does not run");
+        assert_eq!(
+            remembered,
+            [(
+                "run_command".to_string(),
+                serde_json::json!({"command": "cargo test -p b"}),
+                ToolConfirmationDecision::Approve
+            )],
+            "the 'always' answer is still remembered"
+        );
+    }
+
+    /// Wave 2 review, finding 1 (mirror): "Always deny" on a later call of a batch never
+    /// refuses an earlier call of the same batch the person allowed once.
+    #[tokio::test]
+    async fn always_deny_later_in_a_batch_never_overrides_an_earlier_allow_once() {
+        fn allow_once_then_always_deny(index: usize) -> &'static [PermissionOptionKind] {
+            if index == 0 {
+                &[PermissionOptionKind::AllowOnce]
+            } else {
+                &[PermissionOptionKind::RejectAlways]
+            }
+        }
+        let (asked, ran, remembered) = run_two_call_batch(allow_once_then_always_deny).await;
+        assert_eq!(asked, ["call-1", "call-2"]);
+        assert_eq!(ran, ["run_command: cargo test -p a"], "the allowed call-1 runs");
+        assert_eq!(remembered.len(), 1, "the 'always deny' answer is remembered");
+        assert_eq!(remembered[0].2, ToolConfirmationDecision::Deny);
     }
 }

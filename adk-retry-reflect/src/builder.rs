@@ -37,6 +37,7 @@ pub struct RetryReflectPluginBuilder {
     priority: u32,
     global_tracking: bool,
     global_failure_threshold: u32,
+    record_payloads: bool,
 }
 
 impl Default for RetryReflectPluginBuilder {
@@ -59,6 +60,7 @@ impl RetryReflectPluginBuilder {
             priority: 200,
             global_tracking: false,
             global_failure_threshold: 10,
+            record_payloads: false,
         }
     }
 
@@ -146,11 +148,31 @@ impl RetryReflectPluginBuilder {
 
     /// Enable global failure tracking with the given circuit-breaker threshold.
     ///
-    /// When a tool exceeds this threshold across all invocations, it will be
-    /// circuit-broken and errors will propagate immediately.
+    /// When a tool fails this many times across all invocations without a success in
+    /// between, it is circuit-broken and its errors propagate immediately, until one of its
+    /// calls succeeds.
     pub fn enable_global_tracking(mut self, threshold: u32) -> Self {
         self.global_tracking = true;
         self.global_failure_threshold = threshold;
+        self
+    }
+
+    /// Sets whether log lines carry the tool's error text. Default: `false`.
+    ///
+    /// The plugin's context does not carry the run config, so set this to the run's
+    /// `RunConfig::record_payloads`. Off, a log line names the error's category and code
+    /// and leaves its text out.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_retry_reflect::RetryReflectPluginBuilder;
+    ///
+    /// let plugin = RetryReflectPluginBuilder::new().record_payloads(true).build().unwrap();
+    /// assert!(plugin.config().record_payloads);
+    /// ```
+    pub fn record_payloads(mut self, enabled: bool) -> Self {
+        self.record_payloads = enabled;
         self
     }
 
@@ -185,6 +207,7 @@ impl RetryReflectPluginBuilder {
             priority: self.priority,
             global_tracking: self.global_tracking,
             global_failure_threshold: self.global_failure_threshold,
+            record_payloads: self.record_payloads,
         };
 
         Ok(RetryReflectPlugin::from_config(config))

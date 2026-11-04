@@ -228,16 +228,22 @@ fn media_part(
 /// `prompt_token_count`/`candidates_token_count`/`total_token_count`
 /// (saturating `i64` → `i32`). `total_thought_tokens` and `total_cached_tokens`
 /// populate `thinking_token_count` / `cache_read_input_token_count` only when
-/// positive.
+/// positive. `provider_usage` keeps the `usage` object as received.
 fn usage_to_metadata(usage: &Usage) -> UsageMetadata {
     UsageMetadata {
         prompt_token_count: clamp_i64(usage.total_input_tokens),
         candidates_token_count: clamp_i64(usage.total_output_tokens),
-        total_token_count: clamp_i64(usage.total_tokens),
+        // An unreported (`null` or zero) total is at least the input and output reported.
+        total_token_count: clamp_i64(if usage.total_tokens > 0 {
+            usage.total_tokens
+        } else {
+            usage.total_input_tokens.saturating_add(usage.total_output_tokens)
+        }),
         thinking_token_count: (usage.total_thought_tokens > 0)
             .then(|| clamp_i64(usage.total_thought_tokens)),
         cache_read_input_token_count: (usage.total_cached_tokens > 0)
             .then(|| clamp_i64(usage.total_cached_tokens)),
+        provider_usage: usage.raw.clone().or_else(|| serde_json::to_value(usage).ok()),
         ..Default::default()
     }
 }
@@ -291,7 +297,9 @@ fn status_label(status: InteractionStatus) -> &'static str {
 ///   [`ResponseFormat::json_schema`].
 /// - **Generation config.** `thinking_level` plus common sampling parameters
 ///   (`max_output_tokens`, `temperature`, `top_p`, `seed`, `stop_sequences`) are
-///   forwarded into [`GenerationConfig`].
+///   forwarded into [`GenerationConfig`]. `frequency_penalty`, `presence_penalty`, and
+///   `top_logprobs` have no Interactions field and fail the request with
+///   `model.unsupported_config`.
 /// - **Continuity.** When `stateful` and `store` are both `true` and the request
 ///   carries a `previous_response_id`, it is set as `previous_interaction_id`.
 ///
@@ -323,6 +331,9 @@ fn status_label(status: InteractionStatus) -> &'static str {
 /// offending built-in tool(s) and points the developer at
 /// `with_bypass_multi_tools_limit`. A uniform tool set (all function tools, all
 /// built-in tools, or no tools) builds successfully.
+///
+/// Returns `model.unsupported_config` when the config sets `frequency_penalty`,
+/// `presence_penalty`, or `top_logprobs`.
 pub fn build_request(
     request: &LlmRequest,
     target: &InteractionTarget,
@@ -380,7 +391,19 @@ pub fn build_request(
         .and_then(|config| config.response_schema.clone())
         .map(ResponseFormat::json_schema);
 
-    // 6. Generation config (thinking level + common sampling parameters).
+    // 6. Generation config (thinking level + common sampling parameters). The Interactions
+    //    `generation_config` has no penalty or log-probability field.
+    crate::generation_config::reject_unsupported(
+        "Gemini Interactions",
+        request.config.as_ref(),
+        crate::generation_config::Supports {
+            stop_sequences: true,
+            seed: true,
+            penalties: false,
+            top_logprobs: false,
+        },
+    )
+    .map_err(|error| error.with_provider("gemini"))?;
     let generation_config = build_generation_config(request.config.as_ref(), thinking_level);
 
     // 7. Resolve the model/agent target field.
@@ -465,7 +488,11 @@ fn append_steps(content: &Content, steps: &mut Vec<Step>) {
                         call_id: id.clone().unwrap_or_default(),
                         name: Some(function_response.name.clone()),
                         result: function_response.response.clone(),
-                        is_error: None,
+                        // Only an answer the agent wrote says the call failed or never ran.
+                        is_error: part
+                            .tool_result_status()
+                            .is_some_and(adk_core::ToolResultStatus::is_error)
+                            .then_some(true),
                         signature: None,
                     });
                 }
@@ -963,7 +990,7 @@ mod tests {
 
     fn request_with(contents: Vec<Content>) -> LlmRequest {
         LlmRequest {
-            model: "gemini-2.5-flash".to_string(),
+            model: "gemini-3.7-flash".to_string(),
             contents,
             config: None,
             tools: HashMap::new(),
@@ -972,7 +999,7 @@ mod tests {
     }
 
     fn model_target() -> InteractionTarget {
-        InteractionTarget::Model("gemini-2.5-flash".to_string())
+        InteractionTarget::Model("gemini-3.7-flash".to_string())
     }
 
     #[test]
@@ -982,7 +1009,7 @@ mod tests {
         let built = build_request(&request, &model_target(), None, true, true)
             .expect("build_request should succeed");
 
-        assert_eq!(built.model.as_deref(), Some("gemini-2.5-flash"));
+        assert_eq!(built.model.as_deref(), Some("gemini-3.7-flash"));
         assert_eq!(built.agent, None);
         match built.input {
             Input::Content(blocks) => {
@@ -1136,6 +1163,63 @@ mod tests {
         }
     }
 
+    /// A function result is flagged `is_error` only when the agent wrote it for a call that
+    /// was refused, not run, or failed.
+    #[test]
+    fn only_a_refused_unrun_or_failed_answer_is_flagged_an_error() {
+        use adk_core::ToolResultStatus;
+        let flag = |status: Option<ToolResultStatus>| {
+            let mut answer = Part::FunctionResponse {
+                function_response: FunctionResponseData::new(
+                    "get_weather",
+                    serde_json::json!({ "error": "denied" }),
+                ),
+                id: Some("call-1".to_string()),
+                annotations: None,
+            };
+            if let Some(status) = status {
+                answer.set_tool_result_status(status, None);
+            }
+            let request = request_with(vec![
+                Content::new("user").with_text("What's the weather?"),
+                Content {
+                    role: "model".to_string(),
+                    parts: vec![Part::FunctionCall {
+                        name: "get_weather".to_string(),
+                        args: serde_json::json!({}),
+                        id: Some("call-1".to_string()),
+                        thought_signature: None,
+                    }],
+                },
+                Content { role: "function".to_string(), parts: vec![answer] },
+            ]);
+            let built = build_request(&request, &model_target(), None, true, true)
+                .expect("build_request should succeed");
+            let Input::Steps(steps) = built.input else { panic!("expected steps") };
+            steps
+                .into_iter()
+                .find_map(|step| match step {
+                    Step::FunctionResult { is_error, .. } => Some(is_error),
+                    _ => None,
+                })
+                .expect("a function_result step")
+        };
+        for status in
+            [ToolResultStatus::Refused, ToolResultStatus::NotRun, ToolResultStatus::Failed]
+        {
+            assert_eq!(flag(Some(status)), Some(true), "{status:?}");
+        }
+        for status in [
+            ToolResultStatus::Held,
+            ToolResultStatus::OutcomeUnknown,
+            ToolResultStatus::Withheld,
+            ToolResultStatus::Succeeded,
+        ] {
+            assert_eq!(flag(Some(status)), None, "{status:?}");
+        }
+        assert_eq!(flag(None), None, "a tool's own payload is not read");
+    }
+
     #[test]
     fn response_schema_maps_to_response_format() {
         let schema = serde_json::json!({
@@ -1202,6 +1286,28 @@ mod tests {
         assert_eq!(gen_config.top_p, Some(0.9));
         assert_eq!(gen_config.seed, Some(42));
         assert_eq!(gen_config.stop_sequences, vec!["STOP".to_string()]);
+    }
+
+    #[test]
+    fn penalties_and_logprobs_fail_by_name() {
+        let mut request = request_with(vec![Content::new("user").with_text("Configure me")]);
+        request.config = Some(GenerateContentConfig {
+            presence_penalty: Some(0.25),
+            frequency_penalty: Some(0.5),
+            top_logprobs: Some(2),
+            seed: Some(42),
+            ..Default::default()
+        });
+
+        let error = build_request(&request, &model_target(), None, true, true)
+            .expect_err("the Interactions API has no penalty or logprobs field");
+
+        assert_eq!(error.code, "model.unsupported_config");
+        assert!(
+            error.message.contains("`frequency_penalty`, `presence_penalty`, `top_logprobs`"),
+            "{}",
+            error.message
+        );
     }
 
     #[test]
@@ -1440,7 +1546,7 @@ mod tests {
     fn interaction_with(id: &str, status: InteractionStatus, steps: Vec<Step>) -> Interaction {
         Interaction {
             id: id.to_string(),
-            model: Some("gemini-2.5-flash".to_string()),
+            model: Some("gemini-3.7-flash".to_string()),
             agent: None,
             status,
             steps,
@@ -1641,6 +1747,7 @@ mod tests {
             total_tokens: 182,
             input_tokens_by_modality: Vec::new(),
             output_tokens_by_modality: Vec::new(),
+            raw: None,
         });
 
         let response = to_llm_response(&interaction);

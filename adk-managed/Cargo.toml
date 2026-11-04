@@ -6,11 +6,15 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 description = "Managed agent runtime for ADK-Rust — durable, resumable, provider-neutral agent execution"
-repository = "https://github.com/zavora-ai/adk-rust"
+homepage.workspace = true
+repository.workspace = true
 documentation = "https://docs.rs/adk-managed"
 readme = "README.md"
 keywords = ["ai", "agents", "managed", "runtime", "durable"]
-categories = ["science", "asynchronous"]
+categories = ["asynchronous", "development-tools"]
+
+[package.metadata.docs.rs]
+all-features = true
 
 [dependencies]
 adk-core.workspace = true
@@ -44,7 +48,15 @@ default = []
 sandbox = ["dep:adk-sandbox"]
 memory = ["dep:adk-memory"]
 full = ["sandbox", "memory"]
+# Model providers `DefaultModelResolver` can construct.
+gemini = ["adk-model/gemini"]
+openai = ["adk-model/openai"]
+anthropic = ["adk-model/anthropic"]
+ollama = ["adk-model/ollama"]
+all-providers = ["gemini", "openai", "anthropic", "ollama"]
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt", "macros", "test-util"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "test-util"] }
 proptest = "1.5"
+# Path-only, so the publish order is not constrained by a dev-dependency.
+adk-session = { path = "../adk-session", features = ["sqlite", "postgres"] }

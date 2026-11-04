@@ -95,6 +95,10 @@ impl GeminiStt {
 
 #[async_trait]
 impl SttProvider for GeminiStt {
+    fn billing(&self) -> Option<crate::AudioBilling> {
+        Some(crate::AudioBilling::new("gemini", self.model.clone()))
+    }
+
     async fn transcribe(&self, audio: &AudioFrame, opts: &SttOptions) -> AudioResult<Transcript> {
         let wav_bytes = frame_to_wav_bytes(audio)?;
 
@@ -164,9 +168,13 @@ impl SttProvider for GeminiStt {
         &self,
         _audio: Pin<Box<dyn Stream<Item = AudioFrame> + Send>>,
         _opts: &SttOptions,
-    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<Transcript>> + Send>>> {
-        // Gemini generateContent doesn't support streaming STT.
-        // For real-time streaming, use adk-realtime with Gemini Live.
-        Ok(Box::pin(futures::stream::empty()))
+    ) -> AudioResult<crate::TranscriptStream> {
+        Err(AudioError::Stt {
+            provider: "gemini".into(),
+            message: "streaming transcription not yet implemented; call `transcribe` with the \
+                      buffered audio, or use the Gemini Live API through `adk-realtime` for live \
+                      audio"
+                .into(),
+        })
     }
 }

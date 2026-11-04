@@ -9,6 +9,9 @@
 The Managed Agent Runtime (`adk-managed`) is a provider-neutral, durable, resumable
 agent execution engine. It takes a declarative `ManagedAgentDef`, builds a runnable
 agent, and operates it as a checkpoint-resumable, event-streaming background session.
+Every turn runs under a run in a `DurableRunStore`; a turn that waits on the client
+parks its run, and the client's answer resumes it on any runtime instance over the same
+stores.
 
 The runtime is a **library**, not a service. The platform hosts it. This means:
 
@@ -23,26 +26,26 @@ Add the feature to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-adk-rust = { version = "2.1.0", features = ["managed-runtime"] }
+adk-rust = { version = "3.0.0", features = ["managed-runtime"] }
 ```
 
 Or use the `adk-managed` crate directly:
 
 ```toml
 [dependencies]
-adk-managed = "2.1.0"
-adk-session = "2.1.0"
+adk-managed = "3.0.0"
+adk-session = "3.0.0"
 ```
 
 ### Minimal Example (ScriptedLlm — no API key)
 
-```rust,ignore
+```rust
 use std::sync::Arc;
 use adk_managed::{
-    DefaultManagedAgentRuntime, ManagedAgentRuntime, ModelResolver,
+    DefaultManagedAgentRuntime, ManagedAgentRuntime, ManagedOwner, ModelResolver,
     ScriptedLlm, ScriptedTurn,
     resolver::ResolverResult,
-    types::{ContentBlock, ManagedAgentDef, ModelRef, UserEvent},
+    types::{ContentBlock, ManagedAgentDef, ModelRef, SessionEvent, UserEvent},
 };
 use adk_session::InMemorySessionService;
 use async_trait::async_trait;
@@ -76,8 +79,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_system("You are helpful.");
     let agent = runtime.create(def).await?;
 
-    // 4. Start a session
-    let session = runtime.start_session(&agent, None).await?;
+    // 4. Start a session for its owner
+    let owner = ManagedOwner::new("my-app", "user-1")?;
+    let session = runtime.start_session(&agent, &owner, None).await?;
 
     // 5. Subscribe to events and send a message
     let mut stream = runtime.stream_events(&session, None).await?;
@@ -85,9 +89,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         content: vec![ContentBlock::Text { text: "Hi!".into() }],
     }).await?;
 
-    // 6. Collect events
+    // 6. Collect events until the turn ends; the stream stays open for later turns
     while let Some(event) = stream.next().await {
         println!("{event:?}");
+        if matches!(event, SessionEvent::StatusIdle { .. }) {
+            break;
+        }
     }
     Ok(())
 }
@@ -97,7 +104,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ```text
 ┌─────────────────────────────────────────────────────────────┐
-│                Platform Layer (ep-* crates)                  │
+│                      Platform Layer                          │
 │    HTTP Routes │ Auth │ Billing │ Multi-tenancy              │
 └──────────────────────────┬──────────────────────────────────┘
                            │ Rust trait calls (in-process)
@@ -129,7 +136,7 @@ The central async trait defining the full agent lifecycle:
 | Method | Description |
 |--------|-------------|
 | `create(def)` | Register an agent definition, returns `AgentHandle` |
-| `start_session(agent, env?)` | Start a new session, initial status `Queued` |
+| `start_session(agent, owner, env?)` | Start a session for a `ManagedOwner`; initial status `Queued` |
 | `send_event(session, event)` | Send a `UserEvent` to the session |
 | `stream_events(session, from_seq?)` | Subscribe to `SessionEvent` stream |
 | `interrupt(session)` | Stop at next boundary, emit `status.idle` |
@@ -147,16 +154,18 @@ Declarative agent definition with builder API:
 let def = ManagedAgentDef::new("my-agent", ModelRef::Shorthand("gemini-3.7-flash".into()))
     .with_system("You are a helpful assistant.")
     .with_description("Research agent with web search")
-    .with_tools(vec![ToolConfig::BuiltIn(ManagedBuiltinTool::WebSearch)]);
+    .with_tools(vec![ToolConfig::WebSearch {}]);
 ```
 
 ### SessionEvent
 
 Provider-neutral event stream with monotonic sequence numbers:
 
+Each event serializes with its name as `type` and its `seq`:
+
 - `agent.message` — Assistant text content
 - `agent.tool_use` — Built-in tool invocation
-- `agent.custom_tool_use` — Client-executed custom tool (loop parks)
+- `agent.custom_tool_use` — Client-executed custom tool; the turn ends with `requires_action`
 - `agent.mcp_tool_use` — MCP tool invocation
 - `status.running` — Turn started
 - `status.idle` — Turn complete (with `stop_reason`)
@@ -199,29 +208,124 @@ ModelRef::Structured {
 
 ### Durable Sessions
 
-Every event is checkpointed atomically. On process crash, `resume()` rehydrates
-from the last consistent checkpoint with no event loss:
+Every event is checkpointed and written to the runtime's `ManagedStateStore` before it is
+broadcast. A runtime instance that does not host a session rebuilds it from the store —
+agent definition, owner, event log, sequence position, and pending tool calls — the first
+time any method names it:
 
 ```rust,ignore
-// Before crash: events 0..5 committed
-// After restart:
-runtime.resume(&session).await?;
-// Continues from seq=5, no gap, no duplicate
+// A new process over the same stores
+let runtime = DefaultManagedAgentRuntime::new(resolver, sessions).with_stores(stores);
+runtime.recover().await?; // host every stored session with a run in progress
+let stream = runtime.stream_events(&session, Some(5)).await?; // continues from seq 5
 ```
 
-### Custom Tool Parking
+### Custom Tool Calls
 
-When the agent emits `agent.custom_tool_use`, the loop parks until the client
-returns results or a configurable timeout elapses:
+A custom tool (`ToolConfig::Custom { name, description, input_schema }`) is executed by the
+client. When the model calls one, the turn ends:
+`agent.custom_tool_use` is emitted, `status.idle` carries `requires_action` with the
+call's ID, and the turn's run parks in the run store until the call expires
+(`DurableConfig::pending_expiry`, five minutes by default). The session keeps reading
+events while it waits.
 
 ```rust,ignore
-// Agent emits: agent.custom_tool_use { custom_tool_use_id: "ct_1", name: "deploy" }
-// Client executes the tool, then:
+// Agent emits: agent.custom_tool_use { custom_tool_use_id: "call_1", name: "deploy" }
+// status.idle { stop_reason: requires_action { event_ids: ["call_1"] } }
+// The client executes the tool, then:
 runtime.send_event(&session, UserEvent::CustomToolResult {
-    custom_tool_use_id: "ct_1".into(),
+    custom_tool_use_id: "call_1".into(),
     content: vec![ContentBlock::Text { text: "Deployed successfully".into() }],
 }).await?;
+// status.running → agent.message → status.idle
 ```
+
+The result is recorded in the decision store and wakes the run. The resumed turn shows the
+model the result in place of the call's pending response; a text result reaches the model
+as `{"result": "<text>"}`. A call that expires is answered with an expiry error and the
+turn continues. While calls are pending the session status is `Idle`; a message sent then is
+refused with a conflict error naming the pending IDs, and a result for an ID the session is not
+waiting on is refused as an invalid request.
+
+### Tool Confirmations
+
+A `permission_policy` with `prompt` holds the call before it executes. The turn ends with
+`agent.tool_use` and `requires_action`; `user.tool_confirmation` records the decision and
+the resumed turn executes the call, or reports the denial and its `deny_message` to the
+model. With `ManagedStores::with_approval_service`, held calls become approval requests
+(quorum, delegation, escalation, expiry) and the service's decision wakes the run;
+`user.tool_confirmation` is then refused.
+
+The decision is recorded under the held request's fingerprint, which names the agent that
+made the call and the tool's origin, so it authorizes only that agent's call on that tool. If
+the resumed turn finds the tool name answered by another MCP server, or the tool redefined,
+it reports the call as not run instead of executing it.
+
+### Parked Calls on the Durable Runtime
+
+| Store | Holds | In-memory default |
+|-------|-------|-------------------|
+| `ManagedStateStore` | Event log, sequence, status, pending calls, agent definition | `InMemoryManagedStateStore` |
+| `DurableRunStore` | One run per turn: lease, wait until expiry, wake | `InMemoryRunStore` |
+| `ApprovalStore` | Custom tool results and confirmation decisions | `InMemoryApprovalStore` |
+
+Each session has its own run queue, and a session's runs execute one at a time across
+runtime instances. A session hosted by an instance polls its queue every
+`DurableConfig::poll_interval` while its run is parked, so an answer recorded by another
+instance, or an expiry, resumes it. Any backend of the three traits works; the run and
+approval stores ship for SQLite, PostgreSQL, Redis, MongoDB, Neo4j, and Firestore in
+`adk-session`.
+
+```rust,ignore
+use std::sync::Arc;
+use adk_managed::{DefaultManagedAgentRuntime, Durability, ManagedStores, SessionServiceStateStore};
+
+let sessions = Arc::new(adk_session::PostgresSessionService::new(url).await?);
+let state = SessionServiceStateStore::new(sessions.clone(), Durability::CrashDurable);
+let runs = Arc::new(adk_session::PostgresRunStore::new(url).await?);
+let decisions = Arc::new(adk_session::PostgresApprovalStore::new(url).await?);
+
+let runtime = DefaultManagedAgentRuntime::new(resolver, sessions)
+    .with_stores(ManagedStores::new(Arc::new(state), runs, decisions));
+assert_eq!(runtime.durability(), Durability::CrashDurable);
+```
+
+### Model Resolution
+
+`DefaultModelResolver` constructs the provider a `ModelRef` names. Each provider is built
+only under its feature of `adk-managed`; on the umbrella crate, the provider feature of the
+same name enables it alongside `managed-runtime`.
+
+| Provider | Shorthand prefix | Feature | Credentials |
+|----------|------------------|---------|-------------|
+| Gemini | `gemini` | `gemini` | `GOOGLE_API_KEY` or `GEMINI_API_KEY`, or Vertex AI through `GOOGLE_GENAI_USE_VERTEXAI` |
+| OpenAI | `gpt` | `openai` | `OPENAI_API_KEY` |
+| Anthropic | `claude` | `anthropic` | `ANTHROPIC_API_KEY` |
+| Ollama | `llama`, `mistral`, `deepseek` | `ollama` | none; `OLLAMA_HOST` overrides the host |
+| OpenAI-compatible | structured only | `openai` | the reference's `api_key` |
+
+`DefaultModelResolver::with_api_key(provider, key)` replaces the environment. A stored
+session drops the `api_key` of an OpenAI-compatible reference, so a rebuilt session takes
+the key from `with_api_key(Provider::OpenaiCompatible, ..)`.
+
+```toml
+[dependencies]
+adk-rust = { version = "3.0.0", features = ["managed-runtime", "openai", "anthropic"] }
+```
+
+### Agents beyond `build_agent`
+
+`DefaultManagedAgentRuntime::with_agent_resolver` puts an `AgentResolver` in front of
+`build_agent`: the runtime asks it first, on `create` and whenever it rebuilds a stored
+session, and builds the definition itself when the resolver answers `None`. Every instance
+that may host the same sessions needs the same resolver.
+
+| Resolver | Builds |
+|---|---|
+| `adk_harness::packs::managed::HarnessResolver` (feature `managed`) | a `HarnessAgent` from a `HarnessDef` — mode, shell policy, skills roots, members and packs in the definition's `adk.harness` metadata — or an application's own harness by name |
+| your own `impl AgentResolver` | any agent a definition's metadata selects |
+
+See [Serving the harness](../harness/serving.md#on-the-managed-runtime) for the harness.
 
 ### Event Replay
 
@@ -232,15 +336,32 @@ Support SSE `Last-Event-ID` reconnection via sequence-based replay:
 let stream = runtime.stream_events(&session, Some(42)).await?;
 ```
 
+An `adk-enterprise` client reads the runtime's events as it reads the service's: a
+platform that streams them as SSE frames with `id: <seq>` lets `EnterpriseClient::stream_events`
+reconnect with `Last-Event-ID` and receive what it missed.
+
 ### Provider Parity
 
-Identical `ManagedAgentDef` produces byte-identical event type sequences across
-Gemini, OpenAI, Anthropic, Ollama, and OpenAI-compatible providers (fixture F-8).
+Events are provider-neutral. A turn that calls a custom tool emits the same sequence on
+Gemini, OpenAI, and Anthropic models:
+
+```text
+status.running
+agent.custom_tool_use        { custom_tool_use_id, name, input }
+status.idle                  { stop_reason: requires_action { event_ids: [...] } }
+# after user.custom_tool_result
+status.running
+agent.message
+status.idle                  { stop_reason: end_turn }
+```
 
 ## Testing with ScriptedLlm
 
 `ScriptedLlm` is a deterministic LLM double that exercises the full runtime
-pipeline. Only the provider API call is replaced:
+pipeline. Only the provider API call is replaced. It is `adk_model::ScriptedLlm`,
+re-exported: each model call gets the next scripted turn, `requests()` returns what the
+runtime sent on every call, and a call past the last turn fails with
+`model.scripted.exhausted`:
 
 ```rust,ignore
 use adk_managed::testing::{ScriptedLlm, ScriptedTurn, ScriptedToolCall};
@@ -282,16 +403,27 @@ This runs fixture F-1 end-to-end with `ScriptedLlm` (no API key required).
 
 ## Managed state durability
 
-Managed session state — the event log, sequence position, parked tool calls, and lifecycle
-status — lives in a `ManagedStateStore`. The store reports its own guarantee:
+Managed session state — the event log, sequence position, pending tool calls, lifecycle
+status, and the agent definition and owner a session is rebuilt from — lives in a
+`ManagedStateStore`. The store reports its own guarantee:
 
 | Durability | Meaning |
 |------------|---------|
 | `ProcessLocal` | Replay and resume work while the process runs. A crash loses the state, and another process cannot resume the session. |
 | `CrashDurable` | State is written to a backing store before the write is acknowledged, so another process can reconstruct the session. |
 
-**Only `InMemoryManagedStateStore` ships, and it is `ProcessLocal`.** Check the guarantee rather
-than inferring it from the presence of checkpointing:
+| Store | Durability | Backed by |
+|-------|------------|-----------|
+| `InMemoryManagedStateStore` | `ProcessLocal` | Process memory (the default) |
+| `FileManagedStateStore` | `CrashDurable` | One fsynced JSON file per session on one host |
+| `SessionServiceStateStore` | As declared for the service | Any `SessionService` backend |
+
+`SessionServiceStateStore` keeps each managed session's state in a companion session of
+the session service, appending only the events added since the previous write. A
+`dyn SessionService` cannot report whether it is durable, so the constructor takes the
+guarantee of the service passed to it. `DefaultManagedAgentRuntime::durability` reports the
+state store's guarantee; resume after a restart also needs a durable run store, decision
+store, and session service.
 
 ```rust
 use adk_managed::{Durability, InMemoryManagedStateStore, ManagedStateStore};
@@ -332,20 +464,20 @@ transitions are visible, not just control-plane ones:
 | `Queued` → `Running` | A turn begins |
 | `Running` → `Idle` | The turn completes and usage is recorded |
 | any → `Paused` | `pause` |
+| `Paused` → `Running` | `resume` |
 | any → `Archived` | `archive` or `delete_session` |
 
-> **Note:** before this was one shared handle, `status` reported `Queued` for the entire life
-> of a session, including while it was executing turns. Control-plane transitions
-> (pause, resume, archive) were visible because they wrote to the handle directly.
+A turn that ends waiting on the client — `requires_action` — leaves the session `Idle`.
 
 ## Deletion semantics
 
 `delete_session` removes both planes:
 
-1. Sets the session terminal and cancels its loop.
+1. Sets the session terminal, cancels its loop, and cancels its run.
 2. Removes the runtime handle.
 3. Deletes the persisted conversation through the injected `SessionService`, under the same
    identity `start_session` created it with.
+4. Deletes the session's state from the `ManagedStateStore`.
 
 If step 3 fails, `delete_session` returns an error naming the app, user, and session that
 still hold data — the handle is already gone at that point, so the caller has to be told
@@ -368,25 +500,16 @@ every Runner call the session loop makes uses it:
 use adk_managed::{ManagedAgentRuntime, ManagedOwner};
 
 # async fn start(runtime: &dyn ManagedAgentRuntime, agent: &adk_managed::AgentHandle)
-# -> Result<(), adk_managed::RuntimeError> {
+# -> Result<(), adk_managed::types::RuntimeError> {
 let owner = ManagedOwner::new("support-console", "user-42")?;
 let session = runtime.start_session(agent, &owner, None).await?;
 # Ok(())
 # }
 ```
 
-> **Important:** `checkpoint` was documented as "atomically persist" with a guarantee that
-> "replay will see a consistent view after any crash", and loading was described as returning
-> "everything needed to reconstruct a session after a restart". Neither held: both operated on
-> in-memory fields with no transaction against any persistent store. With the shipped store,
-> `restore` in a new process finds nothing.
 Both components are required and must be non-blank. Sessions belonging to different owners are
 addressed separately, so lookup and deletion are scoped to one owner and cannot reach another's
 data.
-
-> **Note:** every managed session was previously persisted under the constants `managed` /
-> `managed_user`, so all of them shared one logical namespace: nothing could be scoped to a
-> caller and no session could be attributed to one.
 
 ## Environment configuration
 
@@ -400,8 +523,5 @@ process-global state shared with other sessions. Pass `None`, or configure a san
 ```
 
 Sessions run in-process, so applying per-session environment variables or a working directory
-would mutate state shared with every other session. Refusing is the honest outcome; a sandboxed
-execution boundary is what would make the request satisfiable.
-
-> **Note:** the argument was previously named `_env` and discarded, so a caller supplying
-> environment configuration received a session that silently ignored it.
+would mutate state shared with every other session. Pass `None`, or run the session in a
+sandboxed runtime.

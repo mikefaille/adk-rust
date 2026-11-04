@@ -10,13 +10,13 @@ computation-based trajectory metrics. Every call is a single POST to
 
 ```toml
 [dependencies]
-adk-eval = { version = "2.1.0", features = ["vertex-eval"] }
+adk-eval = { version = "3.0.0", features = ["vertex-eval"] }
 ```
 
 Authentication uses Application Default Credentials
 (`gcloud auth application-default login`, or the workload identity of a
-deployed container). The caller needs the `aiplatform.endpoints.predict`
-permission (`roles/aiplatform.user`).
+deployed container). The credentials need permission to call the Vertex AI
+API in the project.
 
 | Environment variable | Purpose |
 |----------------------|---------|

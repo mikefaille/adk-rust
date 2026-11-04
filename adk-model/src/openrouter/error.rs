@@ -49,7 +49,13 @@ pub fn api_error_to_adk_error(status_code: u16, headers: &HeaderMap, body: &str)
     let (category, code) = status_category_and_code(status_code);
     let message = parsed
         .as_ref()
-        .map(|payload| payload.error.message.clone())
+        .map(|payload| {
+            with_upstream_detail(
+                &payload.error.message,
+                payload.error.provider_name.as_deref(),
+                payload.error.metadata.as_ref(),
+            )
+        })
         .unwrap_or_else(|| format!("OpenRouter request failed with status {status_code}"));
 
     let mut error = AdkError::new(ErrorComponent::Model, category, code, message)
@@ -88,11 +94,14 @@ pub fn stream_error_to_adk_error(
         .map(status_category_and_code)
         .unwrap_or((ErrorCategory::Internal, "model.openrouter.stream_error"));
 
-    let mut error =
-        AdkError::new(ErrorComponent::Model, category, code, stream_error.message.clone())
-            .with_provider(
-                stream_error.provider_name.clone().unwrap_or_else(|| "openrouter".to_string()),
-            );
+    let message = with_upstream_detail(
+        &stream_error.message,
+        stream_error.provider_name.as_deref(),
+        stream_error.metadata.as_ref(),
+    );
+    let mut error = AdkError::new(ErrorComponent::Model, category, code, message).with_provider(
+        stream_error.provider_name.clone().unwrap_or_else(|| "openrouter".to_string()),
+    );
 
     if let Some(status_code) = status_code {
         error = error.with_upstream_status(status_code);
@@ -123,6 +132,11 @@ pub fn stream_error_to_adk_error(
     if !metadata.is_empty() {
         error.details.metadata.extend(metadata);
     }
+    // `code` stays for compatibility; `provider_error_code` follows the shared rule.
+    error = crate::error_metadata::with_first_code(
+        error,
+        [stream_error.code.as_ref().and_then(Value::as_str), stream_error.error_type.as_deref()],
+    );
 
     if let Some(retry_after_ms) = sse_retry_ms {
         let retry_hint =
@@ -136,6 +150,59 @@ pub fn stream_error_to_adk_error(
     }
 
     error
+}
+
+/// Normalize the `error` object of a Responses API response whose status is `failed`,
+/// from a non-streaming body or a `response.failed` stream event.
+pub(crate) fn response_failed_to_adk_error(error: Option<&Value>) -> AdkError {
+    let Some(error) = error.filter(|error| !error.is_null()) else {
+        return AdkError::new(
+            ErrorComponent::Model,
+            ErrorCategory::Internal,
+            "model.openrouter.response_failed",
+            "OpenRouter response failed without error details",
+        )
+        .with_provider("openrouter");
+    };
+    let stream_error = crate::openrouter::stream::parse_stream_error(&json!({ "error": error }));
+    let mut mapped = stream_error_to_adk_error(&stream_error, None);
+    // Without an HTTP status the failure has no status-specific code.
+    if mapped.details.upstream_status_code.is_none() {
+        mapped.code = "model.openrouter.response_failed";
+    }
+    mapped
+}
+
+/// Appends the upstream provider's own explanation to OpenRouter's message.
+///
+/// For upstream failures OpenRouter's message is generic ("Provider returned error") and
+/// the actionable text is in `metadata.raw`, with the provider in `metadata.provider_name`.
+/// Both can echo the request, and `raw` can be a full response body, so each is cut to
+/// [`adk_core::UPSTREAM_EXCERPT_BYTES`].
+fn with_upstream_detail(
+    message: &str,
+    provider_name: Option<&str>,
+    metadata: Option<&Value>,
+) -> String {
+    let raw = metadata
+        .and_then(|metadata| metadata.get("raw"))
+        .map(|raw| match raw {
+            Value::String(text) => text.trim().to_string(),
+            other => other.to_string(),
+        })
+        .filter(|raw| !raw.is_empty() && raw != message);
+    let message = adk_core::upstream_excerpt(message);
+    let Some(raw) = raw else {
+        return message.to_string();
+    };
+    let provider = provider_name.or_else(|| {
+        metadata.and_then(|metadata| metadata.get("provider_name")).and_then(Value::as_str)
+    });
+    let detail = adk_core::upstream_excerpt(&raw);
+    match provider {
+        Some(provider) => format!("{message} ({provider}): {detail}"),
+        None => format!("{message}: {detail}"),
+    }
 }
 
 fn status_category_and_code(status_code: u16) -> (ErrorCategory, &'static str) {
@@ -193,7 +260,11 @@ fn attach_error_payload_details(
         error.details.metadata.extend(metadata);
     }
 
-    error
+    // `code` stays for compatibility; `provider_error_code` follows the shared rule.
+    crate::error_metadata::with_first_code(
+        error,
+        [payload.error.code.as_ref().and_then(Value::as_str), payload.error.r#type.as_deref()],
+    )
 }
 
 fn retry_after_from_headers(headers: &HeaderMap) -> Option<Duration> {
@@ -243,9 +314,13 @@ fn retry_after_from_metadata_value(metadata: &Value) -> Option<Duration> {
 
 #[cfg(test)]
 mod tests {
-    use super::{api_error_to_adk_error, parse_retry_after_value, stream_error_to_adk_error};
+    use super::{
+        api_error_to_adk_error, parse_retry_after_value, stream_error_to_adk_error,
+        with_upstream_detail,
+    };
     use crate::openrouter::stream::OpenRouterStreamError;
     use adk_core::ErrorCategory;
+    use adk_core::UPSTREAM_EXCERPT_BYTES;
     use chrono::Utc;
     use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
     use serde_json::json;
@@ -344,6 +419,79 @@ mod tests {
         assert_eq!(error.code, "model.openrouter.provider_overloaded");
         assert_eq!(error.details.upstream_status_code, Some(529));
         assert_eq!(error.details.metadata.get("sequence_number"), Some(&json!(7)));
+        assert_eq!(error.details.metadata.get("code"), Some(&json!(529)));
+        assert_eq!(
+            error.details.metadata.get("provider_error_code"),
+            Some(&json!("provider_overloaded"))
+        );
         assert_eq!(error.retry.retry_after_ms, Some(1500));
+    }
+
+    #[test]
+    fn http_errors_record_provider_error_code() {
+        let error = api_error_to_adk_error(
+            400,
+            &HeaderMap::new(),
+            &json!({"error": {
+                "message": "context too long",
+                "code": "context_length_exceeded",
+                "type": "invalid_request_error"
+            }})
+            .to_string(),
+        );
+        assert_eq!(error.details.metadata.get("code"), Some(&json!("context_length_exceeded")));
+        assert_eq!(
+            error.details.metadata.get("provider_error_code"),
+            Some(&json!("context_length_exceeded"))
+        );
+
+        let numeric = api_error_to_adk_error(
+            402,
+            &HeaderMap::new(),
+            &json!({"error": {"message": "no credits", "code": 402}}).to_string(),
+        );
+        assert_eq!(numeric.details.metadata.get("code"), Some(&json!(402)));
+        assert_eq!(numeric.details.metadata.get("provider_error_code"), None);
+    }
+
+    #[test]
+    fn upstream_errors_carry_the_provider_explanation() {
+        let raw = "google/gemma-4-31b-it:free is temporarily rate-limited upstream. Please retry shortly.";
+        let error = api_error_to_adk_error(
+            429,
+            &HeaderMap::new(),
+            &json!({"error": {
+                "message": "Provider returned error",
+                "code": 429,
+                "metadata": {"raw": raw, "provider_name": "Google AI Studio", "is_byok": false}
+            }})
+            .to_string(),
+        );
+        assert_eq!(error.message, format!("Provider returned error (Google AI Studio): {raw}"));
+        assert_eq!(error.category, ErrorCategory::RateLimited);
+
+        let stream = stream_error_to_adk_error(
+            &OpenRouterStreamError {
+                message: "Provider returned error".to_string(),
+                metadata: Some(json!({"raw": {"error": "overloaded"}})),
+                ..Default::default()
+            },
+            None,
+        );
+        assert_eq!(stream.message, r#"Provider returned error: {"error":"overloaded"}"#);
+    }
+
+    #[test]
+    fn upstream_detail_is_capped_and_skipped_when_redundant() {
+        let long = "é".repeat(UPSTREAM_EXCERPT_BYTES);
+        let message = with_upstream_detail("failed", None, Some(&json!({"raw": long})));
+        assert!(message.len() <= "failed: ".len() + UPSTREAM_EXCERPT_BYTES);
+        assert!(message.ends_with('é'));
+
+        let echoed = format!("Invalid value: {}", "x".repeat(4 * UPSTREAM_EXCERPT_BYTES));
+        assert_eq!(with_upstream_detail(&echoed, None, None).len(), UPSTREAM_EXCERPT_BYTES);
+
+        assert_eq!(with_upstream_detail("same", None, Some(&json!({"raw": "same"}))), "same");
+        assert_eq!(with_upstream_detail("plain", Some("x"), Some(&json!({}))), "plain");
     }
 }

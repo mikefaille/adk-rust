@@ -58,6 +58,20 @@ pub enum RealtimeError {
     #[error("Tool execution error: {0}")]
     ToolError(String),
 
+    /// An output guardrail blocked the model's text or transcript; the response was
+    /// interrupted and the text was not persisted.
+    #[error("output blocked by guardrail {guardrail}: {reason}")]
+    OutputBlocked {
+        /// The guardrail that blocked the text.
+        guardrail: String,
+        /// Why it blocked, as the guardrail reported.
+        reason: String,
+    },
+
+    /// The run's spend ledger refused to reserve the next response, so the session ended.
+    #[error("spend ledger refused the response: {0}")]
+    SpendRefused(String),
+
     /// Server returned an error.
     #[error("Server error: {code} - {message}")]
     ServerError {
@@ -134,6 +148,35 @@ impl From<crate::livekit::LiveKitError> for RealtimeError {
 }
 
 impl RealtimeError {
+    /// The error's variant as a fixed name, which carries none of its message and so may be
+    /// logged whatever the payload rule.
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            Self::ConnectionError(_) => "connection",
+            Self::MessageError(_) => "message",
+            Self::Protocol(_) => "protocol",
+            Self::AuthError(_) => "auth",
+            Self::NotConnected => "not_connected",
+            Self::SessionClosed => "session_closed",
+            Self::ConfigError(_) => "config",
+            Self::AudioFormatError(_) => "audio_format",
+            Self::ToolError(_) => "tool",
+            Self::OutputBlocked { .. } => "output_blocked",
+            Self::SpendRefused(_) => "spend_refused",
+            Self::ServerError { .. } => "server",
+            Self::Timeout(_) => "timeout",
+            Self::SerializationError(_) => "serialization",
+            Self::ProviderError(_) => "provider",
+            Self::IoError(_) => "io",
+            Self::OpusCodecError(_) => "opus_codec",
+            Self::WebRTCError(_) => "webrtc",
+            Self::LiveKitError(_) => "livekit",
+            #[cfg(feature = "livekit")]
+            Self::LiveKitNativeError(_) => "livekit_native",
+            Self::WriteFailed { .. } => "write_failed",
+        }
+    }
+
     /// Create a new connection error.
     pub fn connection<S: Into<String>>(msg: S) -> Self {
         Self::ConnectionError(msg.into())

@@ -1,0 +1,55 @@
+[package]
+name = "harness-agent-example"
+version = "0.0.1"
+edition = "2024"
+publish = false
+description = "Scripted and live scenarios for the adk-harness HarnessAgent (spec 3.1)"
+
+[workspace]
+
+[dependencies]
+adk-core = { path = "../../adk-core" }
+adk-agent = { path = "../../adk-agent", features = ["coding"] }
+adk-devtools = { path = "../../adk-devtools" }
+adk-harness = { path = "../../adk-harness", default-features = false, features = ["runner", "skills", "sandbox", "memory", "team", "team-acp", "graph", "sqlite", "web", "web-fixture", "mcp", "hooks", "payments", "docker", "managed", "browser", "computer-use", "voice"] }
+# H5: the voice surface over Gemini Live or the OpenAI Realtime API, and the scripted
+# realtime provider of the scripted scenario.
+adk-realtime = { path = "../../adk-realtime", features = ["integration", "scripted", "gemini", "openai"] }
+# The H10 pack scenarios: adk-browser's toolset for the baseline, adk-computer-use's contracts
+# for the in-process desktop runtime.
+adk-browser = { path = "../../adk-browser" }
+adk-computer-use = { path = "../../adk-computer-use" }
+# A test enforcer for the S3 scenario implements the sandbox's `SandboxEnforcer`.
+adk-sandbox = { path = "../../adk-sandbox" }
+adk-tool = { path = "../../adk-tool", features = ["mcp", "mcp-sampling"] }
+# The H8 scenario: adk-payments' tools, journal and guardrails, and their scope guard.
+adk-payments = { path = "../../adk-payments" }
+adk-auth = { path = "../../adk-auth" }
+# The scripted MCP server of the H12 scenarios runs on rmcp's server side.
+rmcp = { version = "3.1", features = ["server", "client", "elicitation"] }
+chrono = "0.4"
+adk-graph = { path = "../../adk-graph", features = ["sqlite"] }
+adk-server = { path = "../../adk-server", features = ["background", "approvals", "agent-engine"] }
+# H9: the same harness behind Launcher, ServerBuilder, serve_agent_engine and the managed runtime.
+adk-cli = { path = "../../adk-cli", default-features = false, features = ["harness"] }
+adk-managed = { path = "../../adk-managed", features = ["gemini", "openai", "anthropic"] }
+axum = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+adk-memory = { path = "../../adk-memory", features = ["embedding-trait"] }
+adk-model = { path = "../../adk-model", features = ["gemini", "openai", "anthropic", "ollama"] }
+adk-runner = { path = "../../adk-runner" }
+adk-session = { path = "../../adk-session", features = ["sqlite"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite"] }
+anyhow = "1.0"
+async-trait = "0.1"
+dotenvy = "0.15"
+futures = "0.3"
+serde_json = "1.0"
+tempfile = "3"
+tokio = { version = "1.40", features = ["full"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[features]
+# H10, the fully local posture: the in-process ONNX embedder (ort downloads the onnxruntime
+# binary at build time) and the encrypted store (the OS keychain crate).
+local = ["adk-harness/memory-embeddings-local", "adk-harness/encrypted"]

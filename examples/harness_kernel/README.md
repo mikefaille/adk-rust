@@ -1,0 +1,59 @@
+# harness_kernel
+
+Scenarios for the agent kernel (`adk-kernel`, spec 3.2 §5, §11). Every pass condition is
+asserted on stores, processes, files and audit records, never on model prose.
+
+## Scripted scenarios
+
+No keys needed. Each scenario boots a real kernel — a durable worker per queue, the
+scheduler, SQLite stores in `harness.db` and the control plane — over a harness on a
+scripted model, built with `Harness::kernel` as `adk-rust up` builds it, and prints a
+main-versus-branch table. `main` has no kernel, so its cells read `not run, expected: …`, stating what `main`
+does instead.
+
+```bash
+cargo run                          # every scripted scenario
+cargo run -- k5_one_job_many_windows
+```
+
+| Scenario | What passes |
+|---|---|
+| `k1_leave_it_running` | K1 without service installation, on a manual clock the run store and the kernel share: a nightly audit is scheduled two hours ahead, the kernel stops, the clock moves eight hours on while it is down, and the kernel boots again; nothing ran while it was down, the next boot runs the missed firing exactly once, the run completes, the file is written once, `ps` shows the process `Completed`, and the replica's signed audit log verifies across the restart once it signs a checkpoint |
+| `k4_it_proposes_its_own_work` | K4: in Ask, a turn's `propose_followup` call puts a `proposed` item on the agenda and in the inbox (approve, edit, reject) and nothing runs for a second; a phone on loopback HTTP approves it; it runs as a `Proposed` process whose parent is the proposing turn, and `kernel.agenda.proposed` and `.approved` are audited. In Auto at 23:00, on a manual clock, the policy schedules it, nothing starts inside the 22:00–07:00 quiet hours, and it runs at 07:01 |
+| `k8_a_message_preempts_background_work` | K8: three background jobs hold their first model call at a quota of three; a typed question runs and completes at once; the youngest job is preempted by it, parks at its next checkpoint, is requeued (`kernel.process.suspended`, `.requeued`) and completes with its read run once; every job completes; sampling shows at most three admitted processes |
+| `k5_one_job_many_windows` | K5: a turn spawned from a terminal on the socket holds its `bash` call; the terminal goes away; a phone on loopback HTTP approves the call from the inbox; the run resumes and the command runs once with no terminal attached; a new shell attaches and sees the same process, completed, and the call's answer in the transcript; the spawn and the attach are recorded as `kernel.control` with their transport |
+| `k6_drivers_you_can_trust` | K6 on a real stdio MCP server (this binary, `serve-notes-driver`): mounted as an approval and run under the OS sandbox; its `read` tool runs without asking and its declarations are pinned; killed, it restarts with backoff (`crashed`, `restarting`, `running` events); a redeclared tool is `needsReapproval` and its call is held for a person; `reapprove` restores it, the held call completes, and every step is in the audit log |
+| `k7_partitions` | K7: home and work, each run by its own harness on one kernel over one `harness.db`, with partitions and facts in SQLite. The work agent's read of a home fact is denied at the policy and audited; the coordinator's read of a work fact parks its process until it is approved in the inbox, its identical second read runs without asking, the finished run holds no grant, and the next process asks again; every crossing is a `kernel.partition.crossing` record without the query |
+
+## Live scenarios
+
+Most live scenarios run the `adk-rust up` binary in a private home and reach it over its
+control plane, as any surface does. K2, K8 and K9 need controls the binary does not expose —
+a manual clock, model calls held until the scenario releases them, two replicas over one
+store — so they run the kernel in this process, built with `Harness::kernel` as `up` builds
+it, and need no binary.
+
+```bash
+cargo build -p adk-cli --bin adk-rust          # from the workspace root
+cp .env.example .env                           # add the keys you have
+ADK_RUST_BIN=../../target/debug/adk-rust cargo run -- --live
+cargo run -- --live --provider anthropic --bin ../../target/debug/adk-rust
+cargo run -- --live live_k2_sleep_is_free_for_an_hour live_k8_a_message_preempts_background_work live_k9_one_switch_stops_everything
+```
+
+`HARNESS_ENV_FILE=/path/to/.env` loads keys from another file. The providers are
+`anthropic` (`claude-sonnet-5-5`) and `gemini` (`gemini-3.5-flash-lite`); one without a key
+is skipped.
+
+| Scenario | What passes |
+|---|---|
+| `live_k2_sleep_is_free_for_an_hour` | In process, Ask, on a `ManualClock` the run store and the kernel share: ten processes asleep on ten kinds of wake set pass an hour in one-minute steps with no model call, no lease at any ten-minute mark and nothing but the sleepers in the run store; `ps` lists all ten `Waiting` with their wake sets, no spend and no model calls, each asleep the hour. Past it, the time wake and the expiry run their sleepers and a schedule due at 90 minutes fires once, each answering on the live model; `ps` counts the woken turns' model calls and meters their spend; the other eight still sleep with no lease |
+| `live_k8_a_message_preempts_background_work` | In process, Ask, a partition quota of three: three background jobs that read `README.md` hold their first model call; a typed question reaches the model within one scheduler tick and completes on the live model while they wait; the youngest job is preempted by it, parks at its checkpoint and is requeued (`kernel.process.suspended`, `.requeued`); every job completes, the preempted one reading its file once; sampling shows at most three admitted processes |
+| `live_k9_one_switch_stops_everything` | In process, Auto: two kernel replicas over one SQLite file with a mirrored kill switch run six processes, three each, through ten numbered non-idempotent `step` calls, each told to call a step the freeze refused again when it resumes. Replica A freezes once every process passed its second step: replica B sees it within a second, no model or tool call starts on either replica more than a second after it, and all six park `Waiting` under the freeze with no lease, each replica parking its own three. The unfreeze resumes all six to completion; no call executed twice, every step ran exactly once, and the action ledger began each executed call once and recorded its outcome |
+| `live_k5_approve_from_another_process` | `up --mode ask`: the model's `bash` call is held; the client that started the turn disconnects; `adk-rust approvals --server … approve` in another process approves it over HTTP; the turn completes, the command ran exactly once, and a new client attaching sees the call in the transcript |
+| `live_k4_a_proposal_waits_for_approval` | `up --mode ask`: the model calls `propose_followup`; the item waits `proposed` and nothing runs; `adk-rust agenda approve <prefix>` in another process approves it; the follow-up runs as a `Proposed` process whose parent is the proposing turn and completes, any call it holds in Ask rejected by the scenario as an operator would; it answers in its own session |
+| `live_k3_file_change_wakes` | `up --mode ask`: a process spawned asleep on a `notes.md` file wake makes no model call; saving the file wakes it within two seconds; the turn reads the file with `read_file` and answers with its codeword |
+| `live_k6_supervised_driver` | `up --mode ask`: `adk-rust drivers mount --yes` shows the notes driver's command line, partitions and classes and mounts it; the model uses its `read` tool without approval; the driver, killed, restarts with backoff; a redeclared tool is listed `needsReapproval` and its call is held; `adk-rust drivers reapprove` restores it |
+| `live_parked_question_after_restart` | `up --mode ask`: the model's `send_note` is approved, the server asks before sending and the question waits in the inbox; the kernel stops and starts again; the answer completes the turn, the note is sent exactly once, and nothing is asked again |
+| `live_k10_proc` | Six weeks of history ending yesterday are seeded into the kernel home's ledger, two of them late finishes; `up --mode ask` runs a live turn, whose intent, tool call, turn and process rows reach the ledger with no prompt, file or answer in them; the pass of the day that ended records an observation, which the live model words as a neutral question; with long-term memory on, the observation waits in the agenda as a question and no process runs for it, `adk-rust agenda schedule` on it is refused, and `adk-rust agenda approve` confirms it, remembering its statement as a known fact whose source is the person; `adk-rust proc ledger --export` writes every row as the JSONL `cargo adk eval --ledger` reads (spec 3.2 §7.10) |
+| `live_k7_partitions` | `up` with `[[kernel.partitions]]` for home (the coordinator) and work: each partition's agent remembers a fact in its own scope; the work agent asks for the home fact and is denied at the policy; the coordinator asks for the work fact, its process parks until the crossing is approved in the inbox, it answers from work's memory, and the partition ledger shows the crossing held, approved, then let through for the rest of the run; `adk-rust partitions` in another process lists both partitions and `partitions set-mode work plan` changes the table |

@@ -187,6 +187,31 @@ impl adk_core::Agent for StreamingTestAgent {
     }
 }
 
+struct ErrorStreamingTestAgent;
+
+#[async_trait]
+impl adk_core::Agent for ErrorStreamingTestAgent {
+    fn name(&self) -> &str {
+        "error-stream-test-agent"
+    }
+
+    fn description(&self) -> &str {
+        "Streaming error test agent"
+    }
+
+    fn sub_agents(&self) -> &[Arc<dyn adk_core::Agent>] {
+        &[]
+    }
+
+    async fn run(
+        &self,
+        _ctx: Arc<dyn adk_core::InvocationContext>,
+    ) -> adk_core::Result<Pin<Box<dyn futures::Stream<Item = adk_core::Result<Event>> + Send>>>
+    {
+        Ok(Box::pin(stream::once(async { Err(adk_core::AdkError::model("provider unavailable")) })))
+    }
+}
+
 struct PartialReasoningStreamingTestAgent;
 
 #[async_trait]
@@ -1337,6 +1362,87 @@ async fn test_run_sse_compat_emits_profile_wrapped_event() {
 }
 
 #[tokio::test]
+async fn test_run_sse_adk_ui_emits_runtime_error_event() {
+    let agent = Arc::new(ErrorStreamingTestAgent);
+    let config = adk_server::ServerConfig::new(
+        Arc::new(adk_core::SingleAgentLoader::new(agent)),
+        Arc::new(adk_session::InMemorySessionService::new()),
+    );
+    let app = create_app(config);
+
+    let body = serde_json::json!({
+        "appName": "error-stream-test-agent",
+        "userId": "user1",
+        "sessionId": "session1",
+        "newMessage": {
+            "role": "user",
+            "parts": [{ "text": "hello" }]
+        }
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/run_sse")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body_str = String::from_utf8(body.to_vec()).unwrap();
+    // The model's message is withheld under the default `expose_error_details: false`.
+    assert!(body_str.contains("model.internal: Internal server error"));
+    assert!(!body_str.contains("provider unavailable"));
+    assert!(body_str.contains("error_code"));
+}
+
+#[tokio::test]
+async fn test_run_sse_wrapped_profile_emits_runtime_error_event() {
+    let agent = Arc::new(ErrorStreamingTestAgent);
+    let config = adk_server::ServerConfig::new(
+        Arc::new(adk_core::SingleAgentLoader::new(agent)),
+        Arc::new(adk_session::InMemorySessionService::new()),
+    );
+    let app = create_app(config);
+
+    let body = serde_json::json!({
+        "appName": "error-stream-test-agent",
+        "userId": "user1",
+        "sessionId": "session1",
+        "newMessage": {
+            "role": "user",
+            "parts": [{ "text": "hello" }]
+        },
+        "uiProtocol": "a2ui"
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/run_sse")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body_str = String::from_utf8(body.to_vec()).unwrap();
+    assert!(body_str.contains("\"ui_protocol\":\"a2ui\""));
+    assert!(body_str.contains("model.internal: Internal server error"));
+    assert!(!body_str.contains("provider unavailable"));
+    assert!(body_str.contains("error_code"));
+}
+
+#[tokio::test]
 async fn test_run_sse_compat_supports_protocol_native_ag_ui_transport_and_input() {
     let agent = Arc::new(StreamingTestAgent);
     let session_service = Arc::new(adk_session::InMemorySessionService::new());
@@ -1791,7 +1897,8 @@ async fn test_run_path_honors_ui_protocol_header() {
 #[tokio::test]
 async fn test_run_sse_cors_preflight_allows_protocol_header() {
     let config =
-        adk_server::ServerConfig::new(Arc::new(MockAgentLoader), Arc::new(MockSessionService));
+        adk_server::ServerConfig::new(Arc::new(MockAgentLoader), Arc::new(MockSessionService))
+            .with_security(adk_server::SecurityConfig::development());
     let app = create_app(config);
 
     let response = app
@@ -1812,6 +1919,10 @@ async fn test_run_sse_cors_preflight_allows_protocol_header() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get("access-control-allow-origin").and_then(|v| v.to_str().ok()),
+        Some("http://localhost:5173")
+    );
     let allow_headers = response
         .headers()
         .get("access-control-allow-headers")

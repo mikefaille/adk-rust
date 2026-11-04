@@ -3,14 +3,19 @@
 use super::config::AzureAIConfig;
 use super::convert;
 use crate::retry::{RetryConfig, execute_with_retry, is_retryable_model_error};
-use adk_core::{
-    AdkError, ErrorCategory, ErrorComponent, Llm, LlmRequest, LlmResponse, LlmResponseStream, Part,
-};
+use adk_core::{AdkError, ErrorComponent, Llm, LlmRequest, LlmResponse, LlmResponseStream, Part};
 use async_stream::try_stream;
 use async_trait::async_trait;
 use futures::StreamExt;
 use reqwest::Client;
 use serde_json::Value;
+
+/// Stream that ended, or whose connection failed, before a finish reason.
+const INCOMPLETE_STREAM: &str = "model.azure_ai.incomplete_stream";
+/// Stream chunk that is not valid JSON.
+const INVALID_CHUNK: &str = "model.azure_ai.invalid_chunk";
+/// Error frame the endpoint sent inside the stream.
+const STREAM_ERROR: &str = "model.azure_ai.stream_error";
 
 /// Azure AI Inference client for models hosted on Azure AI endpoints.
 ///
@@ -41,7 +46,9 @@ pub struct AzureAIClient {
 impl AzureAIClient {
     /// Create a new Azure AI Inference client from the given config.
     pub fn new(config: AzureAIConfig) -> Result<Self, AdkError> {
-        let client = Client::builder()
+        let client = crate::HttpTimeouts::default()
+            .apply(Client::builder())
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| AdkError::model(format!("Failed to create HTTP client: {e}")))?;
 
@@ -52,6 +59,38 @@ impl AzureAIClient {
             model: config.model,
             retry_config: RetryConfig::default(),
         })
+    }
+
+    /// Sets the connect and idle timeouts of the HTTP transport, so a stalled stream fails
+    /// with a `Timeout` error instead of holding the run.
+    ///
+    /// See [`HttpTimeouts`](crate::HttpTimeouts) for the defaults.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use std::time::Duration;
+    ///
+    /// use adk_model::azure_ai::{AzureAIClient, AzureAIConfig};
+    /// use adk_model::HttpTimeouts;
+    ///
+    /// let config = AzureAIConfig::new("https://my-endpoint.inference.ai.azure.com", "key", "model");
+    /// let client = AzureAIClient::new(config)?
+    ///     .with_timeouts(HttpTimeouts::new(Duration::from_secs(10), Duration::from_secs(120)))?;
+    /// # let _ = client;
+    /// # Ok::<(), adk_core::AdkError>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the Azure AI HTTP client cannot be built.
+    pub fn with_timeouts(mut self, timeouts: crate::HttpTimeouts) -> Result<Self, AdkError> {
+        self.client = timeouts
+            .apply(Client::builder())
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|e| AdkError::model(format!("Failed to create HTTP client: {e}")))?;
+        Ok(self)
     }
 
     /// Set the retry configuration, consuming and returning `self` for builder chaining.
@@ -82,6 +121,15 @@ impl AzureAIClient {
 
 #[async_trait]
 impl Llm for AzureAIClient {
+    fn max_cost_micro_usd(&self, request: &adk_core::LlmRequest) -> Option<u64> {
+        crate::pricing::PricingCatalog::standard().max_cost_micro_usd(
+            Some("azure-ai"),
+            self.name(),
+            request,
+            crate::pricing::request_output_cap(request),
+        )
+    }
+
     fn name(&self) -> &str {
         &self.model
     }
@@ -98,9 +146,14 @@ impl Llm for AzureAIClient {
     )]
     async fn generate_content(
         &self,
-        request: LlmRequest,
+        mut request: LlmRequest,
         stream: bool,
     ) -> Result<LlmResponseStream, AdkError> {
+        // Native items reach this provider only from the turns its own origin marks.
+        adk_core::history::retain_replayable(
+            &mut request.contents,
+            &adk_core::history::ProviderOrigin::new("azure-ai", &self.model),
+        );
         let usage_span = adk_telemetry::llm_generate_span("azure-ai", &self.model, stream);
         let api_url = self.api_url();
         let api_key = self.api_key.clone();
@@ -115,7 +168,7 @@ impl Llm for AzureAIClient {
             &request.tools,
             request.config.as_ref(),
             stream,
-        );
+        )?;
 
         let response_stream = try_stream! {
             let response = execute_with_retry(&retry_config, is_retryable_model_error, || {
@@ -134,7 +187,7 @@ impl Llm for AzureAIClient {
                         .await
                         .map_err(|e| AdkError::new(
                             ErrorComponent::Model,
-                            ErrorCategory::Unavailable,
+                            crate::http_timeouts::transport_category(&e),
                             "model.azure_ai.request",
                             format!("Azure AI error for endpoint={endpoint}: {e}"),
                         ).with_provider("azure-ai"))?;
@@ -142,23 +195,25 @@ impl Llm for AzureAIClient {
                     if !resp.status().is_success() {
                         let status = resp.status();
                         let status_code = status.as_u16();
+                        let retry_after = resp
+                            .headers()
+                            .get(reqwest::header::RETRY_AFTER)
+                            .and_then(|value| value.to_str().ok())
+                            .and_then(crate::retry::parse_retry_after);
                         let error_text = resp.text().await.unwrap_or_default();
-                        let category = match status_code {
-                            401 => ErrorCategory::Unauthorized,
-                            403 => ErrorCategory::Forbidden,
-                            404 => ErrorCategory::NotFound,
-                            408 => ErrorCategory::Timeout,
-                            429 => ErrorCategory::RateLimited,
-                            503 | 529 => ErrorCategory::Unavailable,
-                            _ if status_code >= 500 => ErrorCategory::Internal,
-                            _ => ErrorCategory::InvalidInput,
-                        };
-                        return Err(AdkError::new(
+                        let error = AdkError::new(
                             ErrorComponent::Model,
-                            category,
+                            crate::retry::category_for_status_code(status_code),
                             "model.azure_ai.api_error",
-                            format!("Azure AI error for endpoint={endpoint}, status={status}: {error_text}"),
-                        ).with_upstream_status(status_code).with_provider("azure-ai"));
+                            format!(
+                                "Azure AI error for endpoint={endpoint}, status={status}: {}",
+                                adk_core::upstream_excerpt(&error_text)
+                            ),
+                        ).with_upstream_status(status_code).with_provider("azure-ai");
+                        return Err(crate::retry::with_retry_after(
+                            crate::error_metadata::from_body(error, &error_text),
+                            retry_after,
+                        ));
                     }
 
                     Ok(resp)
@@ -168,21 +223,22 @@ impl Llm for AzureAIClient {
 
             if stream {
                 let mut byte_stream = response.bytes_stream();
-                let mut buffer = String::new();
+                let mut buffer = Vec::new();
+                let mut finished = false;
+                let mut terminal: Option<LlmResponse> = None;
 
                 // Accumulate tool calls across SSE chunks
                 let mut tool_call_accumulators: std::collections::HashMap<u32, (String, String, String)> =
                     std::collections::HashMap::new();
 
                 while let Some(chunk_result) = byte_stream.next().await {
-                    let chunk = chunk_result
-                        .map_err(|e| AdkError::model(format!("Azure AI stream error: {e}")))?;
+                    let chunk = chunk_result.map_err(|error| {
+                        crate::stream_error::interrupted("azure-ai", INCOMPLETE_STREAM, &error)
+                    })?;
 
-                    buffer.push_str(&String::from_utf8_lossy(&chunk));
+                    buffer.extend_from_slice(&chunk);
 
-                    while let Some(line_end) = buffer.find('\n') {
-                        let line = buffer[..line_end].trim().to_string();
-                        buffer = buffer[line_end + 1..].to_string();
+                    while let Some(line) = crate::sse::take_line(&mut buffer)? {
 
                         if line.is_empty() || line == "data: [DONE]" {
                             continue;
@@ -191,24 +247,42 @@ impl Llm for AzureAIClient {
                         if let Some(data) = line.strip_prefix("data: ") {
                             match serde_json::from_str::<Value>(data) {
                                 Ok(chunk_json) => {
+                                    if let Some(error) = chunk_json.get("error").filter(|error| !error.is_null()) {
+                                        Err(crate::stream_error::reported("azure-ai", STREAM_ERROR, error))?;
+                                    }
                                     // Accumulate tool call deltas
                                     accumulate_tool_calls(&chunk_json, &mut tool_call_accumulators);
 
-                                    let llm_resp = convert::parse_sse_chunk(&chunk_json);
+                                    let mut llm_resp = convert::parse_sse_chunk(&chunk_json);
+                                    if finished {
+                                        if let Some(usage) = llm_resp.usage_metadata
+                                            && let Some(response) = &mut terminal
+                                        {
+                                            response.usage_metadata = Some(usage);
+                                        }
+                                        continue;
+                                    }
+                                    // Tool deltas are incomplete until the finish event.
+                                    if let Some(content) = &mut llm_resp.content {
+                                        content.parts.retain(|part| !matches!(part, Part::FunctionCall { .. }));
+                                    }
 
                                     if llm_resp.turn_complete {
+                                        finished = true;
                                         // Emit accumulated tool calls if any
                                         if !tool_call_accumulators.is_empty() {
                                             let mut sorted: Vec<_> =
                                                 tool_call_accumulators.drain().collect();
                                             sorted.sort_by_key(|(idx, _)| *idx);
 
-                                            let parts: Vec<Part> = sorted
+                                            let calls = sorted
                                                 .into_iter()
                                                 .map(|(_, (id, name, args_str))| {
-                                                    let args: Value =
-                                                        serde_json::from_str(&args_str)
-                                                            .unwrap_or(serde_json::json!({}));
+                                                    let args = crate::tool_args::streamed_tool_arguments(
+                                                        "azure-ai",
+                                                        &name,
+                                                        &args_str,
+                                                    );
                                                     Part::FunctionCall {
                                                         name,
                                                         args,
@@ -216,49 +290,63 @@ impl Llm for AzureAIClient {
                                                         thought_signature: None,
                                                     }
                                                 })
-                                                .collect();
+                                                .collect::<Vec<Part>>();
 
-                                            yield LlmResponse {
-                                                content: Some(adk_core::Content {
-                                                    role: "model".to_string(),
-                                                    parts,
-                                                }),
-                                                finish_reason: llm_resp.finish_reason,
-                                                partial: false,
-                                                turn_complete: true,
-                                                ..Default::default()
-                                            };
-                                            continue;
+                                            let mut parts = llm_resp.content.take().map(|content| content.parts).unwrap_or_default();
+                                            parts.extend(calls);
+
+                                            llm_resp.content = Some(adk_core::Content {
+                                                role: "model".to_string(),
+                                                parts,
+                                            });
+                                            llm_resp.turn_complete = false;
                                         }
-
-                                        yield llm_resp;
-                                    } else if llm_resp.content.is_some() {
+                                        // Usage may arrive after the finish event. Do not let the
+                                        // runner stop polling before accounting and stream validation.
+                                        terminal = Some(llm_resp);
+                                    } else if llm_resp.content.is_some() || llm_resp.usage_metadata.is_some() {
                                         yield llm_resp;
                                     }
                                 }
-                                Err(e) => {
-                                    tracing::warn!("failed to parse Azure AI chunk: {e} - {data}");
-                                }
+                                Err(error) => Err(crate::stream_error::undecodable("azure-ai", INVALID_CHUNK, &error))?,
                             }
                         }
                     }
                 }
+                if !finished || buffer.iter().any(|byte| !byte.is_ascii_whitespace()) {
+                    Err(crate::stream_error::incomplete(
+                        "azure-ai",
+                        INCOMPLETE_STREAM,
+                        "the response finished",
+                    ))?;
+                }
+                if let Some(response) = terminal {
+                    yield response;
+                }
             } else {
-                let response_text = response.text().await
-                    .map_err(|e| AdkError::model(format!(
-                        "Azure AI response parse failed: {e}"
-                    )))?;
+                let response_text = response.text().await.map_err(|e| AdkError::new(
+                    ErrorComponent::Model,
+                    crate::http_timeouts::transport_category(&e),
+                    "model.azure_ai.request",
+                    format!("Azure AI response could not be read: {e}"),
+                ).with_provider("azure-ai"))?;
 
                 let response_json: Value = serde_json::from_str(&response_text)
                     .map_err(|e| AdkError::model(format!(
-                        "Azure AI response parse failed: {e}"
+                        "Azure AI response parse failed: {}",
+                        adk_core::json_error_summary(&e)
                     )))?;
 
                 yield convert::parse_response(&response_json);
             }
         };
 
-        Ok(crate::usage_tracking::with_usage_tracking(Box::pin(response_stream), usage_span))
+        Ok(crate::usage_tracking::with_priced_usage_tracking(
+            Box::pin(response_stream),
+            usage_span,
+            "azure-ai",
+            &self.model,
+        ))
     }
 }
 

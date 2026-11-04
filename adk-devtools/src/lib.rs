@@ -1,7 +1,7 @@
 //! # adk-devtools
 //!
 //! Developer tools for ADK-Rust coding agents — `read_file`, `write_file`,
-//! `edit_file`, `glob`, `grep`, and `bash` — all scoped to a sandboxed
+//! `edit_file`, `apply_patch`, `glob`, `grep`, and `bash` — all scoped to a sandboxed
 //! [`Workspace`].
 //!
 //! These are the inner-loop tools a coding agent needs: read and edit files,
@@ -11,34 +11,67 @@
 //!
 //! ## Quick start
 //!
-//! ```rust,ignore
+//! ```rust
 //! use adk_devtools::{DevToolset, Workspace};
-//! use adk_agent::LlmAgentBuilder;
 //! use std::sync::Arc;
 //!
-//! let workspace = Workspace::new("./my-repo");
-//! let agent = LlmAgentBuilder::new("coding-agent")
-//!     .model(model)
-//!     .toolset(Arc::new(DevToolset::new(workspace)))
-//!     .build()?;
+//! // `bash` is off by default; enable it only for agents that need a shell.
+//! let workspace = Workspace::new("./my-repo").allow_bash(true);
+//! assert!(workspace.bash_allowed());
+//!
+//! // Register with an agent: `LlmAgentBuilder::new("coding-agent").toolset(toolset)`.
+//! let toolset = Arc::new(DevToolset::new(workspace));
+//! # let _ = toolset;
 //! ```
 //!
 //! ## Sandboxing
 //!
 //! [`Workspace`] enforces **path containment** (no escaping the root),
-//! **read-only** mode (deny writes/bash), and a **bash timeout**. Phase 1 runs
-//! `bash` host-local; for strong isolation, run behind a containerized
-//! `CodeExecutor` (see `docs/design/coding-agent.md`). The policy vocabulary is
-//! aligned with `adk-code`'s `SandboxPolicy` and will integrate with it directly
-//! in a later phase.
+//! **read-only** mode (deny writes/bash), **opt-in bash** (off until
+//! [`Workspace::allow_bash`] enables it), a **bash timeout** that a call
+//! can shorten but not extend, and **secret exclusion**: `grep` and `glob` skip
+//! files matching [`DEFAULT_EXCLUDE_GLOBS`] and `read_file` refuses them with
+//! [`DevToolError::Excluded`]. `edit_file` requires a prior `read_file` by the same
+//! session and agent, and refuses a file that changed since with
+//! [`DevToolError::Stale`]: every read and write records the file's sha256 in a
+//! [`ReadLedger`], which a host can persist with [`Workspace::with_read_ledger`].
+//! `edit_file`, `write_file` and `apply_patch` also take `expect_sha256`, the content a
+//! decision approved, and write nothing when the file differs (spec 3.1 §7.26).
+//!
+//! `bash` runs host-local through [`HostLauncher`] with a cleared environment plus
+//! [`DEFAULT_ENV_ALLOWLIST`], so provider API keys in the agent process are not
+//! visible to commands. The command reads end of file from standard input, runs in
+//! a new session with no controlling terminal, and its process group is killed when
+//! the shell exits, so nothing it starts outlives the call. For strong isolation,
+//! give [`BashTool::with_launcher`] a [`CommandLauncher`] that wraps the script in a
+//! sandbox, or run commands behind a containerized `adk-code` executor (see
+//! `docs/design/coding-agent.md`). The policy vocabulary is aligned with
+//! `adk-code`'s `SandboxPolicy`.
 
+#[cfg(any(unix, windows))]
+mod beneath;
 mod error;
+mod launcher;
+mod read_ledger;
 mod toolset;
 mod workspace;
 
+pub mod patch;
 pub mod tools;
 
+/// A process a [`CommandLauncher`] started itself in a Job Object, which
+/// [`CommandLauncher::spawn_contained`] returns (Windows, spec 3.2 §10 W5).
+#[cfg(windows)]
+pub use adk_sandbox::process_tree::ContainedChild;
 pub use error::DevToolError;
-pub use tools::{BashTool, EditFileTool, GlobTool, GrepTool, ReadFileTool, WriteFileTool};
+pub use launcher::{CommandLauncher, HostLauncher, LaunchGuard};
+pub use read_ledger::{InMemoryReadLedger, ReadLedger, ReadScope, sha256_hex};
+pub use tools::{
+    ApplyPatchTool, BashTool, BoundedOutput, DEFAULT_MAX_INLINE_BYTES, EditFileTool, GlobTool,
+    GrepTool, INLINE_OUTPUT_CHARS, OutputFile, OutputStore, ReadFileTool, RunningCommand,
+    WriteFileTool, bound_output, sniff_inline_mime,
+};
 pub use toolset::DevToolset;
-pub use workspace::{DEFAULT_ENV_ALLOWLIST, Workspace};
+pub use workspace::{
+    DEFAULT_ENV_ALLOWLIST, DEFAULT_EXCLUDE_GLOBS, DEFAULT_MAX_OUTPUT_BYTES, Workspace,
+};

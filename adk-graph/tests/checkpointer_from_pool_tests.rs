@@ -19,7 +19,8 @@ fn checkpoint(thread: &str, id: &str, step: usize) -> Checkpoint {
         "step": step,
         "pending_nodes": ["next"],
         "metadata": {},
-        "created_at": "2026-08-20T00:00:00Z"
+        "created_at": "2026-08-20T00:00:00Z",
+        "version": 1
     }))
     .expect("test checkpoint must build")
 }
@@ -102,6 +103,8 @@ async fn from_pool_creates_the_full_schema() {
         "state",
         "step",
         "thread_id",
+        "version",
+        "pending_writes",
     ] {
         assert!(
             columns.iter().any(|c| c == required),
@@ -116,8 +119,8 @@ async fn from_pool_creates_the_full_schema() {
             .expect("index query");
 
     assert!(
-        indexes.iter().any(|i| i == "idx_graph_checkpoints_thread"),
-        "the thread index must be created on a caller-supplied pool; found {indexes:?}"
+        indexes.iter().any(|i| i == "idx_graph_checkpoints_thread_version"),
+        "the thread version index must be created on a caller-supplied pool; found {indexes:?}"
     );
 }
 
@@ -125,7 +128,7 @@ async fn from_pool_creates_the_full_schema() {
 ///
 /// Two checkpointers over one database is a plausible shape — a subgraph with its
 /// own handle, say — and the schema statements are all `IF NOT EXISTS` or
-/// deliberately ignored, so the second call must not fail.
+/// tolerate an existing column, so the second call must not fail.
 #[tokio::test]
 async fn adopting_the_same_pool_twice_succeeds() {
     let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.expect("pool");
@@ -148,5 +151,88 @@ async fn adopting_the_same_pool_twice_succeeds() {
         loaded.map(|c| c.checkpoint_id),
         Some("cp-twice".to_string()),
         "both checkpointers must address the same database"
+    );
+}
+
+/// Databases predating the interrupt/attempt/child-ledger columns retain their rows.
+#[tokio::test]
+async fn adopts_legacy_schema_without_losing_checkpoints() {
+    let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+    sqlx::query(
+        "CREATE TABLE graph_checkpoints (id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, \
+         state TEXT NOT NULL, step INTEGER NOT NULL, pending_nodes TEXT NOT NULL, \
+         metadata TEXT, created_at TEXT NOT NULL)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO graph_checkpoints VALUES \
+         ('legacy', 'legacy-thread', '{}', 1, '[]', '{}', '2026-08-20T00:00:00Z')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let cp = SqliteCheckpointer::from_pool(pool.clone()).await.unwrap();
+    let old = cp.load("legacy-thread").await.unwrap().unwrap();
+    assert_eq!((old.checkpoint_id, old.step), ("legacy".to_string(), 1));
+    cp.save(&checkpoint("new-thread", "new-checkpoint", 2)).await.unwrap();
+    let new = cp.load("new-thread").await.unwrap().unwrap();
+    assert_eq!((new.checkpoint_id, new.step), ("new-checkpoint".to_string(), 2));
+}
+
+/// A database written before checkpoints carried versions numbers its rows in
+/// creation order, so the newest stays the newest.
+#[tokio::test]
+async fn a_database_without_versions_is_numbered_in_creation_order() {
+    let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.expect("pool");
+    sqlx::query(
+        "CREATE TABLE graph_checkpoints (id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, \
+         state TEXT NOT NULL, step INTEGER NOT NULL, pending_nodes TEXT NOT NULL, metadata TEXT, \
+         created_at TEXT NOT NULL)",
+    )
+    .execute(&pool)
+    .await
+    .expect("legacy table");
+    for (id, created_at) in [("late", "2026-08-20T00:00:02Z"), ("early", "2026-08-20T00:00:01Z")] {
+        sqlx::query("INSERT INTO graph_checkpoints VALUES (?, 'legacy', '{}', 0, '[]', '{}', ?)")
+            .bind(id)
+            .bind(created_at)
+            .execute(&pool)
+            .await
+            .expect("legacy row");
+    }
+
+    let cp = SqliteCheckpointer::from_pool(pool).await.expect("migrate");
+    let listed: Vec<(String, u64)> = cp
+        .list("legacy")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|c| (c.checkpoint_id, c.version))
+        .collect();
+    assert_eq!(listed, vec![("early".to_string(), 1), ("late".to_string(), 2)]);
+    assert_eq!(cp.load("legacy").await.unwrap().map(|c| c.checkpoint_id), Some("late".to_string()));
+    cp.save(&checkpoint("legacy", "next", 1)).await.expect_err("version 1 is behind");
+}
+
+/// Only the duplicate-column error is tolerated while adding late columns; any
+/// other schema failure is reported instead of leaving a half-migrated table.
+#[tokio::test]
+async fn a_failed_column_addition_is_reported() {
+    let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.expect("pool");
+    // A view satisfies CREATE TABLE IF NOT EXISTS but refuses ADD COLUMN.
+    sqlx::query("CREATE VIEW graph_checkpoints AS SELECT 'id' AS id")
+        .execute(&pool)
+        .await
+        .expect("view");
+
+    let error = match SqliteCheckpointer::from_pool(pool).await {
+        Ok(_) => panic!("adding a column to a view must fail the schema step"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(&error, adk_graph::GraphError::CheckpointError(message) if message.contains("view")),
+        "unexpected error: {error}"
     );
 }

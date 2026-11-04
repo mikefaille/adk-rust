@@ -53,7 +53,11 @@ pub struct EvaluationCriteria {
     #[serde(default)]
     pub hallucination_score: Option<f64>,
 
-    /// Custom criteria for extensibility
+    /// Criteria your own code scores; carried with the configuration for it.
+    ///
+    /// [`Evaluator`](crate::Evaluator) does not score them, so they do not count toward
+    /// [`has_criteria`](Self::has_criteria): a configuration with only custom criteria is
+    /// rejected like an empty one.
     #[serde(default)]
     pub custom: Vec<CustomCriterion>,
 }
@@ -106,7 +110,29 @@ impl EvaluationCriteria {
         self
     }
 
-    /// Check if any criteria are defined
+    /// Whether any criterion [`Evaluator`](crate::Evaluator) scores has a threshold.
+    ///
+    /// [`custom`](Self::custom) criteria are not counted, since the evaluator does not score
+    /// them.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use adk_eval::EvaluationCriteria;
+    /// use adk_eval::criteria::CustomCriterion;
+    ///
+    /// let custom_only = EvaluationCriteria {
+    ///     custom: vec![CustomCriterion {
+    ///         name: "tone".to_string(),
+    ///         description: "The reply is friendly".to_string(),
+    ///         threshold: 0.8,
+    ///         config: serde_json::Value::Null,
+    ///     }],
+    ///     ..Default::default()
+    /// };
+    /// assert!(!custom_only.has_criteria());
+    /// assert!(custom_only.with_response_similarity(0.8).has_criteria());
+    /// ```
     pub fn has_criteria(&self) -> bool {
         self.tool_trajectory_score.is_some()
             || self.response_similarity.is_some()
@@ -114,17 +140,26 @@ impl EvaluationCriteria {
             || self.rubric_quality_score.is_some()
             || self.safety_score.is_some()
             || self.hallucination_score.is_some()
-            || !self.custom.is_empty()
     }
 }
 
 /// Configuration for tool trajectory matching
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolTrajectoryConfig {
-    /// Require tools to be called in exact order
+    /// Require tools to be called in the expected order (default `true`).
+    ///
+    /// Applies to both [`ToolTrajectoryScorer::score`](crate::ToolTrajectoryScorer::score)
+    /// and [`ToolTrajectoryScorer::compare`](crate::ToolTrajectoryScorer::compare).
     #[serde(default = "default_true")]
     pub strict_order: bool,
-    /// Require exact argument match (vs partial)
+    /// Require exact argument match instead of a subset match (default `false`).
+    ///
+    /// With `false`, expected arguments match when every expected key is present in the
+    /// actual call with a matching value, recursively; extra keys are allowed at any depth.
+    /// With `true`, objects must have the same keys at every depth. In both modes arrays
+    /// match element by element, numbers compare by value (`1` matches `1.0`), and an
+    /// expected tool use without `args` matches any arguments. See
+    /// [`ToolUse::matches`](crate::ToolUse::matches).
     #[serde(default)]
     pub strict_args: bool,
 }
@@ -191,6 +226,10 @@ pub struct SemanticMatchConfig {
     #[serde(default = "default_judge_model")]
     pub judge_model: String,
     /// Custom prompt for the judge (optional)
+    ///
+    /// `{expected}` and `{actual}` are replaced with the two responses. The prompt must
+    /// ask for an `EQUIVALENT: YES/NO/PARTIAL` line and a `SCORE:` line from 0.0 to 1.0;
+    /// a reply without either is a judge error.
     pub custom_prompt: Option<String>,
 }
 
@@ -315,6 +354,20 @@ mod tests {
     #[test]
     fn test_default_criteria() {
         let criteria = EvaluationCriteria::default();
+        assert!(!criteria.has_criteria());
+    }
+
+    #[test]
+    fn custom_criteria_alone_are_not_criteria() {
+        let criteria = EvaluationCriteria {
+            custom: vec![CustomCriterion {
+                name: "tone".to_string(),
+                description: "friendly".to_string(),
+                threshold: 0.5,
+                config: serde_json::Value::Null,
+            }],
+            ..Default::default()
+        };
         assert!(!criteria.has_criteria());
     }
 }

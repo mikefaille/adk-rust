@@ -6,7 +6,7 @@
 use super::super::elicitation::AdkClientHandler;
 use super::super::toolset::McpToolset;
 use super::config::{McpServerConfig, RestartPolicy};
-use super::status::ServerStatus;
+use super::status::{ServerStatus, ServerStatusTransition, StatusSender};
 
 /// Tracks exponential backoff state for auto-restart attempts.
 ///
@@ -73,6 +73,43 @@ pub(crate) struct McpServerEntry {
     pub child: Option<tokio::process::Child>,
     /// Exponential backoff state for auto-restart.
     pub backoff: BackoffState,
+    /// Advanced by every stop, so a handshake that finishes after one is discarded.
+    pub generation: u64,
+    /// Serializes starts of this server without holding the registry lock.
+    pub start_gate: std::sync::Arc<tokio::sync::Mutex<()>>,
+    /// Cancels the handshake in progress, if any, when the server is stopped.
+    pub startup_cancel: tokio_util::sync::CancellationToken,
+}
+
+impl McpServerEntry {
+    /// A stopped (or, when `config.disabled`, disabled) entry for `config`.
+    pub fn new(config: McpServerConfig) -> Self {
+        let status = if config.disabled { ServerStatus::Disabled } else { ServerStatus::Stopped };
+        let backoff = BackoffState::new(&config.restart_policy);
+        Self {
+            config,
+            status,
+            toolset: None,
+            child: None,
+            backoff,
+            generation: 0,
+            start_gate: std::sync::Arc::default(),
+            startup_cancel: tokio_util::sync::CancellationToken::new(),
+        }
+    }
+
+    /// Moves server `id` to `to`, publishing the transition on `events` when the status
+    /// changes (spec 3.2 §10 T1).
+    ///
+    /// Callers hold the registry's write lock, so the channel's order is the order of the
+    /// changes.
+    pub fn set_status(&mut self, id: &str, to: ServerStatus, events: &StatusSender) {
+        let from = std::mem::replace(&mut self.status, to);
+        if from != to {
+            // Without a subscriber `send` fails; the change itself is already recorded.
+            let _ = events.send(ServerStatusTransition { id: id.to_string(), from, to });
+        }
+    }
 }
 
 #[cfg(test)]
@@ -205,13 +242,7 @@ mod tests {
             lifecycle: Default::default(),
             task_config: Default::default(),
         };
-        let entry = McpServerEntry {
-            backoff: BackoffState::new(&config.restart_policy),
-            config,
-            status: ServerStatus::Stopped,
-            toolset: None,
-            child: None,
-        };
+        let entry = McpServerEntry::new(config);
         assert_eq!(entry.status, ServerStatus::Stopped);
         assert!(entry.toolset.is_none());
         assert!(entry.child.is_none());

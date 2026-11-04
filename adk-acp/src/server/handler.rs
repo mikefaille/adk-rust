@@ -30,7 +30,7 @@ use super::modes::{
     self, SessionControls, config_state_key, config_value_is_valid, mode_is_advertised,
     option_with_current_value,
 };
-use super::permission::PermissionBridge;
+use super::permission::{PermissionBridge, StandingPermissions};
 use super::streamer::ResponseStreamer;
 use agent_client_protocol::schema::v1::{
     AvailableCommandsUpdate, ConfigOptionUpdate, CurrentModeUpdate, SessionConfigId,
@@ -80,6 +80,26 @@ pub struct AcpSessionHandler {
     sessions: Arc<Mutex<HashMap<String, SessionState>>>,
     shutdown_token: CancellationToken,
     session_controls: Option<Arc<dyn SessionControls>>,
+    /// Where "always" answers to permission requests are remembered (spec 3.3 §10 A1).
+    standing_permissions: Option<Arc<dyn StandingPermissions>>,
+    /// Prompts running now, which shutdown waits for.
+    running_prompts: tokio::sync::watch::Sender<usize>,
+}
+
+/// Counts one prompt as running until it is dropped, however the prompt ends.
+pub(crate) struct RunningPrompt<'a>(&'a tokio::sync::watch::Sender<usize>);
+
+impl<'a> RunningPrompt<'a> {
+    fn start(running: &'a tokio::sync::watch::Sender<usize>) -> Self {
+        running.send_modify(|count| *count += 1);
+        Self(running)
+    }
+}
+
+impl Drop for RunningPrompt<'_> {
+    fn drop(&mut self) {
+        self.0.send_modify(|count| *count = count.saturating_sub(1));
+    }
 }
 
 impl AcpSessionHandler {
@@ -97,6 +117,8 @@ impl AcpSessionHandler {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             shutdown_token,
             session_controls: config.session_controls.clone(),
+            standing_permissions: config.standing_permissions.clone(),
+            running_prompts: tokio::sync::watch::channel(0).0,
         })
     }
 
@@ -540,6 +562,7 @@ impl AcpSessionHandler {
             state.execution_token = Some(token.clone());
             (token, state.mcp.toolsets.clone())
         };
+        let _running = RunningPrompt::start(&self.running_prompts);
 
         let result = self
             .execute_prompt(&request, connection, cancellation_token.clone(), runtime_toolsets)
@@ -572,14 +595,21 @@ impl AcpSessionHandler {
 
         // Accumulated tool-confirmation decisions, keyed by function-call ID (the
         // key `RunConfig::tool_confirmation_decisions` uses, so a decision
-        // authorizes only the call it was granted for). The map grows one decision
-        // per resume as the runner pauses at each still-undecided confirmation.
+        // authorizes only the call it was granted for). The agent resumes each held
+        // call under its original ID, so a call the model issues again under a new
+        // ID is asked about again rather than authorized by an earlier answer.
         let mut decisions: HashMap<String, ToolConfirmationDecision> = HashMap::new();
+        // Each decision is bound to the fingerprint of the request it answers — the
+        // acting agent, the tool's origin, and the arguments — so a reused call ID on
+        // another agent's call, or on a tool another server answers, is not authorized.
+        let mut fingerprints: HashMap<String, String> = HashMap::new();
         // The first run carries the client's prompt content; every resume run
         // carries an empty user turn so the runner replays persisted history and
-        // continues from the paused tool call rather than re-appending the
-        // prompt (the documented resume shape).
+        // the agent resumes the held calls before its next model call.
         let mut is_resume = false;
+        // "Always" answers held back until the calls of their batch have run, so the rule
+        // cannot override an answer the person gave earlier in that batch (spec 3.3 §10 A1).
+        let mut deferred: Vec<(ToolConfirmationRequest, ToolConfirmationDecision)> = Vec::new();
 
         // The runner pauses at the first still-undecided confirmation and
         // resumes one decision at a time, so the number of iterations is bounded
@@ -588,10 +618,16 @@ impl AcpSessionHandler {
         // call that already has a decision.
         const MAX_CONFIRMATION_ROUNDS: usize = 64;
 
+        let scope = adk_core::ApprovalScope::new(
+            &self.app_name,
+            &self.user_id,
+            request.session_id.to_string(),
+        );
         for _round in 0..MAX_CONFIRMATION_ROUNDS {
             let run_config = RunConfig::builder()
                 .runtime_toolsets(runtime_toolsets.clone())
                 .tool_confirmation_decisions(decisions.clone())
+                .tool_confirmation_fingerprints(fingerprints.clone())
                 .build();
             let runner = Runner::builder()
                 .app_name(&self.app_name)
@@ -611,6 +647,7 @@ impl AcpSessionHandler {
 
             // Confirmations surfaced during this run, awaiting a client decision.
             let mut pending: Vec<ToolConfirmationRequest> = Vec::new();
+            let mut text_deltas = adk_core::EventTextDeltas::default();
 
             loop {
                 let result = tokio::select! {
@@ -630,6 +667,7 @@ impl AcpSessionHandler {
                             pending.push(confirmation.clone());
                             continue;
                         }
+                        let event = text_deltas.push(&event);
                         for update in ResponseStreamer::map_event(&event) {
                             connection
                                 .send_notification(SessionNotification::new(
@@ -649,6 +687,16 @@ impl AcpSessionHandler {
                 }
             }
 
+            // The resume run dispatched the batch the deferred answers came from, each call
+            // with the answer the person gave it, so the rules may now be remembered.
+            if let Some(standing) = &self.standing_permissions {
+                for (confirmation, decision) in deferred.drain(..) {
+                    if let Err(error) = standing.remember(&scope, &confirmation, decision).await {
+                        warn!(%error, tool.name = %confirmation.tool_name, "could not remember the ACP client's answer; it applied to its call only");
+                    }
+                }
+            }
+
             // No outstanding confirmations means the turn completed.
             if pending.is_empty() {
                 return Ok(StopReason::EndTurn);
@@ -658,13 +706,36 @@ impl AcpSessionHandler {
             // `session/request_permission` to the client, await the outcome, and
             // record the decision (cancellation → deny) against the exact call for
             // the next resume run.
+            // The person's own answers in this batch, which a rule remembered now could
+            // override on the resume run.
+            let mut answered: Vec<ToolConfirmationDecision> = Vec::new();
             for confirmation in &pending {
                 if cancellation_token.is_cancelled() {
                     return Ok(StopReason::Cancelled);
                 }
-                let decision =
-                    PermissionBridge::request(&connection, &request.session_id, confirmation)
-                        .await?;
+                // A call a rule covers — one remembered for an earlier call of this batch
+                // too — is decided by the rule, so no answer is asked for that the rule would
+                // override (spec 3.3 §10 A1).
+                if let Some(standing) = &self.standing_permissions
+                    && let Some(decision) = standing.standing_decision(&scope, confirmation).await
+                    && let Some(call_id) = confirmation.function_call_id.clone()
+                {
+                    fingerprints.insert(call_id.clone(), confirmation.fingerprint());
+                    decisions.insert(call_id, decision);
+                    continue;
+                }
+                // A call the store may remember is also offered "always" (spec 3.3 §10 A1).
+                let offer = match &self.standing_permissions {
+                    Some(standing) => standing.offer(&scope, confirmation).await,
+                    None => None,
+                };
+                let answer = PermissionBridge::request(
+                    &connection,
+                    &request.session_id,
+                    confirmation,
+                    offer.as_ref(),
+                )
+                .await?;
                 // A confirmation without a call ID cannot be bound to one call, so
                 // there is nothing safe to authorize.
                 let Some(call_id) = confirmation.function_call_id.clone() else {
@@ -674,7 +745,24 @@ impl AcpSessionHandler {
                             .into(),
                     ));
                 };
-                decisions.insert(call_id, decision);
+                if answer.always
+                    && let Some(standing) = &self.standing_permissions
+                {
+                    // The governed path lets a policy allow or deny override a held call's
+                    // own decision, so a rule that could cover an earlier call of this batch
+                    // the person answered the other way waits until that call has run.
+                    if answered.iter().any(|earlier| *earlier != answer.decision) {
+                        deferred.push((confirmation.clone(), answer.decision));
+                    } else if let Err(error) =
+                        standing.remember(&scope, confirmation, answer.decision).await
+                    {
+                        // The person decided this call; only remembering the answer failed.
+                        warn!(%error, tool.name = %confirmation.tool_name, "could not remember the ACP client's answer; it applies to this call only");
+                    }
+                }
+                answered.push(answer.decision);
+                fingerprints.insert(call_id.clone(), confirmation.fingerprint());
+                decisions.insert(call_id, answer.decision);
             }
             is_resume = true;
         }
@@ -1002,13 +1090,31 @@ impl AcpSessionHandler {
             .map_err(|e| AcpServerError::Internal(format!("failed to persist session state: {e}")))
     }
 
+    /// Counts a prompt as running, for [`drain_sessions`](Self::drain_sessions), until the
+    /// guard is dropped. A transport holds one until the prompt's answer is sent, so a drain
+    /// does not end between the prompt finishing and its answer going out.
+    pub(crate) fn running_prompt(&self) -> RunningPrompt<'_> {
+        RunningPrompt::start(&self.running_prompts)
+    }
+
     /// Number of active sessions on the connection.
     pub async fn active_session_count(&self) -> usize {
         self.sessions.lock().await.len()
     }
 
-    /// Cancel active work and release all connection-scoped session state.
-    pub async fn drain_sessions(&self, _timeout: std::time::Duration) {
+    /// Wait up to `timeout` for running prompts to finish, then cancel the rest and release
+    /// all connection-scoped session state.
+    ///
+    /// The connection must still be served while this waits, so the prompts' answers reach
+    /// the client; [`StdioTransport`](super::StdioTransport) does so after shutdown.
+    pub async fn drain_sessions(&self, timeout: std::time::Duration) {
+        let mut running = self.running_prompts.subscribe();
+        if tokio::time::timeout(timeout, running.wait_for(|count| *count == 0)).await.is_err() {
+            warn!(
+                shutdown.timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+                "ACP prompts still running at the shutdown timeout are cancelled"
+            );
+        }
         let mut sessions = self.sessions.lock().await;
         for state in sessions.values() {
             if let Some(token) = &state.execution_token {
@@ -1033,6 +1139,7 @@ async fn start_mcp_servers(
         toolsets: Vec::with_capacity(servers.len()),
         cancellations: Vec::with_capacity(servers.len()),
     };
+    let mut names = Vec::with_capacity(servers.len());
     for server in servers {
         let McpServer::Stdio(config) = server else {
             return Err(AcpServerError::MalformedMessage(
@@ -1084,8 +1191,58 @@ async fn start_mcp_servers(
         let cancellation = toolset.cancellation_token().await;
         resources.cancellations.push(Some(cancellation));
         resources.toolsets.push(Arc::new(toolset));
+        names.push(config.name.as_str());
     }
+    let checked = tokio::select! {
+        _ = cancellation.cancelled() => Err(AcpServerError::Execution(
+            "ACP session creation was cancelled while listing MCP tools".into(),
+        )),
+        checked = reject_tool_name_collisions(&names, &resources.toolsets) => checked,
+    };
+    checked?;
     Ok(resources)
+}
+
+/// Fails session setup when two attached MCP servers publish the same tool name.
+///
+/// The tools of every attached server share the session agent's namespace, and the
+/// agent fails every turn on a duplicate name, so the conflict is reported here, at
+/// setup, naming both servers. A server whose tools cannot be listed is left to the
+/// agent, which skips it for the turn.
+async fn reject_tool_name_collisions(
+    names: &[&str],
+    toolsets: &[Arc<dyn Toolset>],
+) -> Result<(), AcpServerError> {
+    let ctx: Arc<dyn adk_core::ReadonlyContext> =
+        Arc::new(adk_tool::SimpleToolContext::new("acp-session-setup"));
+    let listed =
+        futures::future::join_all(toolsets.iter().map(|toolset| toolset.tools(Arc::clone(&ctx))))
+            .await;
+    let mut owners = HashMap::<String, &str>::new();
+    for (server, listed) in names.iter().zip(listed) {
+        let tools = match listed {
+            Ok(tools) => tools,
+            Err(error) => {
+                warn!(
+                    server.name = server,
+                    %error,
+                    "could not list MCP tools during ACP session setup"
+                );
+                continue;
+            }
+        };
+        for tool in tools {
+            if let Some(owner) = owners.insert(tool.name().to_string(), server) {
+                return Err(AcpServerError::MalformedMessage(format!(
+                    "MCP servers '{owner}' and '{server}' both publish a tool named '{}'; the \
+                     tools of every MCP server attached to one ACP session share a namespace, so \
+                     attach only one of them",
+                    tool.name()
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_mcp_servers(servers: &[McpServer]) -> Result<(), AcpServerError> {
@@ -1250,6 +1407,64 @@ mod tests {
         assert!(
             matches!(error, AcpServerError::MalformedMessage(message) if message.contains("content"))
         );
+    }
+
+    /// Publishes a fixed list of tool names.
+    #[derive(Clone)]
+    struct Catalog(Vec<&'static str>);
+
+    impl rmcp::ServerHandler for Catalog {
+        fn get_info(&self) -> rmcp::model::InitializeResult {
+            rmcp::model::InitializeResult::new(
+                rmcp::model::ServerCapabilities::builder().enable_tools().build(),
+            )
+        }
+
+        async fn list_tools(
+            &self,
+            _params: Option<rmcp::model::PaginatedRequestParams>,
+            _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+        ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
+            let schema = Arc::new(serde_json::Map::new());
+            Ok(rmcp::model::ListToolsResult::with_all_items(
+                self.0
+                    .iter()
+                    .map(|name| rmcp::model::Tool::new(*name, "A tool.", Arc::clone(&schema)))
+                    .collect(),
+            ))
+        }
+    }
+
+    async fn catalog_toolset(names: Vec<&'static str>) -> Arc<dyn Toolset> {
+        let (server_io, client_io) = tokio::io::duplex(4096);
+        tokio::spawn(async move {
+            if let Ok(running) = Catalog(names).serve(server_io).await {
+                let _ = running.waiting().await;
+            }
+        });
+        Arc::new(McpToolset::new(().serve(client_io).await.unwrap()))
+    }
+
+    #[tokio::test]
+    async fn attached_mcp_servers_that_share_a_tool_name_are_rejected_at_setup() {
+        let toolsets = vec![
+            catalog_toolset(vec!["list_directory", "read_file"]).await,
+            catalog_toolset(vec!["read_file"]).await,
+        ];
+        let error = reject_tool_name_collisions(&["fs-a", "fs-b"], &toolsets)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("'fs-a' and 'fs-b' both publish a tool named 'read_file'"),
+            "{error}"
+        );
+
+        let toolsets = vec![
+            catalog_toolset(vec!["read_file"]).await,
+            catalog_toolset(vec!["write_file"]).await,
+        ];
+        reject_tool_name_collisions(&["reader", "writer"], &toolsets).await.unwrap();
     }
 
     #[test]

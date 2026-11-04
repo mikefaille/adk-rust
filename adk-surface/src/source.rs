@@ -1,0 +1,395 @@
+//! Where the engine reads and acts (spec 3.3 §6): the seam between the engine and a
+//! kernel, a harness or a plain runner.
+//!
+//! | Source | Reads | Acts |
+//! |---|---|---|
+//! | [`LocalSource`](crate::LocalSource) | the session store, the approval service, an in-process kernel's process table and `/proc` ledger, a harness's mode | decide, start a turn (kernel process, harness or runner), freeze and unfreeze, set the mode, standing rules |
+//! | [`ControlSource`](crate::ControlSource) | a kernel's control plane through `ControlClient`: attach, the approvals inbox, processes, health, the ledger | decide, spawn, freeze, unfreeze |
+//!
+//! A source holds no surface state (spec 3.2 K-I17): every call reads its stores.
+
+use std::time::Duration;
+
+use adk_core::{ApprovalDecision, ApprovalRequest, Event, RunState};
+use adk_harness::HarnessMode;
+use adk_kernel::QuietHours;
+use adk_kernel::proc::LedgerEntry;
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+
+use crate::agents::{
+    AgentChoices, AgentDetail, AgentDraft, AgentPreview, AgentPreviewRequest, EndedWork,
+};
+use crate::error::{Result, SurfaceError};
+use crate::origin::Caller;
+
+/// An agent's state as a source reports it, before projection into an
+/// [`AgentRow`](crate::AgentRow) (spec 3.3 §8.1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentState {
+    /// The agent's name: a kernel target or the runner's root agent.
+    pub name: String,
+    /// The session its latest work belongs to.
+    pub session_id: Option<String>,
+    /// The latest run's state.
+    pub state: RunState,
+    /// The run waits on a decision.
+    pub waiting_on_decision: bool,
+    /// The run sleeps until this time.
+    pub wake_at: Option<DateTime<Utc>>,
+    /// The run was suspended, by a stop or by hand.
+    pub suspended: bool,
+}
+
+/// Today's spend and the daily limit, in micro-USD (spec 3.3 §8.1 "Daily spending limit").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpendToday {
+    /// Spent today (UTC day).
+    pub spent: u64,
+    /// The daily limit, when one is set.
+    pub limit: Option<u64>,
+}
+
+/// How a source grants "Always allow" (spec 3.3 §8.2): the label it offers for a request,
+/// and the standing rule it creates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlwaysAllowOffer {
+    /// The button's words, such as "Always allow for this folder".
+    pub label: String,
+}
+
+/// The seam between the engine and what it shows (spec 3.3 §6).
+///
+/// Implement it to put the engine over another runtime; the methods with defaults report
+/// `surface.unsupported`, and the engine hides what a source cannot do.
+#[async_trait]
+pub trait Source: Send + Sync {
+    /// The application whose sessions the source serves.
+    fn app_name(&self) -> &str;
+
+    /// The session's events in store order, or `None` when `user` has no such session.
+    ///
+    /// The feed numbers events by their position here (spec 3.3 §6), so a source returns
+    /// every event, oldest first, exactly as its store keeps them.
+    async fn transcript(&self, user: &str, session: &str) -> Result<Option<Vec<Event>>>;
+
+    /// Waits until something the surfaces show may have changed, or `max` passes.
+    async fn changed(&self, max: Duration) {
+        tokio::time::sleep(max).await;
+    }
+
+    /// The decision requests `caller` may answer — of the caller's session `session` when
+    /// it is set (`InboxQuery::with_session`, spec 3.3 §10 C1) — open ones only when
+    /// `open_only`.
+    async fn requests(
+        &self,
+        caller: &Caller,
+        session: Option<&str>,
+        open_only: bool,
+    ) -> Result<Vec<ApprovalRequest>>;
+
+    /// One decision request.
+    async fn request(&self, id: &str) -> Result<Option<ApprovalRequest>>;
+
+    /// Records `decision` at `expected_version`: `ApprovalService::decide` (spec 3.3 §6,
+    /// S-I2). Never retried.
+    async fn decide(
+        &self,
+        id: &str,
+        expected_version: u64,
+        decision: ApprovalDecision,
+    ) -> Result<ApprovalRequest>;
+
+    /// Called once a decision the engine recorded resolved its request, so a call held in a
+    /// run that is not parked durably resumes. The default does nothing: an approval service
+    /// with a run store wakes a parked run itself.
+    async fn resolved(&self, request: &ApprovalRequest) -> Result<()> {
+        let _ = request;
+        Ok(())
+    }
+
+    /// [`resolved`](Self::resolved), for the answer `caller` gave: a source that runs the
+    /// resumed turn runs it as `caller` when the session is theirs, so the session's mode and
+    /// standing rules apply to it (spec 3.3 §6). The default calls `resolved`.
+    async fn resolved_by(&self, caller: &Caller, request: &ApprovalRequest) -> Result<()> {
+        let _ = caller;
+        self.resolved(request).await
+    }
+
+    /// What "Always allow" would create for `request`, when this source can create it.
+    async fn always_allow_offer(&self, request: &ApprovalRequest) -> Option<AlwaysAllowOffer> {
+        let _ = request;
+        None
+    }
+
+    /// Prepares the standing rule "Always allow" offered for `request`, as `caller`, before the
+    /// decision is recorded. Returns a commit the engine runs only once the decision approved
+    /// the request: never after a lost version, a denial, or an approval a quorum still waits
+    /// on.
+    async fn prepare_always_allow(
+        &self,
+        caller: &Caller,
+        request: &ApprovalRequest,
+    ) -> Result<Box<dyn RuleCommit>> {
+        let _ = (caller, request);
+        Err(SurfaceError::unsupported("always allow"))
+    }
+
+    /// The agents of `user`.
+    async fn agents(&self, user: &str) -> Result<Vec<AgentState>> {
+        let _ = user;
+        Ok(Vec::new())
+    }
+
+    /// The agent a message goes to when the person names none, by its name in the runtime: the
+    /// one the tray's "Ask Finance" box addresses (spec 3.3 §5.5). `None`, the default, when
+    /// the source has no single primary agent.
+    fn primary_agent(&self) -> Option<String> {
+        None
+    }
+
+    /// Whether the source rates `request`'s call high risk whatever the request says, so every
+    /// surface asks for what a high-risk call needs (spec 3.3 §7.2): a kernel rates so a tool
+    /// its mounted drivers declare `publish_public` or `financial` (spec 3.2 K-I9). `false`, the
+    /// default, leaves the request's own risk.
+    fn rates_high(&self, request: &ApprovalRequest) -> bool {
+        let _ = request;
+        false
+    }
+
+    /// Whether `request`'s call moves money by the source's account (spec 3.3 §7.4 rule 4): a
+    /// kernel answers for the tools its mounted drivers declare `financial` (spec 3.2 K-I9).
+    /// The engine also counts the payment tools; `false`, the default, adds nothing to them.
+    fn moves_money(&self, request: &ApprovalRequest) -> bool {
+        let _ = request;
+        false
+    }
+
+    /// Whether a turn of the session is running now.
+    async fn busy(&self, user: &str, session: &str) -> Result<bool> {
+        let _ = (user, session);
+        Ok(false)
+    }
+
+    /// Whether a call of the session waits on a decision, whoever may answer it: input typed
+    /// meanwhile is queued behind it (spec 3.3 §7.4 rule 2), even when the decision was routed
+    /// to approvers other than the session's owner. The default says no; the engine still
+    /// queues behind the decisions the caller may answer.
+    async fn waiting_on_decision(&self, user: &str, session: &str) -> Result<bool> {
+        let _ = (user, session);
+        Ok(false)
+    }
+
+    /// Starts a turn of the session on `text`.
+    async fn start_turn(&self, caller: &Caller, session: &str, text: &str) -> Result<()> {
+        let _ = (caller, session, text);
+        Err(SurfaceError::unsupported("sending a message"))
+    }
+
+    /// Starts a turn of the session on `text` that carries `call`, a call `caller` asked for
+    /// through a form an agent drew (spec 3.3 §7.4 rule 5, wave 4 decision 13). The session's
+    /// agent holds the call as itself, inside its own kernel target, under its own policy,
+    /// standing rules, acting context and approval store, for the person's decision — or
+    /// refuses it — before any model call. The default reports `surface.unsupported`.
+    ///
+    /// # Errors
+    ///
+    /// `surface.unsupported` when the source cannot start such a turn, or the source's error.
+    async fn request_call(
+        &self,
+        caller: &Caller,
+        session: &str,
+        text: &str,
+        call: adk_core::RequestedCall,
+    ) -> Result<()> {
+        let _ = (caller, session, text, call);
+        Err(SurfaceError::unsupported("sending a form an agent drew"))
+    }
+
+    /// Stops every agent (spec 3.3 §8.2 "Stop all").
+    async fn stop_all(&self, caller: &Caller, reason: &str) -> Result<()> {
+        let _ = (caller, reason);
+        Err(SurfaceError::unsupported("stop all"))
+    }
+
+    /// Resumes after a stop (spec 3.3 §8.2 "Resume all").
+    async fn resume_all(&self, caller: &Caller) -> Result<()> {
+        let _ = caller;
+        Err(SurfaceError::unsupported("resume all"))
+    }
+
+    /// Whether everything is stopped.
+    async fn stopped(&self) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// The session's mode, when the source runs a harness.
+    async fn mode(&self, user: &str, session: Option<&str>) -> Result<Option<HarnessMode>> {
+        let _ = (user, session);
+        Ok(None)
+    }
+
+    /// Whether [`set_mode`](Self::set_mode) opens a session the caller names that has no
+    /// events yet, so a new thread takes a mode before its first message (spec 3.3 §5.2). The
+    /// default says no: a session store cannot tell such a session from another person's,
+    /// so the engine sets the mode of the caller's own sessions only (S-I8).
+    fn opens_sessions(&self) -> bool {
+        false
+    }
+
+    /// Sets the session's mode.
+    async fn set_mode(&self, caller: &Caller, session: &str, mode: HarnessMode) -> Result<()> {
+        let _ = (caller, session, mode);
+        Err(SurfaceError::unsupported("changing the mode"))
+    }
+
+    /// Today's spend for `user`, and the daily limit.
+    async fn spend(&self, user: &str) -> Result<Option<SpendToday>> {
+        let _ = user;
+        Ok(None)
+    }
+
+    /// Quiet time, when the source knows it.
+    fn quiet_hours(&self) -> Option<QuietHours> {
+        None
+    }
+
+    /// Whether the source keeps the `/proc` ledger [`ledger`](Self::ledger) reads: without
+    /// one, "While you were away" is empty whatever ran (spec 3.3 §5.1).
+    fn keeps_ledger(&self) -> bool {
+        true
+    }
+
+    /// The `/proc` ledger rows since `since`, oldest first.
+    async fn ledger(&self, since: DateTime<Utc>) -> Result<Vec<LedgerEntry>> {
+        let _ = since;
+        Ok(Vec::new())
+    }
+
+    // -----------------------------------------------------------------------
+    // Agents a person adds (spec 3.3 §5.7)
+    // -----------------------------------------------------------------------
+
+    /// Whether the source keeps agents a person adds: the roster ends with **New agent**.
+    fn keeps_agents(&self) -> bool {
+        false
+    }
+
+    /// The agents `user` added, suggested ones included; none by default.
+    async fn agent_definitions(&self, user: &str) -> Result<Vec<AgentDetail>> {
+        let _ = user;
+        Ok(Vec::new())
+    }
+
+    /// One agent `user` added.
+    async fn agent(&self, user: &str, id: &str) -> Result<Option<AgentDetail>> {
+        let _ = (user, id);
+        Ok(None)
+    }
+
+    /// What a person may choose for an agent.
+    async fn agent_choices(&self) -> Result<AgentChoices> {
+        Err(SurfaceError::unsupported("agents of your own"))
+    }
+
+    /// What a change would let an agent do, with the digest it applies with.
+    async fn preview_agent(
+        &self,
+        caller: &Caller,
+        request: AgentPreviewRequest,
+    ) -> Result<AgentPreview> {
+        let _ = (caller, request);
+        Err(SurfaceError::unsupported("agents of your own"))
+    }
+
+    /// Adds the agent `draft` previewed with `digest`; `replaces` names the suggestion **Change
+    /// it first** ends.
+    async fn add_agent(
+        &self,
+        caller: &Caller,
+        draft: AgentDraft,
+        digest: &str,
+        replaces: Option<String>,
+    ) -> Result<AgentDetail> {
+        let _ = (caller, draft, digest, replaces);
+        Err(SurfaceError::unsupported("adding an agent"))
+    }
+
+    /// Changes `agent` at `version` to `draft`, previewed with `digest`.
+    async fn change_agent(
+        &self,
+        caller: &Caller,
+        agent: &str,
+        version: u64,
+        draft: AgentDraft,
+        digest: &str,
+    ) -> Result<AgentDetail> {
+        let _ = (caller, agent, version, draft, digest);
+        Err(SurfaceError::unsupported("changing an agent"))
+    }
+
+    /// Pauses `agent`.
+    async fn pause_agent(&self, caller: &Caller, agent: &str) -> Result<AgentDetail> {
+        let _ = (caller, agent);
+        Err(SurfaceError::unsupported("pausing an agent"))
+    }
+
+    /// Resumes `agent`, paused by hand.
+    async fn resume_agent(&self, caller: &Caller, agent: &str) -> Result<AgentDetail> {
+        let _ = (caller, agent);
+        Err(SurfaceError::unsupported("resuming an agent"))
+    }
+
+    /// Removes `agent` at `version`, previewed with `digest`; returns what ended.
+    async fn remove_agent(
+        &self,
+        caller: &Caller,
+        agent: &str,
+        version: u64,
+        digest: &str,
+    ) -> Result<EndedWork> {
+        let _ = (caller, agent, version, digest);
+        Err(SurfaceError::unsupported("removing an agent"))
+    }
+
+    /// Copies the person's standing rule `rule` to `agent`, pinned to it (S-I19); returns its
+    /// words.
+    async fn copy_rule_to_agent(&self, caller: &Caller, agent: &str, rule: &str) -> Result<String> {
+        let _ = (caller, agent, rule);
+        Err(SurfaceError::unsupported("copying a rule"))
+    }
+
+    /// The threads of `user`'s agent `agent`: each session it ran and when it last changed;
+    /// none by default. A removed agent's threads are read through it (spec 3.3 §5.7).
+    async fn agent_threads(&self, user: &str, agent: &str) -> Result<Vec<(String, DateTime<Utc>)>> {
+        let _ = (user, agent);
+        Ok(Vec::new())
+    }
+
+    /// The agent whose thread `session` is: its stamp, else the target of its latest run.
+    async fn agent_of_session(&self, user: &str, session: &str) -> Result<Option<String>> {
+        let _ = (user, session);
+        Ok(None)
+    }
+
+    /// Starts a thread of `session` with `agent` on `text` (spec 3.3 §5.7 "Threads"); the
+    /// default starts a turn of the source's own agent.
+    async fn start_turn_with(
+        &self,
+        caller: &Caller,
+        agent: &str,
+        session: &str,
+        text: &str,
+    ) -> Result<()> {
+        let _ = agent;
+        self.start_turn(caller, session, text).await
+    }
+}
+
+/// A standing rule prepared for "Always allow", granted only once the decision it belongs to
+/// was recorded.
+#[async_trait]
+pub trait RuleCommit: Send + Sync {
+    /// Grants the rule.
+    async fn commit(self: Box<Self>) -> Result<()>;
+}

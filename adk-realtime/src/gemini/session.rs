@@ -260,7 +260,7 @@ pub(crate) struct GeminiClientMessage<'a> {
     client_content: Option<GeminiClientContent>,
 }
 
-/// Configuration for Gemini 2.5 Live session resumption.
+/// Configuration for Gemini 3.8 Live session resumption.
 ///
 /// See the official documentation for details:
 /// https://ai.google.dev/gemini-api/docs/live-api/session-management
@@ -294,12 +294,110 @@ struct GeminiSetup {
     /// Voice-activity detection and interruption policy. Absent until now, so
     /// every `VadConfig` the caller set was accepted and discarded.
     #[serde(skip_serializing_if = "Option::is_none")]
-    realtime_input_config: Option<Value>,
+    realtime_input_config: Option<GeminiRealtimeInputConfig>,
+    /// Only sent when the caller asked for it
+    /// ([`RealtimeConfig::with_context_window_compression`]). Google documents that without
+    /// it a session ends after about 2 minutes with video and about 15 audio-only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context_window_compression: Option<GeminiContextWindowCompression>,
     /// Proactive behavior policy (`{ "proactiveAudio": true }`): lets the
     /// model ignore irrelevant audio instead of responding to it. Omitted
     /// unless the model honors it — see `capabilities_for`.
     #[serde(skip_serializing_if = "Option::is_none")]
     proactivity: Option<Value>,
+}
+
+/// `setup.realtimeInputConfig`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiRealtimeInputConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    automatic_activity_detection: Option<GeminiAutomaticActivityDetection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    activity_handling: Option<GeminiActivityHandling>,
+}
+
+/// `setup.realtimeInputConfig.automaticActivityDetection`.
+///
+/// `disabled` is always written in an emitted object: it decides who owns
+/// turn detection, and a partial object without it reached production once
+/// and correlated with a silent session (see `gemini_realtime_input_config`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiAutomaticActivityDetection {
+    disabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    silence_duration_ms: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prefix_padding_ms: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    start_of_speech_sensitivity: Option<GeminiStartOfSpeechSensitivity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    end_of_speech_sensitivity: Option<GeminiEndOfSpeechSensitivity>,
+}
+
+/// Wire values for `startOfSpeechSensitivity`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+enum GeminiStartOfSpeechSensitivity {
+    #[serde(rename = "START_SENSITIVITY_HIGH")]
+    High,
+    #[serde(rename = "START_SENSITIVITY_LOW")]
+    Low,
+}
+
+/// Wire values for `endOfSpeechSensitivity`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+enum GeminiEndOfSpeechSensitivity {
+    #[serde(rename = "END_SENSITIVITY_HIGH")]
+    High,
+    #[serde(rename = "END_SENSITIVITY_LOW")]
+    Low,
+}
+
+/// Wire values for `activityHandling`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+enum GeminiActivityHandling {
+    #[serde(rename = "START_OF_ACTIVITY_INTERRUPTS")]
+    StartOfActivityInterrupts,
+    #[serde(rename = "NO_INTERRUPTION")]
+    NoInterruption,
+}
+
+/// `setup.contextWindowCompression`.
+///
+/// `slidingWindow` is the only mechanism Google defines; an empty one keeps the server's
+/// defaults (compress at 80% of the context window, cut back to half of that).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiContextWindowCompression {
+    sliding_window: GeminiSlidingWindow,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trigger_tokens: Option<u64>,
+}
+
+/// `setup.contextWindowCompression.slidingWindow`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiSlidingWindow {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_tokens: Option<u64>,
+}
+
+impl GeminiContextWindowCompression {
+    /// Reads `extra.context_window_compression`: `true` for the server defaults, or an object
+    /// with optional `trigger_tokens` / `target_tokens`. Anything else leaves it off.
+    fn from_extra(extra: Option<&Value>) -> Option<Self> {
+        match extra?.get("context_window_compression")? {
+            Value::Bool(true) => Some(Self::default()),
+            Value::Object(opts) => Some(Self {
+                sliding_window: GeminiSlidingWindow {
+                    target_tokens: opts.get("target_tokens").and_then(Value::as_u64),
+                },
+                trigger_tokens: opts.get("trigger_tokens").and_then(Value::as_u64),
+            }),
+            _ => None,
+        }
+    }
 }
 
 /// `activityStart` / `activityEnd`.
@@ -335,8 +433,10 @@ struct GeminiInlineData {
 struct GeminiRealtimeInput<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     audio: Option<GeminiMediaChunk<'a>>,
+    /// Camera / screen frames. Not the deprecated `mediaChunks`: `gemini-3.8-live` drops
+    /// images sent there without an error, and the model reports seeing nothing.
     #[serde(skip_serializing_if = "Option::is_none")]
-    media_chunks: Option<Vec<GeminiMediaChunk<'a>>>,
+    video: Option<GeminiMediaChunk<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     text: Option<String>,
     /// The user has started speaking. Only legal while automatic activity
@@ -347,6 +447,10 @@ struct GeminiRealtimeInput<'a> {
     /// detection is disabled.
     #[serde(skip_serializing_if = "Option::is_none")]
     activity_end: Option<GeminiActivityMarker>,
+    /// The audio stream has paused: the server flushes the audio it cached, so its
+    /// activity detection can close the turn. Sent while automatic detection is on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    audio_stream_end: Option<bool>,
 }
 
 /// Borrows both fields: this is the hot path.
@@ -659,13 +763,16 @@ pub struct GeminiRealtimeSession {
     dialect: GeminiSchemaDialect,
     /// The normalized model ID sent in the initial setup frame.
     reconnect_model: String,
-    /// The most recent resumable handle received via `sessionResumptionUpdate`.
+    /// The most recent resumable handle received via `sessionResumptionUpdate`,
+    /// with the instant it was latched.
     ///
     /// Gemini Live emits a new handle roughly every 60 s when `resumable: true`.
     /// Only resumable handles are stored here; a non-resumable update must not
     /// overwrite the last safe point (the previous resumable handle remains the
-    /// best reconnect anchor).
-    last_resume_handle: Arc<ParkingMutex<Option<String>>>,
+    /// best reconnect anchor). A handle older than
+    /// [`RESUME_HANDLE_TTL`] is dropped rather than presented on reconnect.
+    last_resume_handle: Arc<ParkingMutex<Option<(String, std::time::Instant)>>>,
+
     /// Association map between function call IDs and tool names for wire-conforming `FunctionResponse` payloads.
     call_names: Arc<ParkingMutex<CallNamesMap>>,
     /// Watch channel broadcasting replacement deadlines announced by Gemini Live `goAway` frames.
@@ -689,9 +796,19 @@ pub struct GeminiRealtimeSession {
     /// current effective configuration, which is precisely the request the
     /// server just refused. See [`RealtimeRecovery::classify`].
     setup_complete_seen: Arc<AtomicBool>,
+    /// The latest `usageMetadata` the server sent on a message that carried nothing else,
+    /// attached to the next `ResponseDone` so a usage report separate from the turn is not
+    /// lost.
+    last_usage: Arc<ParkingMutex<Option<Value>>>,
+    /// Whether `voiceActivity` reported the user's speech onset and not yet its end, so the
+    /// `interrupted` report of the same speech is not a second speech event.
+    speech_active: Arc<AtomicBool>,
 }
 
 const MAX_CALL_NAMES_CAPACITY: usize = 1000;
+
+/// How long a latched resumption handle may be presented on reconnect.
+const RESUME_HANDLE_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
 #[derive(Debug, Default)]
 pub(crate) struct CallNamesMap {
@@ -733,6 +850,7 @@ impl CallNamesMap {
 /// Ensure the model ID is prefixed with "models/" as required by Gemini Live setup frames.
 pub fn normalize_model_id(model_id: &str) -> String {
     if model_id.starts_with("models/")
+        || model_id.starts_with("tunedModels/")
         || model_id.starts_with("projects/")
         || model_id.starts_with("publishers/")
     {
@@ -753,12 +871,28 @@ impl GeminiRealtimeSession {
     /// Returns the last resumable handle received via `sessionResumptionUpdate`.
     #[cfg(any(test, feature = "recovery-test-utils"))]
     pub fn last_resume_handle(&self) -> Option<String> {
-        self.last_resume_handle.lock().clone()
+        self.last_resume_handle.lock().as_ref().map(|(handle, _)| handle.clone())
     }
 
     #[cfg(not(any(test, feature = "recovery-test-utils")))]
     pub(crate) fn last_resume_handle(&self) -> Option<String> {
-        self.last_resume_handle.lock().clone()
+        self.last_resume_handle.lock().as_ref().map(|(handle, _)| handle.clone())
+    }
+
+    /// The latched handle if it is still inside its TTL; an expired
+    /// handle is dropped and reported as absent.
+    fn fresh_resume_handle(&self) -> Option<String> {
+        let mut latch = self.last_resume_handle.lock();
+        match latch.as_ref() {
+            Some((handle, latched)) if latched.elapsed() <= RESUME_HANDLE_TTL => {
+                Some(handle.clone())
+            }
+            Some(_) => {
+                *latch = None;
+                None
+            }
+            None => None,
+        }
     }
 
     /// Constructs a mock `GeminiRealtimeSession` for testing connection lifecycle & recovery.
@@ -797,6 +931,8 @@ impl GeminiRealtimeSession {
             activity_detection: ActivityDetection::Automatic,
             activity_open: Arc::new(AtomicBool::new(false)),
             setup_complete_seen: Arc::new(AtomicBool::new(false)),
+            last_usage: Arc::new(ParkingMutex::new(None)),
+            speech_active: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -817,6 +953,9 @@ impl GeminiRealtimeSession {
     }
 
     /// Connect to Gemini Live API using the specified backend.
+    ///
+    /// On AI Studio a bare model id such as `gemini-3.1-flash-live-preview` is sent as
+    /// `models/gemini-3.1-flash-live-preview`, the resource name the setup requires.
     pub async fn connect(
         backend: GeminiLiveBackend,
         model: &str,
@@ -849,6 +988,7 @@ impl GeminiRealtimeSession {
         dialect: GeminiSchemaDialect,
         private_resume_handle: Option<String>,
     ) -> Result<Self> {
+        adk_core::ensure_crypto_provider();
         let normalized_model = normalize_model_id(model);
         let schema_cache = Arc::new(adk_core::SchemaCache::new());
         let adapter: Arc<dyn adk_core::SchemaAdapter> =
@@ -857,7 +997,10 @@ impl GeminiRealtimeSession {
         let caps = capabilities_for(&normalized_model);
 
         // 1. Compile tools BEFORE establishing the WebSocket connection.
-        // If any tool fails to compile (semantic loss), we abort early.
+        // A tool that fails to compile at all aborts the connect; note the
+        // chosen dialect still projects schemas (the OpenApiSubset drops
+        // `additionalProperties` and composition) — that loss is deliberate
+        // per-dialect, not a compile failure.
         let tools = convert_tools(config.tools.clone(), &schema_cache, adapter.as_ref(), caps)?;
 
         let ws_stream = match &backend {
@@ -1004,13 +1147,17 @@ impl GeminiRealtimeSession {
             backend: backend.clone(),
             dialect,
             reconnect_model: normalized_model.clone(),
-            last_resume_handle: Arc::new(ParkingMutex::new(private_resume_handle.clone())),
+            last_resume_handle: Arc::new(ParkingMutex::new(
+                private_resume_handle.clone().map(|handle| (handle, std::time::Instant::now())),
+            )),
             call_names: Arc::new(ParkingMutex::new(CallNamesMap::new())),
             replacement_deadline_tx,
             replacement_deadline_rx,
             activity_detection,
             activity_open: Arc::new(AtomicBool::new(false)),
             setup_complete_seen: Arc::new(AtomicBool::new(false)),
+            last_usage: Arc::new(ParkingMutex::new(None)),
+            speech_active: Arc::new(AtomicBool::new(false)),
         };
 
         session
@@ -1189,23 +1336,33 @@ impl GeminiRealtimeSession {
             "responseModalities": effective_modalities,
         });
 
-        // `languageCode` and `voiceConfig` are siblings under one
-        // `speechConfig`: a pinned language without a voice still constrains
-        // the session, and a voice without a language serializes exactly as
-        // before (no present-but-null `languageCode`).
-        if config.voice.is_some() || config.language.is_some() {
-            let mut speech_config = json!({});
-            if let Some(language) = &config.language {
-                speech_config["languageCode"] = json!(language);
-            }
-            if let Some(voice) = &config.voice {
-                speech_config["voiceConfig"] = json!({
+        if let Some(voice) = &config.voice {
+            generation_config["speechConfig"] = json!({
+                "voiceConfig": {
                     "prebuiltVoiceConfig": {
                         "voiceName": voice
                     }
-                });
-            }
-            generation_config["speechConfig"] = speech_config;
+                }
+            });
+        }
+
+        // Spoken language (`RealtimeConfig::with_language`). Without it the model detects the
+        // language per turn, and short or accented utterances are transcribed in the wrong one.
+        // Read from the typed field; for one release a legacy
+        // `extra.language_code` is still read (never written) when the
+        // typed field is unset.
+        let language_code =
+            config.language.as_ref().map(|code| code.as_str().to_string()).or_else(|| {
+                config
+                    .extra
+                    .as_ref()
+                    .and_then(|ext| ext.get("language_code"))
+                    .and_then(|val| val.as_str())
+                    .and_then(|code| crate::config::LanguageCode::parse(code).ok())
+                    .map(|code| code.as_str().to_string())
+            });
+        if let Some(code) = language_code {
+            generation_config["speechConfig"]["languageCode"] = json!(code);
         }
 
         if let Some(temp) = config.temperature {
@@ -1234,8 +1391,17 @@ impl GeminiRealtimeSession {
 
         let normalized_model = normalize_model_id(model);
 
+        let context_window_compression =
+            GeminiContextWindowCompression::from_extra(config.extra.as_ref());
+
         // Session resumption handle is strictly supplied by the Gemini adapter itself.
-        let session_resumption = Some(SessionResumptionConfig { handle: private_resume_handle });
+        // Resumption is on by default; `with_session_resumption(false)`
+        // keeps `sessionResumption` out of the setup entirely.
+        let session_resumption = if config.session_resumption == Some(false) {
+            None
+        } else {
+            Some(SessionResumptionConfig { handle: private_resume_handle })
+        };
 
         // When transcription is requested, enable both input (user speech) and
         // output (model speech) transcription so consumers get clean text for
@@ -1262,6 +1428,7 @@ impl GeminiRealtimeSession {
                 input_audio_transcription: transcription.clone(),
                 output_audio_transcription: transcription,
                 realtime_input_config,
+                context_window_compression,
                 proactivity,
             }),
             ..Default::default()
@@ -1391,18 +1558,28 @@ impl GeminiRealtimeSession {
 
     /// Translate Gemini-specific events to unified format.
     ///
-    /// Also intercepts `SessionUpdated` events carrying a resumable handle and
-    /// caches the handle on `self.last_resume_handle` so that
-    /// `reconnect_with_backoff` can present it on the next connection attempt.
+    /// Also latches a resumable `sessionResumptionUpdate` handle privately on
+    /// `self.last_resume_handle` so that `reconnect_with_backoff` can present
+    /// it on the next connection attempt; the handle never surfaces as a
+    /// public event.
     pub(crate) fn translate_gemini_event(&self, raw: &str) -> Result<Vec<ServerEvent>> {
-        if let Ok(value) = serde_json::from_str::<Value>(raw) {
+        // Parsed once here; the parsed value is handed to the translator
+        // instead of being re-parsed from `raw` a second time per frame.
+        let value: Value = serde_json::from_str(raw)
+            .map_err(|e| RealtimeError::protocol(describe_unparseable_frame(raw, &e)))?;
+        {
+            let value = &value;
             if let Some(resumption_update) = value.get("sessionResumptionUpdate") {
                 let resumable =
                     resumption_update.get("resumable").and_then(Value::as_bool).unwrap_or(false);
                 if resumable
-                    && let Some(handle) = resumption_update.get("newHandle").and_then(Value::as_str)
+                    && let Some(handle) = resumption_update
+                        .get("newHandle")
+                        .and_then(Value::as_str)
+                        .filter(|handle| !handle.trim().is_empty())
                 {
-                    *self.last_resume_handle.lock() = Some(handle.to_owned());
+                    *self.last_resume_handle.lock() =
+                        Some((handle.to_owned(), std::time::Instant::now()));
                     tracing::debug!(
                         resume_checkpoint_observed = true,
                         "Stored resumable Gemini session handle for reconnect"
@@ -1429,7 +1606,7 @@ impl GeminiRealtimeSession {
             }
         }
 
-        let events = Self::translate_event_logged(raw, Some(&self.frame_log))?;
+        let events = self.translate_event_logged(value, Some(&self.frame_log))?;
         for event in &events {
             match event {
                 // Latched, never cleared: a session that completed setup once
@@ -1459,9 +1636,21 @@ impl GeminiRealtimeSession {
         self.call_names.lock().len()
     }
 
-    /// Test entry point: no session, so no per-connection telemetry identity.
+    /// Test entry point: no session, so no per-connection telemetry identity, no
+    /// speech-onset latch, and no usage stash. `voiceActivity` still translates —
+    /// it carries its own offset — but an `interrupted` never synthesizes a
+    /// `SpeechStarted` the static path could not dedup against a prior onset.
     pub fn translate_event_static(raw: &str) -> Result<Vec<ServerEvent>> {
-        Self::translate_event_logged(raw, None)
+        let value: Value = serde_json::from_str(raw)
+            .map_err(|e| RealtimeError::protocol(describe_unparseable_frame(raw, &e)))?;
+        log_frame_shape(&value, None);
+        if let Some(activity) = voice_activity_event(&value) {
+            let rest = Self::translate_message_core(&value, true)?;
+            return Ok(std::iter::once(activity)
+                .chain(rest.into_iter().filter(|event| !matches!(event, ServerEvent::Unknown)))
+                .collect());
+        }
+        Self::translate_message_core(&value, true)
     }
 
     /// Surface top-level `usageMetadata` as a [`ServerEvent::Usage`].
@@ -1483,18 +1672,99 @@ impl GeminiRealtimeSession {
     }
 
     pub(crate) fn translate_event_logged(
-        raw: &str,
+        &self,
+        value: Value,
         frame_log: Option<&FrameLog>,
     ) -> Result<Vec<ServerEvent>> {
-        let value: Value = serde_json::from_str(raw)
-            .map_err(|e| RealtimeError::protocol(describe_unparseable_frame(raw, &e)))?;
         log_frame_shape(&value, frame_log);
 
+        // `voiceActivity` is outside the message's union, so it arrives beside the
+        // `serverContent.speechState` that carries nothing else.
+        let Some(activity) = voice_activity_event(&value) else {
+            return self.translate_gemini_message(value);
+        };
+        self.speech_active
+            .store(matches!(activity, ServerEvent::SpeechStarted { .. }), Ordering::SeqCst);
+        let rest = self.translate_gemini_message(value)?;
+        Ok(std::iter::once(activity)
+            .chain(rest.into_iter().filter(|event| !matches!(event, ServerEvent::Unknown)))
+            .collect())
+    }
+
+    /// Translate one parsed Gemini server message, apart from its `voiceActivity`.
+    ///
+    /// The stateful wrapper around [`Self::translate_message_core`]: it dedups the
+    /// synthesized barge-in onset against the speech latch, and it stashes usage
+    /// reports that belong to a response that has not closed yet so they attach to
+    /// the `ResponseDone` that closes it instead of surfacing twice — once now and
+    /// once attached. A stashed report that leaves nothing else behind reads as
+    /// [`ServerEvent::Unknown`], the translator's signal for "no event on this frame".
+    fn translate_gemini_message(&self, value: Value) -> Result<Vec<ServerEvent>> {
+        let has_content = value.get("serverContent").is_some();
+        let turn_complete = value
+            .get("serverContent")
+            .and_then(|c| c.get("turnComplete"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let has_usage = value.get("usageMetadata").is_some();
+        // A report that belongs to a response that closes later: stashed, not emitted.
+        // `turnComplete` with inline counts is reported immediately by the core.
+        let defer_usage = has_usage
+            && ((has_content && !turn_complete)
+                || (!has_content && value.get("toolCall").is_none()));
+        if defer_usage && let Some(usage) = value.get("usageMetadata") {
+            *self.last_usage.lock() = Some(usage.clone());
+        }
+
+        let speech_already_reported = self.speech_active.load(Ordering::SeqCst);
+        let mut events = Self::translate_message_core(&value, speech_already_reported)?;
+        if !speech_already_reported
+            && events.iter().any(|event| matches!(event, ServerEvent::SpeechStarted { .. }))
+        {
+            // The core synthesized this onset from an `interrupted` frame (no
+            // `voiceActivity` onset preceded it). Latch it, so a repeated
+            // interrupted frame does not report the same speech twice; the
+            // `voiceActivity` ACTIVITY_END store clears the latch.
+            self.speech_active.store(true, Ordering::SeqCst);
+        }
+
+        if defer_usage {
+            events.retain(|event| !matches!(event, ServerEvent::Usage { .. }));
+            if events.is_empty() {
+                events.push(ServerEvent::Unknown);
+            }
+        } else if turn_complete
+            && !has_usage
+            && let Some(usage) = self.last_usage.lock().take()
+            && let Some(response) = events.iter_mut().find_map(|event| match event {
+                ServerEvent::ResponseDone { response, .. } => Some(response),
+                _ => None,
+            })
+            && response.get("usageMetadata").is_none()
+        {
+            // A report that arrived on its own just before this turn closed belongs
+            // to the response that closes here.
+            response["usageMetadata"] = usage;
+        }
+        Ok(events)
+    }
+
+    /// Stateless translation of one parsed Gemini server message, shared by the
+    /// session path and the static test path.
+    ///
+    /// `speech_already_reported` suppresses the synthesized barge-in onset: the
+    /// session passes its speech latch, the static path passes `true` because it
+    /// has no latch to dedup against. Usage reports always surface immediately;
+    /// deferring them to a closing response is the session wrapper's job.
+    fn translate_message_core(
+        value: &Value,
+        speech_already_reported: bool,
+    ) -> Result<Vec<ServerEvent>> {
         // Check for setup completion
         if let Some(_setup_complete) = value.get("setupComplete") {
             return Ok(vec![ServerEvent::SessionCreated {
                 event_id: uuid::Uuid::new_v4().to_string(),
-                session: value.clone(),
+                session: (*value).clone(),
             }]);
         }
 
@@ -1513,6 +1783,16 @@ impl GeminiRealtimeSession {
             // abandoned and the client must empty its playback queue.
             let interrupted = content.get("interrupted").and_then(Value::as_bool).unwrap_or(false);
             if interrupted {
+                // The user's speech cut the model's reply off: the barge-in onset
+                // OpenAI sends as `speech_started`. Without a `voiceActivity` onset
+                // there is no offset, so `audio_start_ms` is 0; an onset the
+                // server already reported is reported once.
+                if !speech_already_reported {
+                    events.push(ServerEvent::SpeechStarted {
+                        event_id: uuid::Uuid::new_v4().to_string(),
+                        audio_start_ms: 0,
+                    });
+                }
                 events.push(ServerEvent::ResponseCancelled {
                     event_id: uuid::Uuid::new_v4().to_string(),
                 });
@@ -1598,9 +1878,11 @@ impl GeminiRealtimeSession {
             if let Some(turn_complete) = content.get("turnComplete")
                 && turn_complete.as_bool().unwrap_or(false)
             {
+                // Attaching a stashed report from an earlier frame is the session
+                // wrapper's job; the core reports what rides on this frame.
                 events.push(ServerEvent::ResponseDone {
                     event_id: uuid::Uuid::new_v4().to_string(),
-                    response: value.clone(),
+                    response: (*value).clone(),
                 });
             }
 
@@ -1646,7 +1928,7 @@ impl GeminiRealtimeSession {
             // turn-final `serverContent` frame typically carries the turn's
             // token counts alongside `turnComplete`. Surface them here so the
             // turn's content and its counts arrive together.
-            if let Some(usage) = Self::parse_usage_event(&value)? {
+            if let Some(usage) = Self::parse_usage_event(value)? {
                 events.push(usage);
             }
 
@@ -1655,29 +1937,22 @@ impl GeminiRealtimeSession {
             }
         }
 
-        // `sessionResumptionUpdate` carries `newHandle` and `resumable`. This
-        // read `resumptionToken`, under a comment asserting a protocol asymmetry
-        // — the server does not send that field, so the branch never fired and
-        // no handle was ever captured. Resumption looked supported and was not.
-        //
-        // `resumable` is not decoration: Google specifies a handle is usable
-        // only when it is true. An update with `resumable: false` means "there
-        // is no safe resume point right now", so it must not overwrite the last
-        // handle that *was* safe — that would trade a working resume point for
-        // an unusable one.
-        //
-        // Capturing the handle is not the same as being able to reconnect with
-        // it. Nothing here reconnects yet, so session resumption remains
-        // unsupported; this is the first of the two halves.
+        // `sessionResumptionUpdate` carries `newHandle` and `resumable`. Only a
+        // `resumable: true` update names a safe resume point: Google specifies a
+        // handle is usable only when it is true, so an update with
+        // `resumable: false` ("no safe resume point right now") must not
+        // overwrite the last handle that *was* safe. The session wrapper latches
+        // the handle privately for reconnect; the translator itself emits no
+        // event for it.
         if let Some(resumption_update) = value.get("sessionResumptionUpdate") {
             let resumable =
                 resumption_update.get("resumable").and_then(|r| r.as_bool()).unwrap_or(false);
-            let handle = resumption_update.get("newHandle").and_then(|h| h.as_str());
+            let handle = resumption_update
+                .get("newHandle")
+                .and_then(|h| h.as_str())
+                .filter(|handle| !handle.trim().is_empty());
             match (resumable, handle) {
                 (true, Some(_handle)) => {
-                    if let Some(frame_log) = frame_log {
-                        let _ = frame_log; // suppress unused warning in non-session context
-                    }
                     tracing::debug!(
                         resume_checkpoint_observed = true,
                         "Received a resumable sessionResumptionUpdate; handle stored privately"
@@ -1772,7 +2047,7 @@ impl GeminiRealtimeSession {
         // that branch above; anything reaching here alongside usage is a
         // control frame this translator otherwise ignores, so the usage is
         // the whole signal.
-        if let Some(usage) = Self::parse_usage_event(&value)? {
+        if let Some(usage) = Self::parse_usage_event(value)? {
             return Ok(vec![usage]);
         }
 
@@ -1836,7 +2111,7 @@ impl RealtimeRecovery for GeminiRealtimeSession {
     async fn recover(&self, context: RecoveryContext<'_>) -> Result<RecoveredSession> {
         let deadline = context.deadline();
         let config = context.config();
-        let prior_handle = self.last_resume_handle();
+        let prior_handle = self.fresh_resume_handle();
 
         struct CandidateGuard {
             session: Option<Arc<GeminiRealtimeSession>>,
@@ -1868,51 +2143,83 @@ impl RealtimeRecovery for GeminiRealtimeSession {
             }
         }
 
-        let attempt_fut = async {
-            // Construct private candidate session passing prior_handle directly to provider setup
-            let candidate_session = Self::connect_with_dialect_and_resume(
-                self.backend.clone(),
-                &self.reconnect_model,
-                config.clone(),
-                self.dialect,
-                prior_handle.clone(),
-            )
-            .await?;
+        // One attempt presenting `handle` (or none) in its setup.
+        let make_attempt = |handle: Option<String>| {
+            let backend = self.backend.clone();
+            let model = self.reconnect_model.clone();
+            let attempt_config = config.clone();
+            let dialect = self.dialect;
+            async move {
+                let prior_handle = handle;
+                let config = attempt_config;
+                let candidate_session = Self::connect_with_dialect_and_resume(
+                    backend,
+                    &model,
+                    config.clone(),
+                    dialect,
+                    prior_handle.clone(),
+                )
+                .await?;
 
-            let guard = CandidateGuard::new(candidate_session);
+                let guard = CandidateGuard::new(candidate_session);
 
-            // Wait for setupComplete frame as the setup-first transaction
-            loop {
-                match guard.session.as_ref().unwrap().next_event().await {
-                    Some(Ok(ServerEvent::SessionCreated { .. })) => {
-                        break;
-                    }
-                    Some(Ok(_)) => continue,
-                    Some(Err(e)) => return Err(e),
-                    None => {
-                        return Err(RealtimeError::connection(
-                            "Candidate connection closed before setupComplete frame",
-                        ));
+                // Wait for setupComplete frame as the setup-first transaction
+                loop {
+                    match guard.session.as_ref().unwrap().next_event().await {
+                        Some(Ok(ServerEvent::SessionCreated { .. })) => {
+                            break;
+                        }
+                        Some(Ok(_)) => continue,
+                        Some(Err(e)) => return Err(e),
+                        None => {
+                            return Err(RealtimeError::connection(
+                                "Candidate connection closed before setupComplete frame",
+                            ));
+                        }
                     }
                 }
+
+                let candidate = guard.disarm();
+
+                // Carry prior resume handle if candidate hasn't received a new one yet
+                if candidate.last_resume_handle().is_none()
+                    && let Some(handle) = &prior_handle
+                {
+                    *candidate.last_resume_handle.lock() =
+                        Some((handle.clone(), std::time::Instant::now()));
+                }
+
+                let recovered: Arc<dyn RealtimeSession> = candidate;
+                Ok(RecoveredSession::new(recovered, RecoveryContinuity::Reconnected))
             }
-
-            let candidate = guard.disarm();
-
-            // Carry prior resume handle if candidate hasn't received a new one yet
-            if candidate.last_resume_handle().is_none() && prior_handle.is_some() {
-                *candidate.last_resume_handle.lock() = prior_handle;
-            }
-
-            let recovered: Arc<dyn RealtimeSession> = candidate;
-            Ok(RecoveredSession::new(recovered, RecoveryContinuity::Reconnected))
         };
 
-        match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), attempt_fut).await {
-            Ok(res) => res,
+        let deadline_instant = tokio::time::Instant::from_std(deadline);
+        let first =
+            tokio::time::timeout_at(deadline_instant, make_attempt(prior_handle.clone())).await;
+        let first = match first {
+            Ok(result) => result,
             Err(_) => Err(RealtimeError::Timeout(
                 "Gemini recovery attempt timed out waiting for setupComplete".to_string(),
             )),
+        };
+        match first {
+            Ok(recovered) => Ok(recovered),
+            Err(error) if prior_handle.is_some() => {
+                // A handle the provider will not resume from fails the
+                // setup; retry exactly once with no handle presented.
+                tracing::warn!(
+                    error = crate::recovery::error_category(&error),
+                    "Gemini recovery with a presented resumption handle failed; retrying once with no handle"
+                );
+                match tokio::time::timeout_at(deadline_instant, make_attempt(None)).await {
+                    Ok(result) => result,
+                    Err(_) => Err(RealtimeError::Timeout(
+                        "Gemini recovery attempt timed out waiting for setupComplete".to_string(),
+                    )),
+                }
+            }
+            Err(error) => Err(error),
         }
     }
 }
@@ -2031,19 +2338,14 @@ impl RealtimeSession for GeminiRealtimeSession {
     }
 
     async fn send_video_frame(&self, mime_type: &str, data_base64: &str) -> Result<()> {
-        // Gemini Live accepts image frames as realtimeInput media chunks.
-        let msg = GeminiClientMessage {
-            realtime_input: Some(GeminiRealtimeInput {
-                media_chunks: Some(vec![GeminiMediaChunk { mime_type, data: data_base64 }]),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        self.send_raw(&msg).await
+        self.send_raw(&video_frame_message(mime_type, data_base64)).await
     }
 
     async fn send_text(&self, text: &str) -> Result<()> {
-        // Send text via realtimeInput as required by Gemini 3.1 Live API for conversational text turns.
+        // Gemini 3.8 Live streams conversational user input as
+        // `realtimeInput.text`; `clientContent` is reserved for injecting
+        // context turns, so a user turn sent there would be read as
+        // supplied context rather than as the user's next input.
         let msg = GeminiClientMessage {
             realtime_input: Some(GeminiRealtimeInput {
                 text: Some(text.to_string()),
@@ -2106,6 +2408,19 @@ impl RealtimeSession for GeminiRealtimeSession {
 
     async fn commit_audio(&self) -> Result<()> {
         self.flush_audio().await?;
+        // Under automatic detection the server caches the tail of the stream and closes the
+        // turn only once more audio or `audioStreamEnd` arrives; a client that has stopped
+        // sending would otherwise leave the user's turn open indefinitely.
+        if self.activity_detection == ActivityDetection::Automatic {
+            let msg = GeminiClientMessage {
+                realtime_input: Some(GeminiRealtimeInput {
+                    audio_stream_end: Some(true),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            self.send_raw(&msg).await?;
+        }
 
         // `commit_audio` is the provider-neutral boundary for a manually
         // delimited input turn. Gemini has no audio-buffer commit frame: once
@@ -2529,62 +2844,13 @@ fn log_frame_shape(value: &Value, log: Option<&FrameLog>) {
 ///   cutoff would be this adapter making up policy.
 /// - `eagerness` is documented OpenAI-specific.
 ///
-/// Only the automatic-detection switch is modelled. `activityHandling` is
-/// deliberately left off the wire: its default, `START_OF_ACTIVITY_INTERRUPTS`,
-/// is the behaviour [`ActivitySignaller::start`] depends on, and sending the
-/// field would mean offering callers a way to turn barge-in off without any of
-/// the plumbing that would make that coherent.
-fn gemini_realtime_input_config(config: &RealtimeConfig) -> Option<Value> {
+/// `activityHandling` is written only when the caller set
+/// `interrupt_response`: `START_OF_ACTIVITY_INTERRUPTS` (the default) is the
+/// behaviour [`ActivitySignaller::start`] depends on, so an explicit
+/// `NO_INTERRUPTION` is a caller decision this projection honours rather than
+/// silently dropping.
+fn gemini_realtime_input_config(config: &RealtimeConfig) -> Option<GeminiRealtimeInputConfig> {
     let vad = config.turn_detection.as_ref()?;
-    let mut detection = serde_json::Map::new();
-
-    // No rule needed about which values to trust: `VadConfig`'s defaults are
-    // `None`, so a `Some` here is a caller's decision by construction.
-    if let Some(ms) = vad.silence_duration_ms {
-        detection.insert("silenceDurationMs".to_string(), json!(ms));
-    }
-    if let Some(ms) = vad.prefix_padding_ms {
-        detection.insert("prefixPaddingMs".to_string(), json!(ms));
-    }
-    if let Some(sensitivity) = vad.start_of_speech_sensitivity {
-        detection.insert(
-            "startOfSpeechSensitivity".to_string(),
-            json!(match sensitivity {
-                crate::config::StartOfSpeechSensitivity::High => "START_SENSITIVITY_HIGH",
-                crate::config::StartOfSpeechSensitivity::Low => "START_SENSITIVITY_LOW",
-            }),
-        );
-    }
-    if let Some(sensitivity) = vad.end_of_speech_sensitivity {
-        detection.insert(
-            "endOfSpeechSensitivity".to_string(),
-            json!(match sensitivity {
-                crate::config::EndOfSpeechSensitivity::High => "END_SENSITIVITY_HIGH",
-                crate::config::EndOfSpeechSensitivity::Low => "END_SENSITIVITY_LOW",
-            }),
-        );
-    }
-
-    // `disabled` is never left implicit in an object we emit.
-    //
-    // It used to be inserted only for `VadMode::None`, so asking for one
-    // tuning value under server VAD produced `{"silenceDurationMs": 1200}` —
-    // an object whose central field, the one that decides who owns turn
-    // detection at all, was absent. That exact payload reached production and
-    // correlates with a pilot line that completed setup, held a healthy
-    // socket, and returned no content at all. The vendor documents the partial
-    // form as legal and the mechanism was never proven, so this is not a claim
-    // to have found the bug — it is a refusal to keep sending a message whose
-    // meaning depends on a field we chose not to write.
-    //
-    // The emptiness check stays, and it is load-bearing: a caller who
-    // configured nothing must still produce no `realtimeInputConfig` at all,
-    // which is the wire shape server-side detection has always had. Only a
-    // caller who said *something* gets an object, and then it is complete.
-    let manual = vad.mode == crate::config::VadMode::None;
-    if manual || !detection.is_empty() {
-        detection.insert("disabled".to_string(), json!(manual));
-    }
 
     if vad.threshold.is_some() {
         tracing::warn!(
@@ -2596,18 +2862,57 @@ fn gemini_realtime_input_config(config: &RealtimeConfig) -> Option<Value> {
         tracing::debug!("VadConfig.eagerness is OpenAI-specific and does not apply to Gemini");
     }
 
-    let mut input_config = serde_json::Map::new();
-    if !detection.is_empty() {
-        input_config.insert("automaticActivityDetection".to_string(), Value::Object(detection));
-    }
-    if let Some(interrupt) = vad.interrupt_response {
-        input_config.insert(
-            "activityHandling".to_string(),
-            json!(if interrupt { "START_OF_ACTIVITY_INTERRUPTS" } else { "NO_INTERRUPTION" }),
-        );
-    }
+    // `disabled` is never left implicit in an object we emit.
+    //
+    // It used to be written only for `VadMode::None`, so asking for one
+    // tuning value under server VAD produced `{"silenceDurationMs": 1200}` —
+    // an object whose central field, the one that decides who owns turn
+    // detection at all, was absent. That exact payload reached production and
+    // correlates with a pilot line that completed setup, held a healthy
+    // socket, and returned no content at all. The vendor documents the partial
+    // form as legal and the mechanism was never proven, so this is not a claim
+    // to have found the bug — it is a refusal to keep sending a message whose
+    // meaning depends on a field we chose not to write.
+    //
+    // The emptiness rule stays, and it is load-bearing: a caller who
+    // configured nothing must still produce no `realtimeInputConfig` at all,
+    // which is the wire shape server-side detection has always had. Only a
+    // caller who said *something* gets an object, and then it is complete.
+    // No rule is needed about which values to trust: `VadConfig`'s defaults
+    // are `None`, so a `Some` here is a caller's decision by construction.
+    let manual = vad.mode == crate::config::VadMode::None;
+    let has_tuning = vad.silence_duration_ms.is_some()
+        || vad.prefix_padding_ms.is_some()
+        || vad.start_of_speech_sensitivity.is_some()
+        || vad.end_of_speech_sensitivity.is_some();
+    let automatic_activity_detection =
+        (manual || has_tuning).then(|| GeminiAutomaticActivityDetection {
+            disabled: manual,
+            silence_duration_ms: vad.silence_duration_ms,
+            prefix_padding_ms: vad.prefix_padding_ms,
+            start_of_speech_sensitivity: vad.start_of_speech_sensitivity.map(|s| match s {
+                crate::config::StartOfSpeechSensitivity::High => {
+                    GeminiStartOfSpeechSensitivity::High
+                }
+                crate::config::StartOfSpeechSensitivity::Low => GeminiStartOfSpeechSensitivity::Low,
+            }),
+            end_of_speech_sensitivity: vad.end_of_speech_sensitivity.map(|s| match s {
+                crate::config::EndOfSpeechSensitivity::High => GeminiEndOfSpeechSensitivity::High,
+                crate::config::EndOfSpeechSensitivity::Low => GeminiEndOfSpeechSensitivity::Low,
+            }),
+        });
+    let activity_handling = vad.interrupt_response.map(|interrupt| {
+        if interrupt {
+            GeminiActivityHandling::StartOfActivityInterrupts
+        } else {
+            GeminiActivityHandling::NoInterruption
+        }
+    });
 
-    (!input_config.is_empty()).then_some(Value::Object(input_config))
+    if automatic_activity_detection.is_none() && activity_handling.is_none() {
+        return None;
+    }
+    Some(GeminiRealtimeInputConfig { automatic_activity_detection, activity_handling })
 }
 
 /// Construct the Vertex AI Live WebSocket URL from region and project ID.
@@ -2624,6 +2929,54 @@ pub fn build_vertex_live_url(region: &str, project_id: &str) -> Result<String> {
     Ok(format!(
         "wss://{region}-aiplatform.googleapis.com/ws/google.cloud.aiplatform.v1beta1.LlmBidiService/BidiGenerateContent?project_id={project_id}",
     ))
+}
+
+/// The `setup.model` resource name for `model` on `backend`.
+///
+/// AI Studio accepts only `models/{model}` and closes the socket with 1007 ("unexpected model
+/// name format") on a bare id, so a bare id gains the prefix there. A name with a collection
+/// (`models/…`, `tunedModels/…`) and every Vertex AI name pass unchanged.
+pub(crate) fn live_model_name(backend: &GeminiLiveBackend, model: &str) -> String {
+    match backend {
+        GeminiLiveBackend::Studio { .. } if !model.contains('/') => format!("models/{model}"),
+        _ => model.to_string(),
+    }
+}
+
+/// The speech event a server message's `voiceActivity` reports, if it reports one.
+///
+/// The server's activity detection sends `voiceActivity {type, audioOffset}` at the user's
+/// speech onset (`ACTIVITY_START`) and end (`ACTIVITY_END`), whether or not the model is
+/// speaking, so it maps to [`ServerEvent::SpeechStarted`] / [`ServerEvent::SpeechStopped`]
+/// as OpenAI's `input_audio_buffer.speech_started` / `speech_stopped` do. `audioOffset`, a
+/// protobuf duration such as `"7.280s"`, is measured from the start of the audio stream.
+fn voice_activity_event(value: &Value) -> Option<ServerEvent> {
+    let activity = value.get("voiceActivity")?;
+    let offset_ms = activity
+        .get("audioOffset")
+        .and_then(Value::as_str)
+        .and_then(|offset| offset.strip_suffix('s')?.parse::<f64>().ok())
+        .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
+        .map_or(0, |seconds| (seconds * 1000.0).round() as u64);
+    let event_id = uuid::Uuid::new_v4().to_string();
+    match activity.get("type").and_then(Value::as_str)? {
+        "ACTIVITY_START" => {
+            Some(ServerEvent::SpeechStarted { event_id, audio_start_ms: offset_ms })
+        }
+        "ACTIVITY_END" => Some(ServerEvent::SpeechStopped { event_id, audio_end_ms: offset_ms }),
+        _ => None,
+    }
+}
+
+/// One camera or screen frame as `realtimeInput.video`.
+fn video_frame_message<'a>(mime_type: &'a str, data_base64: &'a str) -> GeminiClientMessage<'a> {
+    GeminiClientMessage {
+        realtime_input: Some(GeminiRealtimeInput {
+            video: Some(GeminiMediaChunk { mime_type, data: data_base64 }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
 }
 
 /// Pure translation function for converting a standard `adk_core` message into
@@ -2732,6 +3085,14 @@ pub(crate) fn translate_client_message(
 }
 
 /// Convert ADK tool definitions to Gemini format.
+///
+/// `dialect` decides the field the schema is posted under. It is a parameter
+/// rather than a constant because Gemini's two schema fields are mutually
+/// exclusive and express different things: `parameters` takes an OpenAPI
+/// subset, `parametersJsonSchema` takes standard JSON Schema. Hardcoding the
+/// legacy field silently discards every constraint the subset cannot carry —
+/// `additionalProperties`, `allOf`, `if`/`then`, the exclusive bounds — leaving
+/// the model to guess at rules the caller still enforces.
 fn convert_tools(
     tools: Option<Vec<ToolDefinition>>,
     cache: &adk_core::SchemaCache,
@@ -2853,9 +3214,9 @@ mod tests {
         #[test]
         fn the_json_schema_field_carries_constraints_the_older_one_drops() {
             let subset = declaration(GeminiSchemaDialect::OpenApiSubset);
-            assert!(
-                subset["parameters"]["properties"]["callback_number"].get("minLength").is_none()
-            );
+            // The subset keeps string/numeric constraints such as `minLength`;
+            // what it cannot carry is `additionalProperties` (and composition).
+            assert_eq!(subset["parameters"]["properties"]["callback_number"]["minLength"], 7);
             assert!(subset["parameters"].get("additionalProperties").is_none());
 
             let json_schema = declaration(GeminiSchemaDialect::JsonSchema);
@@ -2931,10 +3292,10 @@ mod tests {
 
     #[test]
     fn test_gemini_send_text_uses_realtime_input() {
-        // Conversational text turns must serialize via realtimeInput.text for Gemini 3.1 Live API
+        // Conversational text turns must serialize via realtimeInput.text for Gemini 3.8 Live
         let msg = GeminiClientMessage {
             realtime_input: Some(GeminiRealtimeInput {
-                text: Some("Hello 3.1".to_string()),
+                text: Some("Hello 3.8".to_string()),
                 ..Default::default()
             }),
             ..Default::default()
@@ -2944,7 +3305,7 @@ mod tests {
         assert!(js.get("clientContent").is_none());
         assert_eq!(
             js.get("realtimeInput").and_then(|r| r.get("text")).and_then(|t| t.as_str()),
-            Some("Hello 3.1")
+            Some("Hello 3.8")
         );
     }
 
@@ -3048,6 +3409,8 @@ mod tests {
     #[test]
     fn non_resumable_session_update_yields_no_handle() {
         for raw in [
+            r#"{"sessionResumptionUpdate":{"newHandle":"","resumable":true}}"#,
+            r#"{"sessionResumptionUpdate":{"newHandle":"   ","resumable":true}}"#,
             r#"{"sessionResumptionUpdate":{"newHandle":"handle-abc","resumable":false}}"#,
             r#"{"sessionResumptionUpdate":{"newHandle":"handle-abc"}}"#,
             r#"{"sessionResumptionUpdate":{"resumable":true}}"#,
@@ -3209,6 +3572,7 @@ mod tests {
             input_audio_transcription: None,
             output_audio_transcription: None,
             realtime_input_config: None,
+            context_window_compression: None,
             proactivity: None,
         };
         let wrapper = GeminiClientMessage { setup: Some(setup), ..Default::default() };
@@ -3218,6 +3582,100 @@ mod tests {
             setup_json.get("model").expect("model missing from setup payload").as_str().unwrap(),
             "models/gemini-2.5-flash-native-audio-latest"
         );
+    }
+
+    #[test]
+    fn test_language_code_lands_in_speech_config_next_to_the_voice() {
+        let js = setup_json(
+            RealtimeConfig::default().with_voice("Aoede").try_with_language("en-US").unwrap(),
+        );
+        let speech = &js["setup"]["generationConfig"]["speechConfig"];
+        assert_eq!(speech["languageCode"], json!("en-US"));
+        assert_eq!(speech["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"], json!("Aoede"));
+    }
+
+    #[test]
+    fn test_language_code_without_a_voice_still_builds_speech_config() {
+        let js = setup_json(RealtimeConfig::default().try_with_language("en-GB").unwrap());
+        assert_eq!(js["setup"]["generationConfig"]["speechConfig"]["languageCode"], json!("en-GB"));
+        assert!(
+            setup_json(RealtimeConfig::default())["setup"]["generationConfig"]
+                .get("speechConfig")
+                .is_none()
+        );
+        // An invalid tag is rejected before it can reach a setup.
+        assert!(RealtimeConfig::default().try_with_language("").is_err());
+    }
+
+    #[test]
+    fn test_language_code_lives_in_the_typed_field_not_extra() {
+        let config =
+            RealtimeConfig { extra: Some(json!({"thinking_level": "low"})), ..Default::default() };
+        let config = config.try_with_language("en-US").unwrap();
+        assert_eq!(config.language.as_ref().map(|code| code.as_str()), Some("en-US"));
+        assert_eq!(config.extra, Some(json!({"thinking_level": "low"})));
+
+        let config =
+            RealtimeConfig { extra: Some(json!(["not", "an", "object"])), ..Default::default() };
+        let config = config.try_with_language("fr-FR").unwrap();
+        assert_eq!(config.language.as_ref().map(|code| code.as_str()), Some("fr-FR"));
+        assert_eq!(config.extra, Some(json!(["not", "an", "object"])));
+    }
+
+    #[test]
+    fn test_session_resumption_is_on_by_default_and_off_when_disabled() {
+        let setup = setup_json(RealtimeConfig::default());
+        assert!(setup["setup"].get("sessionResumption").is_some(), "{setup}");
+        let setup = setup_json(RealtimeConfig::default().with_session_resumption(false));
+        assert!(setup["setup"].get("sessionResumption").is_none(), "{setup}");
+    }
+
+    #[test]
+    fn test_context_window_compression_sends_a_sliding_window() {
+        let js = setup_json(RealtimeConfig::default().with_context_window_compression(None));
+        assert_eq!(js["setup"]["contextWindowCompression"], json!({"slidingWindow": {}}));
+
+        let js = setup_json(
+            RealtimeConfig::default()
+                .try_with_language("en-US")
+                .unwrap()
+                .with_context_window_compression(Some(25_600)),
+        );
+        assert_eq!(
+            js["setup"]["contextWindowCompression"],
+            json!({"slidingWindow": {}, "triggerTokens": 25_600})
+        );
+        assert_eq!(js["setup"]["generationConfig"]["speechConfig"]["languageCode"], json!("en-US"));
+
+        let config = RealtimeConfig {
+            extra: Some(json!({
+                "context_window_compression": {"trigger_tokens": 32_000, "target_tokens": 16_000}
+            })),
+            ..Default::default()
+        };
+        assert_eq!(
+            setup_json(config)["setup"]["contextWindowCompression"],
+            json!({"slidingWindow": {"targetTokens": 16_000}, "triggerTokens": 32_000})
+        );
+    }
+
+    #[test]
+    fn test_context_window_compression_is_absent_unless_asked() {
+        assert!(
+            setup_json(RealtimeConfig::default())["setup"]
+                .get("contextWindowCompression")
+                .is_none()
+        );
+        for off in [json!(false), json!(null), json!("yes"), json!(1)] {
+            let config = RealtimeConfig {
+                extra: Some(json!({"context_window_compression": off})),
+                ..Default::default()
+            };
+            assert!(
+                setup_json(config)["setup"].get("contextWindowCompression").is_none(),
+                "{off} must not turn compression on"
+            );
+        }
     }
 
     #[test]
@@ -3260,6 +3718,7 @@ mod tests {
                 description: Some("description".to_string()),
                 parameters: Some(json!({"type": "object"})),
                 behavior: None,
+                effect: adk_core::ToolEffect::NonIdempotent,
             }]),
             ..Default::default()
         };
@@ -3350,7 +3809,8 @@ mod tests {
         let one_value = RealtimeConfig::default()
             .with_vad(VadConfig { silence_duration_ms: Some(1200), ..VadConfig::server_vad() });
         assert_eq!(
-            gemini_realtime_input_config(&one_value).expect("projection")["automaticActivityDetection"],
+            serde_json::to_value(gemini_realtime_input_config(&one_value).expect("projection"))
+                .unwrap()["automaticActivityDetection"],
             json!({ "silenceDurationMs": 1200, "disabled": false }),
             "a tuning value must not travel without saying who owns detection"
         );
@@ -3364,7 +3824,8 @@ mod tests {
             ..VadConfig::server_vad()
         });
         assert_eq!(
-            gemini_realtime_input_config(&full).expect("projection")["automaticActivityDetection"],
+            serde_json::to_value(gemini_realtime_input_config(&full).expect("projection")).unwrap()
+                ["automaticActivityDetection"],
             json!({
                 "silenceDurationMs": 1200,
                 "prefixPaddingMs": 300,
@@ -3378,7 +3839,8 @@ mod tests {
         let manual = RealtimeConfig::default()
             .with_vad(VadConfig { mode: VadMode::None, ..VadConfig::server_vad() });
         assert_eq!(
-            gemini_realtime_input_config(&manual).expect("projection")["automaticActivityDetection"],
+            serde_json::to_value(gemini_realtime_input_config(&manual).expect("projection"))
+                .unwrap()["automaticActivityDetection"],
             json!({ "disabled": true })
         );
 
@@ -3405,7 +3867,9 @@ mod tests {
             start_of_speech_sensitivity: None,
             end_of_speech_sensitivity: None,
         });
-        let projected = gemini_realtime_input_config(&config).expect("projection");
+        let projected =
+            serde_json::to_value(gemini_realtime_input_config(&config).expect("projection"))
+                .unwrap();
         let detection = projected.get("automaticActivityDetection").expect("detection");
 
         assert_eq!(detection.get("silenceDurationMs").and_then(|v| v.as_u64()), Some(900));
@@ -3430,7 +3894,9 @@ mod tests {
             start_of_speech_sensitivity: None,
             end_of_speech_sensitivity: None,
         });
-        let projected = gemini_realtime_input_config(&config).expect("projection");
+        let projected =
+            serde_json::to_value(gemini_realtime_input_config(&config).expect("projection"))
+                .unwrap();
         let detection = projected.get("automaticActivityDetection").expect("detection block");
 
         assert_eq!(detection.get("disabled").and_then(|v| v.as_bool()), Some(true));
@@ -3443,6 +3909,12 @@ mod tests {
     }
 
     // ── Activity signalling ─────────────────────────────────────────────
+
+    fn setup_json(config: RealtimeConfig) -> Value {
+        let msg = GeminiRealtimeSession::build_setup_message("models/test", config, None, None)
+            .expect("setup builds");
+        serde_json::to_value(&msg).expect("setup serializes")
+    }
 
     #[test]
     fn activity_start_serializes_as_documented() {
@@ -3540,6 +4012,25 @@ mod tests {
             }
             other => panic!("expected one ToolCallCancelled, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn static_path_reports_voice_activity_with_its_offset() {
+        // `voiceActivity` carries its own offset, so the session-less path
+        // reports it exactly like the session path.
+        let raw = r#"{"serverContent":{"speechState":"SPEECH"},"voiceActivity":{"type":"ACTIVITY_START","audioOffset":"7.280s"}}"#;
+        let events = GeminiRealtimeSession::translate_event_static(raw).unwrap();
+        assert!(
+            matches!(events.as_slice(), [ServerEvent::SpeechStarted { audio_start_ms: 7280, .. }]),
+            "{events:?}"
+        );
+
+        let raw = r#"{"voiceActivity":{"type":"ACTIVITY_END","audioOffset":"10.640s"}}"#;
+        let events = GeminiRealtimeSession::translate_event_static(raw).unwrap();
+        assert!(
+            matches!(events.as_slice(), [ServerEvent::SpeechStopped { audio_end_ms: 10640, .. }]),
+            "{events:?}"
+        );
     }
 
     #[test]
@@ -4256,7 +4747,7 @@ mod tests {
         let session = GeminiRealtimeSession::new_for_test(
             "test-session".to_string(),
             format!("ws://{}", addr),
-            "models/gemini-3.1-flash-live-preview".to_string(),
+            "models/gemini-3.8-live".to_string(),
             tx,
             writer_task,
             source,
@@ -4313,14 +4804,15 @@ mod tests {
         let session = GeminiRealtimeSession::new_for_test(
             "test-session".to_string(),
             format!("ws://{}", addr),
-            "models/gemini-3.1-flash-live-preview".to_string(),
+            "models/gemini-3.8-live".to_string(),
             tx,
             writer_task,
             source,
         );
 
         // Simulate provider caching fresh handle H2 ("fresh_provider_h2")
-        *session.last_resume_handle.lock() = Some("fresh_provider_h2".to_string());
+        *session.last_resume_handle.lock() =
+            Some(("fresh_provider_h2".to_string(), std::time::Instant::now()));
 
         // Construct generic config containing stale handle H1 ("stale_config_h1") in config.extra
         let stale_config = RealtimeConfig {
@@ -4786,7 +5278,7 @@ mod gemini_38_compatibility_tests {
     #[test]
     fn pinned_language_reaches_speech_config_language_code() {
         let gen_config = setup_generation_config(
-            RealtimeConfig::default().with_voice("Puck").with_language("en-US"),
+            RealtimeConfig::default().with_voice("Puck").try_with_language("en-US").unwrap(),
         );
 
         assert_eq!(
@@ -4804,7 +5296,8 @@ mod gemini_38_compatibility_tests {
     /// must not depend on a voice being configured.
     #[test]
     fn pinned_language_without_a_voice_still_constrains_the_session() {
-        let gen_config = setup_generation_config(RealtimeConfig::default().with_language("fr-CA"));
+        let gen_config =
+            setup_generation_config(RealtimeConfig::default().try_with_language("fr-CA").unwrap());
 
         assert_eq!(gen_config.get("speechConfig"), Some(&json!({ "languageCode": "fr-CA" })));
     }
@@ -4881,6 +5374,7 @@ mod gemini_38_compatibility_tests {
 mod teardown_tests {
     use super::*;
     use crate::config::{VadConfig, VadMode};
+    use adk_core::types::Part;
     use bytes::BytesMut;
     use parking_lot::Mutex as ParkingMutex;
     use std::sync::atomic::AtomicBool;
@@ -4944,6 +5438,8 @@ mod teardown_tests {
             activity_detection: ActivityDetection::Automatic,
             activity_open: Arc::new(AtomicBool::new(false)),
             setup_complete_seen: Arc::new(AtomicBool::new(false)),
+            last_usage: Arc::new(ParkingMutex::new(None)),
+            speech_active: Arc::new(AtomicBool::new(false)),
         };
 
         // Execution of close() must complete quickly despite channel full & writer blocked
@@ -4978,6 +5474,16 @@ mod teardown_tests {
         );
     }
 
+    /// `gemini-3.8-live` ignores images under the deprecated `mediaChunks` (the model says
+    /// it sees nothing); under `video` they count as IMAGE tokens and are described.
+    #[test]
+    fn video_frames_go_out_as_realtime_input_video() {
+        assert_eq!(
+            serde_json::to_value(video_frame_message("image/jpeg", "AQI=")).unwrap(),
+            json!({ "realtimeInput": { "video": { "mimeType": "image/jpeg", "data": "AQI=" } } })
+        );
+    }
+
     /// The two frames are separate transitions; emitting both in one message
     /// would describe a turn that started and ended simultaneously.
     #[test]
@@ -4989,7 +5495,7 @@ mod teardown_tests {
                 1,
                 "{signal:?} should set exactly one marker"
             );
-            assert!(input.audio.is_none() && input.media_chunks.is_none() && input.text.is_none());
+            assert!(input.audio.is_none() && input.video.is_none() && input.text.is_none());
         }
     }
 
@@ -5135,6 +5641,8 @@ mod teardown_tests {
             activity_detection,
             activity_open: Arc::new(AtomicBool::new(false)),
             setup_complete_seen: Arc::new(AtomicBool::new(false)),
+            last_usage: Arc::new(ParkingMutex::new(None)),
+            speech_active: Arc::new(AtomicBool::new(false)),
         };
 
         (session, server_ws)
@@ -5174,6 +5682,55 @@ mod teardown_tests {
             "expected a config error, got {err:?}"
         );
         assert!(err.to_string().contains("automatic activity detection is disabled"));
+    }
+
+    /// Committing on a server-VAD session flushes the buffered audio and ends the audio
+    /// stream, so the server closes the user's turn without waiting for more audio.
+    #[tokio::test]
+    async fn commit_ends_the_audio_stream_when_the_server_owns_detection() {
+        let (session, mut server) = session_on_loopback(ActivityDetection::Automatic).await;
+
+        session.send_audio(&AudioChunk::pcm16_16khz(vec![0; 64])).await.unwrap();
+        session.commit_audio().await.unwrap();
+
+        let audio = next_frame(&mut server).await;
+        assert_eq!(audio["realtimeInput"]["audio"]["mimeType"], "audio/pcm;rate=16000");
+        assert_eq!(
+            next_frame(&mut server).await,
+            json!({ "realtimeInput": { "audioStreamEnd": true } })
+        );
+    }
+
+    /// Every commit under server detection re-ends the audio stream: the
+    /// server owns the turn boundary, so a repeated commit is not a
+    /// redundant edge the way a repeated manual `activityEnd` is.
+    #[tokio::test]
+    async fn repeated_commit_audio_resends_audio_stream_end_under_server_detection() {
+        let (session, mut server) = session_on_loopback(ActivityDetection::Automatic).await;
+
+        session.commit_audio().await.unwrap();
+        session.commit_audio().await.unwrap();
+
+        assert_eq!(
+            next_frame(&mut server).await,
+            json!({ "realtimeInput": { "audioStreamEnd": true } })
+        );
+        assert_eq!(
+            next_frame(&mut server).await,
+            json!({ "realtimeInput": { "audioStreamEnd": true } })
+        );
+    }
+
+    /// In manual mode the client's `activityEnd` closes the turn; commit only flushes.
+    #[tokio::test]
+    async fn commit_without_open_activity_sends_no_frame_in_manual_mode() {
+        let (session, mut server) = session_on_loopback(ActivityDetection::Manual).await;
+
+        session.commit_audio().await.unwrap();
+        session.send_text("sentinel").await.unwrap();
+
+        let frame = next_frame(&mut server).await;
+        assert_eq!(frame["realtimeInput"]["text"], "sentinel", "commit wrote a frame: {frame}");
     }
 
     /// `interrupt()` on a server-VAD session must stay a local-only operation:
@@ -5327,8 +5884,9 @@ mod teardown_tests {
         );
     }
 
-    /// In the default server-owned mode a commit must remain an audio flush,
-    /// not emit a frame the protocol forbids.
+    /// In the default server-owned mode a commit ends the audio stream so the
+    /// server closes the turn; it must not emit an `activityEnd` the protocol
+    /// forbids in this mode.
     #[tokio::test]
     async fn commit_audio_writes_no_activity_end_when_server_detection_is_on() {
         let (session, mut server) = session_on_loopback(ActivityDetection::Automatic).await;
@@ -5336,6 +5894,11 @@ mod teardown_tests {
         session.commit_audio().await.unwrap();
         session.send_text("sentinel").await.unwrap();
 
+        assert_eq!(
+            next_frame(&mut server).await,
+            json!({ "realtimeInput": { "audioStreamEnd": true } }),
+            "commit must end the audio stream rather than send an activity frame"
+        );
         let frame = next_frame(&mut server).await;
         assert_eq!(
             frame["realtimeInput"]["text"], "sentinel",
@@ -5420,6 +5983,7 @@ mod teardown_tests {
                 "properties": {"n": {"type": "string", "minLength": 7}}
             })),
             behavior: None,
+            effect: adk_core::ToolEffect::NonIdempotent,
         }]
     }
 
@@ -5490,5 +6054,457 @@ mod teardown_tests {
 
         assert!(decl.get("parameters").is_none(), "legacy field used: {frame}");
         assert_eq!(decl["parametersJsonSchema"]["additionalProperties"], json!(false));
+    }
+
+    /// AI Studio closes the socket with 1007 ("unexpected model name format") on a bare model
+    /// id, so the setup names the model `models/{id}`; a name with a collection is sent as given.
+    #[test]
+    fn a_bare_studio_model_id_is_sent_as_its_resource_name() {
+        let studio = GeminiLiveBackend::studio("key");
+        for (given, sent) in [
+            ("gemini-3.1-flash-live-preview", "models/gemini-3.1-flash-live-preview"),
+            ("models/gemini-3.1-flash-live-preview", "models/gemini-3.1-flash-live-preview"),
+            ("tunedModels/live-1", "tunedModels/live-1"),
+        ] {
+            let model_name = live_model_name(&studio, given);
+            let msg = GeminiRealtimeSession::build_setup_message(
+                &model_name,
+                RealtimeConfig::default(),
+                None,
+                None,
+            )
+            .unwrap();
+            let frame = serde_json::to_value(&msg).unwrap();
+            assert_eq!(frame["setup"]["model"], json!(sent), "{given}");
+        }
+    }
+
+    /// Vertex AI names publisher models by its own resource path, so its ids are not rewritten.
+    #[cfg(feature = "vertex-live")]
+    #[test]
+    fn vertex_model_names_pass_unchanged() {
+        let vertex = GeminiLiveBackend::Vertex {
+            credentials: google_cloud_auth::credentials::anonymous::Builder::new().build(),
+            region: "us-central1".to_string(),
+            project_id: "project".to_string(),
+            endpoint_url: None,
+        };
+        for name in [
+            "gemini-3.1-flash-live-preview",
+            "projects/project/locations/us-central1/publishers/google/models/gemini-live",
+        ] {
+            assert_eq!(live_model_name(&vertex, name), name);
+        }
+    }
+
+    /// Frames recorded from Gemini Live (`gemini-3.1-flash-live-preview`): the user starts
+    /// speaking while the model answers, the server interrupts the model, transcribes the
+    /// user, and reports the end of the speech. The activity reaches callers as the speech
+    /// events OpenAI sends, with the offset into the audio stream.
+    #[tokio::test]
+    async fn voice_activity_is_reported_as_speech_started_and_stopped() {
+        let (session, mut server) = session_on_loopback(ActivityDetection::Automatic).await;
+        for frame in [
+            r#"{"serverContent":{"speechState":"SPEECH"},"voiceActivity":{"type":"ACTIVITY_START","audioOffset":"7.280s"}}"#,
+            r#"{"serverContent":{"interrupted":true}}"#,
+            r#"{"serverContent":{"turnComplete":true},"usageMetadata":{"totalTokenCount":579}}"#,
+            r#"{"serverContent":{"inputTranscription":{"text":"Stop, please. What is 2 + 2?"}}}"#,
+            r#"{"serverContent":{"speechState":"NON_SPEECH"},"voiceActivity":{"type":"ACTIVITY_END","audioOffset":"10.640s"}}"#,
+        ] {
+            server.send(Message::Text(frame.into())).await.unwrap();
+        }
+
+        let mut events = Vec::new();
+        while events.len() < 6 {
+            let event =
+                tokio::time::timeout(std::time::Duration::from_secs(5), session.next_event())
+                    .await
+                    .expect("timed out waiting for an event")
+                    .expect("session ended")
+                    .expect("event");
+            if !matches!(event, ServerEvent::Unknown) {
+                events.push(event);
+            }
+        }
+
+        // The interrupted frame cancels the abandoned generation (the onset was
+        // already reported by `voiceActivity`, so no second `SpeechStarted`),
+        // and the turn-final counts surface as a `Usage` event beside the
+        // `ResponseDone` that carries them.
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    ServerEvent::SpeechStarted { audio_start_ms: 7280, .. },
+                    ServerEvent::ResponseCancelled { .. },
+                    ServerEvent::ResponseDone { .. },
+                    ServerEvent::Usage { .. },
+                    ServerEvent::InputTranscriptDelta { delta, .. },
+                    ServerEvent::SpeechStopped { audio_end_ms: 10640, .. },
+                ] if delta == "Stop, please. What is 2 + 2?"
+            ),
+            "{events:?}"
+        );
+    }
+
+    /// A message that carries `voiceActivity` beside content keeps both, activity first; an
+    /// unspecified activity is not a speech event, and a missing offset reads as zero.
+    #[tokio::test]
+    async fn voice_activity_beside_content_keeps_both() {
+        let (session, _server) = session_on_loopback(ActivityDetection::Automatic).await;
+        let events = session
+            .translate_gemini_event(
+                r#"{"serverContent":{"inputTranscription":{"text":"hi"}},"voiceActivity":{"type":"ACTIVITY_END","audioOffset":"1.5s"}}"#,
+            )
+            .unwrap();
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    ServerEvent::SpeechStopped { audio_end_ms: 1500, .. },
+                    ServerEvent::InputTranscriptDelta { delta, .. },
+                ] if delta == "hi"
+            ),
+            "{events:?}"
+        );
+
+        for frame in [
+            r#"{"voiceActivity":{"type":"TYPE_UNSPECIFIED","audioOffset":"1s"}}"#,
+            r#"{"voiceActivity":{"audioOffset":"1s"}}"#,
+        ] {
+            let events = session.translate_gemini_event(frame).unwrap();
+            assert!(matches!(events.as_slice(), [ServerEvent::Unknown]), "{frame}: {events:?}");
+        }
+        let events = session
+            .translate_gemini_event(r#"{"voiceActivity":{"type":"ACTIVITY_START"}}"#)
+            .unwrap();
+        assert!(
+            matches!(events.as_slice(), [ServerEvent::SpeechStarted { audio_start_ms: 0, .. }]),
+            "{events:?}"
+        );
+    }
+
+    // ── Recorded frames: resumption handles and interruptions ────────────
+
+    /// Gemini Live sends the resumption handle as `newHandle` (frames recorded from
+    /// `gemini-3.1-flash-live-preview`, handle replaced). The handle is a
+    /// provider-private credential: it is latched on the session for the next
+    /// reconnect and never surfaces as a public event. While the session cannot
+    /// be resumed the update carries no usable handle and the last one stands.
+    #[tokio::test]
+    async fn the_resumption_handle_is_read_from_new_handle() {
+        let (session, _server) = session_on_loopback(ActivityDetection::Automatic).await;
+        let handle = |frame: &str| {
+            let events = session.translate_gemini_event(frame).unwrap();
+            assert!(events.is_empty(), "resumption updates emit no event: {events:?}");
+            session.last_resume_handle()
+        };
+
+        assert_eq!(
+            handle(
+                r#"{"sessionResumptionUpdate":{"newHandle":"4c2b7e0a-9f1d-4e55-8a6b-1d2e3f405162","resumable":true}}"#
+            )
+            .as_deref(),
+            Some("4c2b7e0a-9f1d-4e55-8a6b-1d2e3f405162")
+        );
+        assert_eq!(
+            handle("{\n  \"sessionResumptionUpdate\": {\n    \"newHandle\": \"h-2\",\n    \"resumable\": true\n  }\n}\n")
+                .as_deref(),
+            Some("h-2")
+        );
+        // `resumptionToken` is not a field the server sends; it is not read.
+        assert_eq!(
+            handle(r#"{"sessionResumptionUpdate":{"resumptionToken":"h-legacy"}}"#).as_deref(),
+            Some("h-2")
+        );
+        assert_eq!(
+            handle(r#"{"sessionResumptionUpdate":{"resumable":false}}"#).as_deref(),
+            Some("h-2")
+        );
+        assert_eq!(
+            handle(r#"{"sessionResumptionUpdate":{"newHandle":"","resumable":false}}"#).as_deref(),
+            Some("h-2")
+        );
+        // An empty handle is no handle, even on a resumable update.
+        assert_eq!(
+            handle(r#"{"sessionResumptionUpdate":{"newHandle":"","resumable":true}}"#).as_deref(),
+            Some("h-2")
+        );
+        assert_eq!(
+            handle(r#"{"sessionResumptionUpdate":{"newHandle":"   ","resumable":true}}"#)
+                .as_deref(),
+            Some("h-2")
+        );
+    }
+
+    /// A latched handle older than its TTL is dropped, not presented.
+    #[tokio::test]
+    async fn an_expired_resumption_handle_is_dropped() {
+        let (session, _server) = session_on_loopback(ActivityDetection::Automatic).await;
+        *session.last_resume_handle.lock() = Some((
+            "stale-handle".to_string(),
+            std::time::Instant::now() - (RESUME_HANDLE_TTL + std::time::Duration::from_secs(1)),
+        ));
+        assert_eq!(session.fresh_resume_handle(), None);
+        assert_eq!(session.last_resume_handle(), None, "the expired handle is dropped");
+    }
+
+    /// `serverContent.interrupted` (recorded) is the server's report that the user's speech
+    /// cut the model off. It reaches callers as `SpeechStarted` (the barge-in onset, unless
+    /// `voiceActivity` already reported it) followed by `ResponseCancelled` (the abandoned
+    /// generation the runner must purge); a speech whose onset `voiceActivity` already
+    /// reported is reported once.
+    #[tokio::test]
+    async fn interrupted_is_reported_as_speech_started() {
+        let (session, _server) = session_on_loopback(ActivityDetection::Automatic).await;
+        let interrupted = "{\n  \"serverContent\": {\n    \"interrupted\": true\n  }\n}\n";
+
+        let events = session.translate_gemini_event(interrupted).unwrap();
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    ServerEvent::SpeechStarted { audio_start_ms: 0, .. },
+                    ServerEvent::ResponseCancelled { .. },
+                ]
+            ),
+            "{events:?}"
+        );
+
+        let onset = session
+            .translate_gemini_event(
+                r#"{"serverContent":{"speechState":"SPEECH"},"voiceActivity":{"type":"ACTIVITY_START","audioOffset":"0.280s"}}"#,
+            )
+            .unwrap();
+        assert!(
+            matches!(onset.as_slice(), [ServerEvent::SpeechStarted { audio_start_ms: 280, .. }]),
+            "{onset:?}"
+        );
+        // The onset is latched, so no second `SpeechStarted` — but the abandoned
+        // generation still cancels.
+        let events = session.translate_gemini_event(interrupted).unwrap();
+        assert!(matches!(events.as_slice(), [ServerEvent::ResponseCancelled { .. }]), "{events:?}");
+
+        session
+            .translate_gemini_event(
+                r#"{"serverContent":{"speechState":"NON_SPEECH"},"voiceActivity":{"type":"ACTIVITY_END","audioOffset":"3.880s"}}"#,
+            )
+            .unwrap();
+        let events = session.translate_gemini_event(interrupted).unwrap();
+        assert!(
+            matches!(
+                events.as_slice(),
+                [ServerEvent::SpeechStarted { .. }, ServerEvent::ResponseCancelled { .. },]
+            ),
+            "{events:?}"
+        );
+    }
+
+    /// A usage report on a message of its own belongs to the response that
+    /// closes next: the session stashes it instead of emitting it, so the
+    /// counts surface once, attached to the closing `ResponseDone`.
+    #[tokio::test]
+    async fn standalone_usage_attaches_to_the_response_that_closes_next() {
+        let (session, _server) = session_on_loopback(ActivityDetection::Automatic).await;
+
+        let stashed =
+            session.translate_gemini_event(r#"{"usageMetadata":{"totalTokenCount":579}}"#).unwrap();
+        assert!(matches!(stashed.as_slice(), [ServerEvent::Unknown]), "{stashed:?}");
+
+        let closed =
+            session.translate_gemini_event(r#"{"serverContent":{"turnComplete":true}}"#).unwrap();
+        match closed.as_slice() {
+            [ServerEvent::ResponseDone { response, .. }] => {
+                assert_eq!(
+                    response["usageMetadata"]["totalTokenCount"],
+                    json!(579),
+                    "{response:?}"
+                );
+            }
+            other => panic!("expected ResponseDone carrying the stashed usage, got {other:?}"),
+        }
+
+        // Nothing left behind: the next bare close carries no counts.
+        let bare =
+            session.translate_gemini_event(r#"{"serverContent":{"turnComplete":true}}"#).unwrap();
+        match bare.as_slice() {
+            [ServerEvent::ResponseDone { response, .. }] => {
+                assert!(response.get("usageMetadata").is_none(), "{response:?}");
+            }
+            other => panic!("expected a bare ResponseDone, got {other:?}"),
+        }
+    }
+
+    // ── RealtimeAgent on Gemini Live ─────────────────────────────────────
+
+    /// The close reason Gemini Live sends for a setup with two response modalities, recorded
+    /// from `gemini-3.1-flash-live-preview` (the API cuts a close reason at 123 bytes).
+    const MODALITIES_REFUSED: &str = "The requested combination of response modalities (AUDIO, TEXT) is not supported by the model. models/gemini-3.1-flash-live-";
+
+    /// A model whose sessions talk to a loopback server that keeps Gemini Live's setup rule
+    /// for `gemini-3.1-flash-live-preview` — one response modality, `AUDIO` — and closes with
+    /// 1007 otherwise, as the API does. It answers the first turn with recorded frames and
+    /// then closes the session normally.
+    struct LoopbackGeminiLive;
+
+    #[async_trait]
+    impl crate::model::RealtimeModel for LoopbackGeminiLive {
+        fn provider(&self) -> &str {
+            "gemini"
+        }
+
+        fn model_id(&self) -> &str {
+            "models/gemini-3.1-flash-live-preview"
+        }
+
+        fn supported_input_formats(&self) -> Vec<AudioFormat> {
+            vec![AudioFormat::pcm16_16khz()]
+        }
+
+        fn supported_output_formats(&self) -> Vec<AudioFormat> {
+            vec![AudioFormat::pcm16_24khz()]
+        }
+
+        fn available_voices(&self) -> Vec<&str> {
+            vec!["Kore"]
+        }
+
+        async fn connect(&self, config: RealtimeConfig) -> Result<crate::session::BoxedSession> {
+            let (session, server) =
+                session_on_loopback(ActivityDetection::from_config(&config)).await;
+            tokio::spawn(gemini_live_server(server));
+            let adapter =
+                adk_gemini::schema_adapter::GeminiSchemaAdapter::with_dialect(session.dialect);
+            let caps = capabilities_for(&session.reconnect_model);
+            let tools =
+                convert_tools(config.tools.clone(), &adk_core::SchemaCache::new(), &adapter, caps)?;
+            session.send_setup_with_compiled_tools(self.model_id(), config, tools, None).await?;
+            Ok(Box::new(session))
+        }
+    }
+
+    async fn gemini_live_server(mut server: ServerEnd) {
+        use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+        use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+
+        let setup = next_frame(&mut server).await;
+        let modalities = setup["setup"]["generationConfig"]["responseModalities"].as_array();
+        let audio_only = matches!(
+            modalities.map(Vec::as_slice),
+            Some([only]) if only.as_str().is_some_and(|m| m.eq_ignore_ascii_case("audio"))
+        );
+        if !audio_only {
+            let _ = server
+                .close(Some(CloseFrame {
+                    code: CloseCode::Invalid,
+                    reason: MODALITIES_REFUSED.into(),
+                }))
+                .await;
+            return;
+        }
+        server.send(Message::Text(r#"{"setupComplete":{}}"#.into())).await.unwrap();
+        let turn = next_frame(&mut server).await;
+        assert_eq!(
+            turn["realtimeInput"]["text"], "What is two plus two?",
+            "the text turn must arrive as realtimeInput text: {turn}"
+        );
+        for frame in [
+            r#"{"serverContent":{"modelTurn":{"parts":[{"inlineData":{"mimeType":"audio/pcm;rate=24000","data":"AAABAAIA"}}]}}}"#,
+            r#"{"serverContent":{"modelTurn":{"parts":[{"inlineData":{"mimeType":"audio/pcm;rate=24000","data":"AwAEAAUA"}}]}}}"#,
+            r#"{"serverContent":{"generationComplete":true}}"#,
+            r#"{"serverContent":{"turnComplete":true},"usageMetadata":{"promptTokenCount":155,"responseTokenCount":42,"totalTokenCount":197}}"#,
+        ] {
+            server.send(Message::Text(frame.into())).await.unwrap();
+        }
+        let _ = server.close(Some(CloseFrame { code: CloseCode::Normal, reason: "".into() })).await;
+    }
+
+    /// Runs `agent` once under `Runner` with a text turn; returns what the run yielded and
+    /// what the session saved.
+    async fn run_agent(
+        agent: crate::RealtimeAgent,
+    ) -> (Vec<adk_core::Result<adk_core::Event>>, Vec<adk_core::Event>) {
+        use adk_session::{CreateRequest, GetRequest, InMemorySessionService, SessionService};
+
+        let sessions = Arc::new(InMemorySessionService::new());
+        sessions
+            .create(CreateRequest {
+                app_name: "voice-app".to_string(),
+                user_id: "ana".to_string(),
+                session_id: Some("s1".to_string()),
+                state: Default::default(),
+            })
+            .await
+            .unwrap();
+        let runner = adk_runner::Runner::builder()
+            .app_name("voice-app")
+            .agent(Arc::new(agent))
+            .session_service(sessions.clone() as Arc<dyn SessionService>)
+            .build()
+            .unwrap();
+        let results: Vec<_> = runner
+            .run_str("ana", "s1", adk_core::Content::new("user").with_text("What is two plus two?"))
+            .await
+            .unwrap()
+            .collect()
+            .await;
+        let saved = sessions
+            .get(GetRequest {
+                app_name: "voice-app".to_string(),
+                user_id: "ana".to_string(),
+                session_id: "s1".to_string(),
+                num_recent_events: None,
+                after: None,
+            })
+            .await
+            .unwrap()
+            .events()
+            .all();
+        (results, saved)
+    }
+
+    /// A `RealtimeAgent` built with default settings leaves the modalities to the provider,
+    /// so Gemini Live accepts its setup and the spoken reply arrives.
+    #[tokio::test]
+    async fn a_default_realtime_agent_runs_on_gemini_live() {
+        let agent = crate::RealtimeAgent::builder("voice")
+            .model(Arc::new(LoopbackGeminiLive))
+            .build()
+            .unwrap();
+        let (results, saved) = run_agent(agent).await;
+
+        assert!(results.iter().all(std::result::Result::is_ok), "{results:?}");
+        let audio: Vec<u8> = saved
+            .iter()
+            .filter(|event| event.author == "voice")
+            .filter_map(|event| event.llm_response.content.as_ref())
+            .flat_map(|content| &content.parts)
+            .filter_map(|part| match part {
+                Part::InlineData { mime_type, data, .. } if mime_type == "audio/pcm" => {
+                    Some(data.clone())
+                }
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(audio, vec![0, 0, 1, 0, 2, 0, 3, 0, 4, 0, 5, 0]);
+    }
+
+    /// A setup Gemini Live refuses closes the socket with 1007; the run ends with that error
+    /// instead of ending as though the session had finished.
+    #[tokio::test]
+    async fn a_refused_setup_ends_the_run_with_the_providers_reason() {
+        let agent = crate::RealtimeAgent::builder("voice")
+            .model(Arc::new(LoopbackGeminiLive))
+            .modalities(vec!["text".to_string(), "audio".to_string()])
+            .build()
+            .unwrap();
+        let (results, _) = run_agent(agent).await;
+
+        let errors: Vec<_> = results.iter().filter_map(|result| result.as_ref().err()).collect();
+        assert_eq!(errors.len(), 1, "{results:?}");
+        assert_eq!(errors[0].code, "model.realtime.session_closed");
+        assert_eq!(errors[0].category, adk_core::ErrorCategory::InvalidInput);
+        assert!(errors[0].message.contains(&format!("1007:{MODALITIES_REFUSED}")), "{}", errors[0]);
     }
 }

@@ -6,11 +6,15 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 description = "Binary artifact storage for Rust Agent Development Kit (ADK-Rust) agents"
-repository = "https://github.com/zavora-ai/adk-rust"
+homepage.workspace = true
+repository.workspace = true
 documentation = "https://docs.rs/adk-artifact"
 keywords = ["ai", "agent", "adk", "artifact", "storage"]
 categories = ["api-bindings", "asynchronous"]
 readme = "README.md"
+
+[package.metadata.docs.rs]
+all-features = true
 
 [dependencies]
 adk-core.workspace = true
@@ -18,14 +22,15 @@ adk-gcp = { workspace = true, optional = true }
 async-trait.workspace = true
 serde = { workspace = true, optional = true }
 serde_json.workspace = true
-tokio = { workspace = true, features = ["fs"] }
+tokio = { workspace = true, features = ["fs", "io-util"] }
 google-cloud-auth = { version = "1.8", optional = true, default-features = false, features = ["default-rustls-provider"] }
 reqwest = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
 
 [dev-dependencies]
+adk-core = { path = "../adk-core", features = ["conformance"] }
 tempfile = "3"
-tokio = { workspace = true, features = ["fs", "rt", "macros", "net"] }
+tokio = { workspace = true, features = ["fs", "rt", "rt-multi-thread", "macros", "net", "sync"] }
 axum = "0.8"
 
 [features]

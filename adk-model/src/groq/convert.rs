@@ -69,6 +69,19 @@ pub struct ChatCompletionRequest {
     pub tools: Option<Vec<Tool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub include_reasoning: Option<bool>,
+    /// Stop sequences.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop: Option<Vec<String>>,
+    /// Sampling seed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seed: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frequency_penalty: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub presence_penalty: Option<f32>,
+    /// Reasoning effort of a GPT-OSS model (spec 3.1 §7.23).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
 
 /// Groq chat completion response.
@@ -83,8 +96,30 @@ pub struct ChatCompletionResponse {
     #[serde(rename = "model")]
     pub _model: String,
     pub choices: Vec<Choice>,
+    /// The `usage` object as received; counts are read from it leniently.
     #[serde(default)]
-    pub usage: Option<Usage>,
+    pub usage: Option<Value>,
+    /// Groq's extension object, which carries usage on the final stream chunk.
+    #[serde(default)]
+    pub x_groq: Option<XGroq>,
+}
+
+/// Groq's `x_groq` extension object.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct XGroq {
+    #[serde(default)]
+    pub usage: Option<Value>,
+}
+
+impl ChatCompletionResponse {
+    /// The response's usage: top-level `usage`, else `x_groq.usage`, normalized with the
+    /// object kept as received. A `null` or missing count never fails the response.
+    pub fn usage_metadata(&self) -> Option<UsageMetadata> {
+        self.usage
+            .as_ref()
+            .or_else(|| self.x_groq.as_ref()?.usage.as_ref())
+            .and_then(crate::usage_json::chat_completions)
+    }
 }
 
 /// Response choice.
@@ -132,30 +167,28 @@ pub struct DeltaFunction {
     pub arguments: Option<String>,
 }
 
-/// Prompt token breakdown details (OpenAI-compatible).
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct PromptTokensDetails {
-    #[serde(default)]
-    pub cached_tokens: Option<u32>,
-}
-
-/// Completion token breakdown details (OpenAI-compatible).
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct CompletionTokensDetails {
-    #[serde(default)]
-    pub reasoning_tokens: Option<u32>,
-}
-
-/// Token usage information.
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct Usage {
-    pub prompt_tokens: u32,
-    pub completion_tokens: u32,
-    pub total_tokens: u32,
-    #[serde(default)]
-    pub prompt_tokens_details: Option<PromptTokensDetails>,
-    #[serde(default)]
-    pub completion_tokens_details: Option<CompletionTokensDetails>,
+/// Convert one ADK content to the Groq messages that carry it.
+///
+/// A content holding function responses becomes one `tool` message per response, in order,
+/// followed by a user message with any other parts; every other content is one message.
+pub fn content_to_messages(content: &Content) -> Vec<Message> {
+    if matches!(content.role.as_str(), "user" | "function" | "tool")
+        && let Some((responses, rest)) = crate::tool_result::split_function_responses(content)
+    {
+        let mut messages: Vec<Message> = responses
+            .into_iter()
+            .map(|(id, response)| Message {
+                role: "tool".to_string(),
+                content: Some(crate::tool_result::serialize_tool_result(&response.response)),
+                name: None,
+                tool_calls: None,
+                tool_call_id: id.map(str::to_string),
+            })
+            .collect();
+        messages.extend(rest.map(|rest| content_to_message(&rest)));
+        return messages;
+    }
+    vec![content_to_message(content)]
 }
 
 /// Convert ADK Content to Groq Message.
@@ -255,7 +288,7 @@ pub fn from_response(response: &ChatCompletionResponse) -> LlmResponse {
             "length" => FinishReason::MaxTokens,
             "tool_calls" => FinishReason::Stop,
             "content_filter" => FinishReason::Safety,
-            _ => FinishReason::Stop,
+            _ => FinishReason::Other,
         });
 
         if let Some(msg) = &choice.message {
@@ -269,8 +302,11 @@ pub fn from_response(response: &ChatCompletionResponse) -> LlmResponse {
 
             if let Some(tool_calls) = &msg.tool_calls {
                 for tc in tool_calls {
-                    let args: Value = serde_json::from_str(&tc.function.arguments)
-                        .unwrap_or(serde_json::json!({}));
+                    let args = crate::tool_args::tool_call_arguments(
+                        "groq",
+                        &tc.function.name,
+                        Some(&Value::String(tc.function.arguments.clone())),
+                    );
                     parts.push(Part::FunctionCall {
                         name: tc.function.name.clone(),
                         args,
@@ -295,21 +331,7 @@ pub fn from_response(response: &ChatCompletionResponse) -> LlmResponse {
         (None, None)
     };
 
-    let usage = response.usage.as_ref().map(|u| {
-        let mut meta = UsageMetadata {
-            prompt_token_count: u.prompt_tokens as i32,
-            candidates_token_count: u.completion_tokens as i32,
-            total_token_count: u.total_tokens as i32,
-            ..Default::default()
-        };
-        if let Some(ref details) = u.prompt_tokens_details {
-            meta.cache_read_input_token_count = details.cached_tokens.map(|t| t as i32);
-        }
-        if let Some(ref details) = u.completion_tokens_details {
-            meta.thinking_token_count = details.reasoning_tokens.map(|t| t as i32);
-        }
-        meta
-    });
+    let usage = response.usage_metadata();
 
     let turn_complete = content.as_ref().is_none_or(|value| !value.has_function_calls());
 
@@ -325,6 +347,8 @@ pub fn from_response(response: &ChatCompletionResponse) -> LlmResponse {
         error_message: None,
         provider_metadata: None,
         interaction_id: None,
+        model: None,
+        provider: None,
     }
 }
 
@@ -356,6 +380,8 @@ pub fn create_tool_call_response(
         error_message: None,
         provider_metadata: None,
         interaction_id: None,
+        model: None,
+        provider: None,
     }
 }
 
@@ -396,5 +422,36 @@ mod tests {
         let payload = message.content.unwrap_or_default();
         assert!(payload.contains("application/pdf"));
         assert!(payload.contains("https://example.com/report.pdf"));
+    }
+
+    #[test]
+    fn several_function_responses_become_one_tool_message_each() {
+        let response = |id: &str| Part::FunctionResponse {
+            function_response: adk_core::FunctionResponseData::new(
+                "get_weather",
+                serde_json::json!({"ok": id}),
+            ),
+            id: Some(id.to_string()),
+            annotations: None,
+        };
+        let content = Content {
+            role: "function".to_string(),
+            parts: vec![
+                response("call_a"),
+                response("call_b"),
+                Part::Text { text: "note".to_string() },
+            ],
+        };
+        let messages = content_to_messages(&content);
+        let shape: Vec<(String, Option<String>)> =
+            messages.iter().map(|m| (m.role.clone(), m.tool_call_id.clone())).collect();
+        assert_eq!(
+            shape,
+            vec![
+                ("tool".to_string(), Some("call_a".to_string())),
+                ("tool".to_string(), Some("call_b".to_string())),
+                ("user".to_string(), None),
+            ]
+        );
     }
 }

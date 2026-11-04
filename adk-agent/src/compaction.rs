@@ -4,9 +4,10 @@
 //! a window of conversation events into a single compacted event. This is the
 //! Rust equivalent of ADK Python's `LlmEventSummarizer`.
 
+use adk_core::intra_compaction::render_part_for_summary as render_part;
 use adk_core::{
-    BaseEventsSummarizer, Content, Event, EventActions, EventCompaction, Llm, LlmRequest, Part,
-    Result,
+    AdkError, BaseEventsSummarizer, Content, ErrorCategory, ErrorComponent, Event, EventActions,
+    EventCompaction, FinishReason, Llm, LlmRequest, Part, Result,
 };
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -23,6 +24,24 @@ The summary should be concise and capture the essence of the interaction.\n\n\
 /// When called with a list of events, this formats the events, generates a
 /// summary using an LLM, and returns a new [`Event`] containing the summary
 /// within an [`EventCompaction`].
+///
+/// The summarizer's input is the window as the model sees it: the most recent earlier
+/// summary in the window (an event carrying [`EventActions::compaction`]) replaces the events
+/// it covers, so its content carries into the new summary, and every later event contributes
+/// its text, function calls and responses, file and inline data references, and embedded
+/// resources. Thinking, provider-native parts and streamed partial events are left out.
+///
+/// A summary replaces history only when it is complete and smaller. A stream error fails
+/// the summary, and so does a model that stops for any reason but `Stop` (for example
+/// `MaxTokens`), with `model.summary_incomplete`. For a stream error that error keeps the
+/// stream error's category, retry hint, and details, records its code as
+/// `details.metadata["cause_code"]`, and has it as its [`source`](std::error::Error::source).
+/// An empty summary, or one at least as long as the rendered window it would replace, returns
+/// `Ok(None)`, so the runner keeps the history as it is.
+///
+/// The summary call goes through [`adk_core::generate_metered`], so when the
+/// runner compacts a session it counts against the run's budget and spend
+/// ledger, and a call the budget refuses is never sent.
 pub struct LlmEventSummarizer {
     llm: Arc<dyn Llm>,
     prompt_template: String,
@@ -41,14 +60,23 @@ impl LlmEventSummarizer {
         self
     }
 
-    fn format_events_for_prompt(events: &[Event]) -> String {
-        let mut lines = Vec::new();
+    /// Renders the window the summary replaces: the latest earlier summary, then each event
+    /// after the span that summary covers.
+    fn format_events_for_prompt(events: &[Event], earlier: Option<&EventCompaction>) -> String {
+        let mut lines: Vec<String> = earlier
+            .into_iter()
+            .flat_map(|compaction| compaction.compacted_content.parts.iter())
+            .filter_map(render_part)
+            .map(|summary| format!("summary of earlier conversation: {summary}"))
+            .collect();
         for event in events {
+            let covered = earlier.is_some_and(|c| event.timestamp <= c.end_timestamp);
+            if event.actions.compaction.is_some() || event.llm_response.partial || covered {
+                continue;
+            }
             if let Some(content) = &event.llm_response.content {
-                for part in &content.parts {
-                    if let Part::Text { text } = part {
-                        lines.push(format!("{}: {}", event.author, text));
-                    }
+                for rendered in content.parts.iter().filter_map(render_part) {
+                    lines.push(format!("{}: {rendered}", event.author));
                 }
             }
         }
@@ -63,7 +91,8 @@ impl BaseEventsSummarizer for LlmEventSummarizer {
             return Ok(None);
         }
 
-        let conversation_history = Self::format_events_for_prompt(events);
+        let earlier = events.iter().rev().find_map(|event| event.actions.compaction.as_ref());
+        let conversation_history = Self::format_events_for_prompt(events, earlier);
         let prompt = self.prompt_template.replace("{conversation_history}", &conversation_history);
 
         let request = LlmRequest {
@@ -77,28 +106,81 @@ impl BaseEventsSummarizer for LlmEventSummarizer {
             previous_response_id: None,
         };
 
-        // Generate summary (non-streaming)
-        let mut response_stream = self.llm.generate_content(request, false).await?;
+        // Counts against the run's budget and spend ledger when the runner made a scope current.
+        let mut response_stream =
+            adk_core::generate_metered(self.llm.as_ref(), request, false).await?;
 
         use futures::StreamExt;
-        let mut summary_content: Option<Content> = None;
-        while let Some(chunk_result) = response_stream.next().await {
-            if let Ok(chunk) = chunk_result
-                && chunk.content.is_some()
-            {
-                summary_content = chunk.content;
-                break;
+        let mut summary_text = String::new();
+        let mut finish_reason = None;
+        // Drained to the end so the call's usage, which may follow the content, is metered.
+        while let Some(chunk) = response_stream.next().await {
+            let chunk = chunk.map_err(|cause| {
+                let mut details = (*cause.details).clone();
+                details.metadata.insert("cause_code".to_string(), cause.code.into());
+                AdkError::new(
+                    ErrorComponent::Model,
+                    cause.category,
+                    "model.summary_incomplete",
+                    format!(
+                        "the summarizer model failed before finishing its summary ({}); the \
+                         history is kept as it is",
+                        cause.message
+                    ),
+                )
+                .with_retry(cause.retry.clone())
+                .with_details(details)
+                .with_source(cause)
+            })?;
+            for part in chunk.content.iter().flat_map(|content| content.parts.iter()) {
+                if let Part::Text { text } = part {
+                    summary_text.push_str(text);
+                }
             }
+            finish_reason = chunk.finish_reason.or(finish_reason);
         }
 
-        let Some(mut summary) = summary_content else {
+        // A summary the model cut short would replace history with part of what it said.
+        if let Some(
+            reason @ (FinishReason::MaxTokens
+            | FinishReason::Safety
+            | FinishReason::Recitation
+            | FinishReason::Other),
+        ) = finish_reason
+        {
+            return Err(AdkError::new(
+                ErrorComponent::Model,
+                ErrorCategory::Internal,
+                "model.summary_incomplete",
+                format!(
+                    "the summarizer model stopped before finishing its summary ({reason:?}); \
+                     the history is kept as it is. Raise the summarizer's output limit or \
+                     shorten the compaction window"
+                ),
+            ));
+        }
+        if summary_text.trim().is_empty() {
             return Ok(None);
-        };
+        }
+        // A summary at least as long as what it replaces would not shrink the request.
+        if summary_text.len() >= conversation_history.len() {
+            tracing::debug!(
+                summary.chars = summary_text.len(),
+                window.chars = conversation_history.len(),
+                "summary is not smaller than the history it replaces; skipping compaction"
+            );
+            return Ok(None);
+        }
+        let summary = Content::new("model").with_text(summary_text);
 
-        // Ensure the compacted content has the role 'model'
-        summary.role = "model".to_string();
-
-        let start_timestamp = events.first().map(|e| e.timestamp).unwrap_or_default();
+        // A new summary also stands in for the span the earlier one covered.
+        let start_timestamp = events
+            .first()
+            .map(|e| e.timestamp)
+            .into_iter()
+            .chain(earlier.map(|compaction| compaction.start_timestamp))
+            .min()
+            .unwrap_or_default();
         let end_timestamp = events.last().map(|e| e.timestamp).unwrap_or_default();
 
         let compaction =

@@ -47,6 +47,10 @@ impl AssemblyAiStt {
 
 #[async_trait]
 impl SttProvider for AssemblyAiStt {
+    fn billing(&self) -> Option<crate::AudioBilling> {
+        Some(crate::AudioBilling::new("assemblyai", "assemblyai"))
+    }
+
     async fn transcribe(&self, audio: &AudioFrame, opts: &SttOptions) -> AudioResult<Transcript> {
         let wav_bytes = frame_to_wav_bytes(audio)?;
 
@@ -163,10 +167,12 @@ impl SttProvider for AssemblyAiStt {
         &self,
         _audio: Pin<Box<dyn Stream<Item = AudioFrame> + Send>>,
         _opts: &SttOptions,
-    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<Transcript>> + Send>>> {
+    ) -> AudioResult<crate::TranscriptStream> {
         Err(AudioError::Stt {
             provider: "assemblyai".into(),
-            message: "streaming transcription not yet implemented".into(),
+            message: "streaming transcription not yet implemented; call `transcribe` with the \
+                      buffered audio"
+                .into(),
         })
     }
 }

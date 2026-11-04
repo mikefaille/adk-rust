@@ -8,6 +8,20 @@ pub struct TestContext {
 }
 
 impl TestContext {
+    // This shared fixture is also compiled by tests that use the default mode.
+    #[allow(dead_code)]
+    pub fn with_streaming_mode(mut self, mode: adk_core::StreamingMode) -> Self {
+        self.config.streaming_mode = mode;
+        self
+    }
+
+    // This shared fixture is also compiled by tests that send plain text.
+    #[allow(dead_code)]
+    pub fn with_user_content(mut self, content: Content) -> Self {
+        self.content = content;
+        self
+    }
+
     pub fn new(message: &str) -> Self {
         Self {
             content: Content {

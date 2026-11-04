@@ -17,6 +17,8 @@
 //! cargo adk validate --yaml agent.yaml      # validate agent definition
 //! cargo adk deploy                          # deploy to platform
 //! cargo adk deploy --stream-output          # deploy with JSON event streaming
+//! cargo adk eval tests/ --agent-cmd "target/release/my-agent --eval"  # run eval sets
+//! cargo adk eval --ledger ledger.jsonl      # gate on drift in an exported activity ledger
 //! ```
 
 use clap::{Parser, Subcommand};
@@ -27,6 +29,9 @@ use std::path::{Path, PathBuf};
 use cargo_adk::codegen::generate_project_with_registry;
 use cargo_adk::composition::{DryRunFile, DryRunOutput, resolve_composition};
 use cargo_adk::registry::TemplateRegistry;
+
+mod eval_cmd;
+mod ledger_gate;
 
 const ADK_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -173,38 +178,80 @@ enum AdkCommand {
         stream_output: bool,
     },
 
-    /// Run agent evaluations
+    /// Run eval sets against an agent binary and exit non-zero on any failure or regression
+    ///
+    /// `--agent-cmd` starts the agent under test, which reads one JSON request per line on
+    /// stdin and writes one JSON response per line on stdout:
+    /// request `{"case_id","turn","user_text","session_id"}`, response
+    /// `{"text","tool_calls":[{"name","args"}]}` or `{"error"}`. Every turn of a case shares
+    /// a session_id. Logs go to stderr.
+    ///
+    /// `--ledger <export.jsonl>` instead runs the ledger statistics over an exported activity
+    /// ledger and exits non-zero on a meaningful deviation of its last day from the baseline.
     Eval {
-        /// Path to eval set file or directory
-        path: PathBuf,
+        /// Path to a .test.json file, or a directory of them
+        #[arg(required_unless_present = "ledger")]
+        path: Option<PathBuf>,
 
-        /// Model override (e.g., "gemini-3.7-flash")
+        /// Shell command that starts the agent under test (run with `sh -c`, or `cmd /C` on
+        /// Windows)
+        #[arg(long, required_unless_present = "ledger")]
+        agent_cmd: Option<String>,
+
+        /// Exported activity ledger (JSONL, one row per line) to check for drift instead of
+        /// running eval sets
+        #[arg(
+            long,
+            value_name = "EXPORT.JSONL",
+            conflicts_with_all = [
+                "path", "agent_cmd", "criteria", "judge_model", "save_baseline",
+                "check_regression", "baseline", "tolerance", "turn_timeout",
+            ]
+        )]
+        ledger: Option<PathBuf>,
+
+        /// Floor of one ledger dimension's deviation test, as DIMENSION=VALUE (repeatable;
+        /// --ledger only)
+        #[arg(long = "floor", value_name = "DIMENSION=VALUE", requires = "ledger")]
+        floors: Vec<String>,
+
+        /// EvaluationCriteria JSON file (default: tool_trajectory_score 1.0 and
+        /// response_similarity 0.8)
         #[arg(long)]
-        model: Option<String>,
+        criteria: Option<PathBuf>,
 
-        /// Save results as baseline
+        /// Model for LLM-judged criteria: gemini-* (GOOGLE_API_KEY), claude-*
+        /// (ANTHROPIC_API_KEY), or gpt-*/o1/o3/o4 (OPENAI_API_KEY)
+        #[arg(long)]
+        judge_model: Option<String>,
+
+        /// Save the scores of this run as the regression baseline
         #[arg(long)]
         save_baseline: bool,
 
-        /// Check for regressions against saved baseline
+        /// Compare against the saved baseline; a missing baseline is an error
         #[arg(long)]
         check_regression: bool,
 
-        /// Regression tolerance (default 0.05)
+        /// Baseline file (default: .eval-baseline.json in the eval set's directory)
+        #[arg(long)]
+        baseline: Option<PathBuf>,
+
+        /// Largest score drop from the baseline that is not a regression
         #[arg(long, default_value = "0.05")]
         tolerance: f64,
 
-        /// Output format: "table" (default), "json", "junit"
-        #[arg(long, default_value = "table")]
-        format: String,
+        /// Report format
+        #[arg(long, value_enum, default_value = "table")]
+        format: eval_cmd::EvalFormat,
 
-        /// Output file (for junit/json formats)
+        /// Write the report to this file instead of stdout
         #[arg(long)]
         output: Option<PathBuf>,
 
-        /// Concurrency level for parallel evaluation
-        #[arg(long, default_value = "1")]
-        concurrency: usize,
+        /// Seconds to wait for each agent response before failing the case
+        #[arg(long, default_value = "300")]
+        turn_timeout: u64,
     },
 
     /// Run performance benchmarks against real LLM APIs
@@ -248,10 +295,6 @@ enum AdkCommand {
         /// Warm-up iterations before measurement begins (discarded)
         #[arg(long, default_value = "3")]
         warmup: usize,
-
-        /// Task quality suite to run ("tau2" or "bfcl")
-        #[arg(long)]
-        suite: Option<String>,
 
         /// Enable concurrency sweep mode (tests levels 1,2,4,8,16,32,64)
         #[arg(long)]
@@ -451,34 +494,62 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        AdkCommand::Eval { ledger: Some(ledger), floors, format, output, .. } => {
+            let options = ledger_gate::LedgerGateOptions { ledger, floors, format, output };
+            match ledger_gate::run_ledger_gate(&options) {
+                Ok(true) => {}
+                Ok(false) => std::process::exit(1),
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
         AdkCommand::Eval {
-            path,
-            model,
+            path: Some(path),
+            agent_cmd: Some(agent_cmd),
+            criteria,
+            judge_model,
             save_baseline,
             check_regression,
+            baseline,
             tolerance,
             format,
             output,
-            concurrency,
+            turn_timeout,
+            ledger: None,
+            floors: _,
         } => {
+            let options = eval_cmd::EvalOptions {
+                path,
+                agent_cmd,
+                criteria,
+                judge_model,
+                save_baseline,
+                check_regression,
+                baseline,
+                tolerance,
+                format,
+                output,
+                turn_timeout: std::time::Duration::from_secs(turn_timeout),
+            };
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
                 .expect("failed to create tokio runtime");
-
-            if let Err(e) = rt.block_on(run_eval(
-                path,
-                model,
-                save_baseline,
-                check_regression,
-                tolerance,
-                format,
-                output,
-                concurrency,
-            )) {
-                eprintln!("Error: {e}");
-                std::process::exit(1);
+            match rt.block_on(eval_cmd::run_eval(&options)) {
+                Ok(true) => {}
+                Ok(false) => std::process::exit(1),
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
             }
+        }
+        // clap requires a path and --agent-cmd whenever --ledger is absent.
+        AdkCommand::Eval { .. } => {
+            eprintln!("Error: cargo adk eval needs a path and --agent-cmd, or --ledger");
+            std::process::exit(2);
         }
         AdkCommand::Bench {
             model,
@@ -491,7 +562,6 @@ fn main() {
             check_regression,
             tolerance,
             warmup,
-            suite,
             sweep,
             external_config,
             external_timeout,
@@ -529,7 +599,6 @@ fn main() {
                 check_regression,
                 tolerance,
                 warmup,
-                suite,
                 sweep,
                 external_config,
                 external_timeout,
@@ -645,69 +714,18 @@ struct AddonInfo {
     features: Vec<&'static str>,
 }
 
+/// Every capability addon, as the registry `cargo adk new` composes from defines it.
 fn get_builtin_addons() -> Vec<AddonInfo> {
-    vec![
-        AddonInfo {
-            name: "telemetry",
-            description: "OpenTelemetry tracing integration with console exporter",
-            priority: 10,
-            features: vec!["telemetry"],
-        },
-        AddonInfo {
-            name: "auth",
-            description: "Authentication middleware with API key and JWT support",
-            priority: 20,
-            features: vec!["auth"],
-        },
-        AddonInfo {
-            name: "sessions",
-            description: "Session management with configurable backend",
-            priority: 30,
-            features: vec!["sessions"],
-        },
-        AddonInfo {
-            name: "memory",
-            description: "Semantic memory integration with in-memory backend",
-            priority: 40,
-            features: vec!["memory"],
-        },
-        AddonInfo {
-            name: "mcp",
-            description: "MCP tool integration with example server connection",
-            priority: 50,
-            features: vec!["tools", "mcp"],
-        },
-        AddonInfo {
-            name: "guardrails",
-            description: "Input and output guardrail hooks with validation logic",
-            priority: 60,
-            features: vec!["guardrail"],
-        },
-        AddonInfo {
-            name: "eval",
-            description: "Evaluation harness with example test cases",
-            priority: 70,
-            features: vec!["eval"],
-        },
-        AddonInfo {
-            name: "browser",
-            description: "Browser automation tool integration",
-            priority: 80,
-            features: vec!["browser"],
-        },
-        AddonInfo {
-            name: "server",
-            description: "Axum HTTP server with health check and agent endpoints",
-            priority: 90,
-            features: vec!["server"],
-        },
-        AddonInfo {
-            name: "docker",
-            description: "Multi-stage Dockerfile (distroless), static musl variant, and .dockerignore",
-            priority: 100,
-            features: vec![],
-        },
-    ]
+    TemplateRegistry::builtin()
+        .capability_addons
+        .into_iter()
+        .map(|addon| AddonInfo {
+            name: addon.name,
+            description: addon.description,
+            priority: addon.init_priority,
+            features: addon.required_features,
+        })
+        .collect()
 }
 
 fn print_addons(json: bool) {
@@ -1145,7 +1163,6 @@ async fn run_bench(
     check_regression: bool,
     tolerance: f64,
     warmup: usize,
-    suite: Option<String>,
     sweep: bool,
     external_config: Option<PathBuf>,
     external_timeout: u64,
@@ -1164,13 +1181,6 @@ async fn run_bench(
         "json" => OutputFormat::Json,
         "markdown" => OutputFormat::Markdown,
         _ => OutputFormat::Table,
-    };
-
-    // Parse suite
-    let task_suite = match suite.as_deref() {
-        Some("tau2") => Some(adk_bench::TaskSuite::Tau2),
-        Some("bfcl") => Some(adk_bench::TaskSuite::Bfcl),
-        _ => None,
     };
 
     // Load external framework configs if provided
@@ -1204,7 +1214,6 @@ async fn run_bench(
         external_frameworks,
         external_timeout_secs: external_timeout,
         concurrency_sweep,
-        suite: task_suite,
         dry_run,
         max_cost_usd,
         confirm_cost,
@@ -1340,239 +1349,6 @@ async fn run_bench(
     0
 }
 
-// ── Eval command ────────────────────────────────────────────────
-
-#[allow(clippy::too_many_arguments)]
-async fn run_eval(
-    path: PathBuf,
-    _model: Option<String>,
-    save_baseline: bool,
-    check_regression: bool,
-    tolerance: f64,
-    format: String,
-    output: Option<PathBuf>,
-    _concurrency: usize,
-) -> Result<(), String> {
-    use adk_eval::{BaselineStore, EvaluationReport, EvaluationResult, TestFile};
-
-    // Load eval set from path
-    let reports: Vec<EvaluationReport> = if path.is_dir() {
-        // Load all .test.json files from directory
-        let mut reports = Vec::new();
-        let entries =
-            std::fs::read_dir(&path).map_err(|e| format!("failed to read directory: {e}"))?;
-        for entry in entries.flatten() {
-            let entry_path = entry.path();
-            if entry_path.extension().is_some_and(|ext| ext == "json")
-                && let Some(name) = entry_path.file_name().and_then(|n| n.to_str())
-                && name.ends_with(".test.json")
-            {
-                let test_file = TestFile::load(&entry_path)
-                    .map_err(|e| format!("failed to load {}: {e}", entry_path.display()))?;
-                let report = build_report_from_test_file(&test_file, name);
-                reports.push(report);
-            }
-        }
-        if reports.is_empty() {
-            return Err(format!("no .test.json files found in {}", path.display()));
-        }
-        reports
-    } else {
-        // Load single file
-        let test_file =
-            TestFile::load(&path).map_err(|e| format!("failed to load eval set: {e}"))?;
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("eval");
-        vec![build_report_from_test_file(&test_file, name)]
-    };
-
-    // Aggregate all results across reports
-    let all_results: Vec<&EvaluationResult> = reports.iter().flat_map(|r| &r.results).collect();
-    let total_cases = all_results.len();
-    let passed_cases = all_results.iter().filter(|r| r.passed).count();
-    let failed_cases = total_cases - passed_cases;
-
-    // Build metrics map for baseline operations
-    let mut metrics: std::collections::HashMap<String, std::collections::HashMap<String, f64>> =
-        std::collections::HashMap::new();
-    for result in &all_results {
-        for (criterion, &score) in &result.scores {
-            metrics.entry(criterion.clone()).or_default().insert(result.eval_id.clone(), score);
-        }
-    }
-
-    // Handle --save-baseline
-    if save_baseline {
-        let baseline_path = path.parent().unwrap_or(Path::new(".")).join(".eval-baseline.json");
-        let store = BaselineStore::new(&baseline_path);
-        let eval_set_id = path.file_stem().and_then(|s| s.to_str()).unwrap_or("eval");
-        store.save(eval_set_id, &metrics).map_err(|e| format!("failed to save baseline: {e}"))?;
-        eprintln!("Baseline saved to {}", baseline_path.display());
-    }
-
-    // Handle --check-regression
-    let mut has_regressions = false;
-    if check_regression {
-        let baseline_path = path.parent().unwrap_or(Path::new(".")).join(".eval-baseline.json");
-        let store = BaselineStore::new(&baseline_path);
-        let regressions = store
-            .check_regressions(&metrics, tolerance)
-            .map_err(|e| format!("failed to check regressions: {e}"))?;
-
-        if !regressions.is_empty() {
-            has_regressions = true;
-            eprintln!("\n⚠ Regressions detected ({} metric(s)):\n", regressions.len());
-            for reg in &regressions {
-                eprintln!(
-                    "  {} [{}]: {:.3} → {:.3} (delta: -{:.3}, tolerance: {:.3})",
-                    reg.metric_name,
-                    reg.case_id,
-                    reg.baseline_value,
-                    reg.current_value,
-                    reg.delta,
-                    tolerance
-                );
-            }
-            eprintln!();
-        }
-    }
-
-    // Format and output results
-    match format.as_str() {
-        "json" => {
-            let json_output = serde_json::to_string_pretty(&reports)
-                .map_err(|e| format!("failed to serialize results: {e}"))?;
-            if let Some(ref output_path) = output {
-                std::fs::write(output_path, &json_output)
-                    .map_err(|e| format!("failed to write output file: {e}"))?;
-                eprintln!("JSON output written to {}", output_path.display());
-            } else {
-                println!("{json_output}");
-            }
-        }
-        "junit" => {
-            use adk_eval::JunitReporter;
-            // Combine all reports into a single JUnit output
-            // Use the first report or merge them
-            for report in &reports {
-                let suite_name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("eval");
-                let xml = JunitReporter::generate(report, suite_name)
-                    .map_err(|e| format!("failed to generate JUnit XML: {e}"))?;
-                if let Some(ref output_path) = output {
-                    std::fs::write(output_path, &xml)
-                        .map_err(|e| format!("failed to write output file: {e}"))?;
-                    eprintln!("JUnit XML written to {}", output_path.display());
-                } else {
-                    println!("{xml}");
-                }
-            }
-        }
-        _ => {
-            // Display summary table
-            println!("\n╔══════════════════════════════════════════════════════════════╗");
-            println!("║                    Evaluation Results                        ║");
-            println!("╠══════════════════════════════════════════════════════════════╣");
-            println!(
-                "║  Total cases: {:<4}  Passed: {:<4}  Failed: {:<4}             ║",
-                total_cases, passed_cases, failed_cases
-            );
-            println!("╠══════════════════════════════════════════════════════════════╣");
-
-            // Per-criterion summary
-            let mut criterion_scores: std::collections::HashMap<String, Vec<f64>> =
-                std::collections::HashMap::new();
-            for result in &all_results {
-                for (criterion, &score) in &result.scores {
-                    criterion_scores.entry(criterion.clone()).or_default().push(score);
-                }
-            }
-
-            if !criterion_scores.is_empty() {
-                println!(
-                    "║  {:<20} {:>8} {:>8} {:>8}          ║",
-                    "Criterion", "Mean", "Min", "Max"
-                );
-                println!(
-                    "║  {:<20} {:>8} {:>8} {:>8}          ║",
-                    "─────────", "────", "───", "───"
-                );
-                let mut criteria: Vec<_> = criterion_scores.keys().collect();
-                criteria.sort();
-                for criterion in criteria {
-                    let scores = &criterion_scores[criterion];
-                    let mean = scores.iter().sum::<f64>() / scores.len() as f64;
-                    let min = scores.iter().cloned().fold(f64::INFINITY, f64::min);
-                    let max = scores.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-                    let name = if criterion.len() > 20 { &criterion[..20] } else { criterion };
-                    println!("║  {:<20} {:>8.3} {:>8.3} {:>8.3}          ║", name, mean, min, max);
-                }
-            }
-
-            // Cost/latency summary if available
-            let total_duration: std::time::Duration = reports.iter().map(|r| r.duration).sum();
-            println!("╠══════════════════════════════════════════════════════════════╣");
-            println!(
-                "║  Total duration: {:.2}s                                      ║",
-                total_duration.as_secs_f64()
-            );
-            println!("╚══════════════════════════════════════════════════════════════╝");
-
-            // Show failures
-            if failed_cases > 0 {
-                println!("\nFailed cases:");
-                for result in &all_results {
-                    if !result.passed {
-                        println!("  ✗ {}", result.eval_id);
-                        for failure in &result.failures {
-                            println!(
-                                "    - {}: {:.3} < {:.3}",
-                                failure.criterion, failure.score, failure.threshold
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Exit non-zero on regressions
-    if has_regressions {
-        std::process::exit(1);
-    }
-
-    Ok(())
-}
-
-/// Build a simple evaluation report from a loaded test file.
-///
-/// This creates a report with basic pass/fail status based on whether
-/// expected responses are defined. For a full evaluation, an actual agent
-/// invocation would be needed.
-fn build_report_from_test_file(
-    test_file: &adk_eval::TestFile,
-    name: &str,
-) -> adk_eval::EvaluationReport {
-    use adk_eval::{EvaluationReport, EvaluationResult};
-    use std::collections::HashMap;
-    use std::time::Duration;
-
-    let mut results = Vec::new();
-    for case in &test_file.eval_cases {
-        let case_id = case.eval_id.clone();
-        let mut scores = HashMap::new();
-
-        // Check if expected response is defined — mark as needing evaluation
-        let has_expected = case.conversation.iter().any(|t| t.final_response.is_some());
-        if has_expected {
-            scores.insert("defined".to_string(), 1.0);
-        }
-
-        results.push(EvaluationResult::passed(&case_id, scores, Duration::from_millis(0)));
-    }
-
-    let started_at = chrono::Utc::now();
-    EvaluationReport::new(name, results, started_at)
-}
-
 /// Create a .tar.gz bundle with paths that have NO `./` prefix.
 fn create_bundle(
     bundle_path: &Path,
@@ -1689,16 +1465,10 @@ fn print_templates(template_dir: Option<&Path>) {
     println!("\n  Other:");
     println!("    {:<14} Anthropic Managed Agents session with SSE streaming", "managed-agents");
 
-    println!("\n  Addons (composable with any template):");
-    println!("    --addon {:<12} OpenTelemetry tracing", "telemetry");
-    println!("    --addon {:<12} API key and JWT authentication", "auth");
-    println!("    --addon {:<12} Session state management", "sessions");
-    println!("    --addon {:<12} Semantic memory and RAG", "memory");
-    println!("    --addon {:<12} MCP tool integration", "mcp");
-    println!("    --addon {:<12} Input/output validation", "guardrails");
-    println!("    --addon {:<12} Evaluation framework", "eval");
-    println!("    --addon {:<12} Browser automation", "browser");
-    println!("    --addon {:<12} HTTP server with A2A", "server");
+    println!("\n  Addons (composable with any compatible template):");
+    for addon in &registry.capability_addons {
+        println!("    --addon {:<12} {}", addon.name, addon.description);
+    }
 
     println!("\nUsage:");
     println!("  cargo adk new my-agent --template llm");
@@ -2061,8 +1831,16 @@ fn create_project_composable(
         println!();
         println!("Next steps:");
         println!("  cd {}", project_path.display());
-        println!("  cp .env.example .env    # add your API key");
-        println!("  cargo run");
+        if base_template == "website" {
+            // A website needs no key to build or serve (spec 3.5 §7.17).
+            println!("  cargo run -- check         # build and run the launch gate");
+            println!(
+                "  cargo run                  # serve the site and its edge on 127.0.0.1:8080"
+            );
+        } else {
+            println!("  cp .env.example .env    # add your API key");
+            println!("  cargo run");
+        }
     }
 
     Ok(())
@@ -2312,7 +2090,7 @@ serde_json = "1"
 use adk_rust::Launcher;
 use adk_rag::{{
     Document, FixedSizeChunker, GeminiEmbeddingProvider, InMemoryVectorStore,
-    RagConfig, RagPipeline, RagTool,
+    RagConfig, RagPipeline, RagTool, Scope,
 }};
 use std::sync::Arc;
 
@@ -2332,13 +2110,14 @@ async fn main() -> anyhow::Result<()> {{
     );
 
     pipeline.create_collection("docs").await?;
-    pipeline.ingest("docs", &Document {{
-        id: "example".into(),
-        text: "ADK-Rust is a framework for building AI agents in Rust. \
-               It supports multiple LLM providers, tool calling, RAG, and more.".into(),
-        metadata: Default::default(),
-        source_uri: None,
-    }}).await?;
+    // An application with one tenant ingests and searches the single-tenant scope.
+    pipeline.scoped(Scope::single_tenant()).ingest("docs", &Document::new(
+        "example",
+        "ADK-Rust is a framework for building AI agents in Rust. \
+         It supports multiple LLM providers, tool calling, RAG, and more.",
+    )
+    .with_source_uri("https://github.com/zavora-ai/adk-rust")
+    .with_title("ADK-Rust")).await?;
 
     println!("Ingested documents. Ask questions about your knowledge base.\\n");
 
@@ -2649,6 +2428,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {{
 mod tests {
     use super::*;
 
+    #[test]
+    fn bench_accepts_no_task_quality_suite() {
+        // The τ²-bench and BFCL adapters do not run a model, so no flag selects them.
+        let parsed = Cargo::try_parse_from(["cargo", "adk", "bench", "--suite", "tau2"]);
+        assert!(parsed.is_err(), "`--suite` must not be accepted");
+        assert!(Cargo::try_parse_from(["cargo", "adk", "bench", "--dry-run"]).is_ok());
+    }
+
     fn assert_current_template(cargo_toml: &str) {
         assert!(
             cargo_toml.contains(&format!(r#"version = "{ADK_VERSION}""#)),
@@ -2658,6 +2445,15 @@ mod tests {
             !cargo_toml.contains("0.4") && !cargo_toml.contains("standard"),
             "template should not use stale versions or the heavy standard preset"
         );
+    }
+
+    #[test]
+    fn the_addon_listing_names_every_registered_addon() {
+        let listed: Vec<&str> = get_builtin_addons().iter().map(|addon| addon.name).collect();
+        let registered: Vec<&str> =
+            TemplateRegistry::builtin().capability_addons.iter().map(|addon| addon.name).collect();
+        assert_eq!(listed, registered);
+        assert!(listed.contains(&"docker"));
     }
 
     #[test]

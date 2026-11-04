@@ -1,63 +1,52 @@
 //! # adk-server
-#![allow(clippy::result_large_err)]
 //!
-//! HTTP server and A2A v1.0.0 protocol for ADK agents.
+//! HTTP server and A2A protocol for ADK agents.
 //!
 //! ## Overview
 //!
 //! This crate provides HTTP infrastructure:
 //!
-//! - [`create_app`] - Create REST API server
-//! - [`create_app_with_a2a`] - Add A2A protocol support
+//! - [`create_app`] - Create the REST API server
+//! - [`create_app_with_a2a`] - Add A2A discovery and JSON-RPC endpoints
+//! - [`ServerBuilder`] - Custom routes, A2A, shutdown, governance, and feature-gated endpoints
 //! - [`RemoteA2aAgent`] - Connect to remote A2A agents
-//! - [`ServerConfig`] - Server configuration
+//! - [`ServerConfig`] / [`SecurityConfig`] - Server configuration
 //!
-//! ## What's New in 0.6.0
+//! The server answers only loopback host names and IP addresses by default and allows no
+//! cross-origin access; list public hosts with [`ServerConfig::with_allowed_hosts`] and browser
+//! origins with [`ServerConfig::with_allowed_origins`].
 //!
-//! ### A2A v1.0.0 Protocol Compliance
-//!
-//! The `a2a::v1` module (behind the `a2a-v1` feature flag) implements the full A2A Protocol
-//! v1.0.0 specification with all 11 JSON-RPC operations:
-//!
-//! - RFC 3339 timestamps on all task status changes
-//! - Agent capabilities declaration via `build_v1_agent_card()`
-//! - Message ID idempotency for `SendMessage`/`SendStreamingMessage`
-//! - Push notification authentication (Bearer + `a2a-notification-token`)
-//! - INPUT_REQUIRED multi-turn resume flow
-//! - Input validation (parts, IDs, metadata size)
-//! - `Content-Type: application/a2a+json` on JSON-RPC responses
-//! - Task object as first SSE streaming event
-//! - Context-scoped task lookup for multi-turn conversations
-//! - Version negotiation via `A2A-Version` header
-//!
-//! Wire types powered by [`a2a-protocol-types`](https://crates.io/crates/a2a-protocol-types).
-//!
-//! ### Breaking Changes
-//!
-//! - `build_v1_agent_card()` now requires an `AgentCapabilities` parameter
-//! - `TaskStore` trait gains `find_task_by_context()` method
-//! - `PushNotificationSender` trait methods gain `config` parameter
-//! - `message_stream()` and `tasks_subscribe()` return `StreamResponse` instead of `TaskStatusUpdateEvent`
+//! The `a2a-v1` feature adds the `a2a::v1` module: A2A v1.0.0 JSON-RPC and REST handlers for
+//! all 11 operations, built on [`a2a-protocol-types`](https://crates.io/crates/a2a-protocol-types).
 //!
 //! ## Quick Start
 //!
 //! ```rust,no_run
-//! use adk_server::{create_app, ServerConfig};
 //! use std::sync::Arc;
 //!
-//! // let config = ServerConfig { ... };
-//! // let app = create_app(config);
-//! // let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
-//! // axum::serve(listener, app).await?;
+//! use adk_core::{Agent, SingleAgentLoader};
+//! use adk_server::{ServerConfig, create_app};
+//! use adk_session::InMemorySessionService;
+//!
+//! async fn serve(agent: Arc<dyn Agent>) -> std::io::Result<()> {
+//!     let config = ServerConfig::new(
+//!         Arc::new(SingleAgentLoader::new(agent)),
+//!         Arc::new(InMemorySessionService::new()),
+//!     );
+//!     let app = create_app(config);
+//!     let listener = tokio::net::TcpListener::bind("127.0.0.1:8080").await?;
+//!     axum::serve(listener, app).await
+//! }
 //! ```
 //!
 //! ## A2A Protocol
 //!
-//! Expose agents via Agent-to-Agent protocol:
+//! [`create_app_with_a2a`] and [`ServerBuilder::with_a2a`] expose an agent over A2A:
 //!
-//! - `GET /.well-known/agent-card.json` - Agent card with capabilities
-//! - `POST /jsonrpc` - JSON-RPC endpoint (all 11 v1 operations)
-//! - REST routes for all operations
+//! - `GET /.well-known/agent-card.json` (and `/.well-known/agent.json`) - Agent card
+//! - `POST /a2a` - JSON-RPC: `message/send`, `tasks/get`, `tasks/cancel`
+//! - `POST /a2a/stream` - JSON-RPC streaming: `message/stream`, `message/send`
+#![allow(clippy::result_large_err)]
 
 pub mod a2a;
 pub mod auth_bridge;
@@ -65,7 +54,6 @@ pub mod config;
 pub mod rest;
 pub mod ui_protocol;
 pub mod ui_types;
-pub mod web_ui;
 
 #[cfg(feature = "yaml-agent")]
 pub mod yaml_agent;
@@ -73,14 +61,24 @@ pub mod yaml_agent;
 #[cfg(feature = "agent-registry")]
 pub mod registry;
 
-#[cfg(feature = "openai-webhooks")]
+#[cfg(any(feature = "openai-webhooks", feature = "webhook-ingress"))]
 pub mod webhooks;
 
 #[cfg(feature = "background")]
 pub mod background;
 
+#[cfg(feature = "approvals")]
+pub mod approvals;
+
+/// HTTP endpoints for a signed-in person's subject rights: export, erase, and link.
+#[cfg(feature = "awp")]
+pub mod subject_rights;
+
 #[cfg(feature = "agent-engine")]
 pub mod agent_engine;
+
+#[cfg(feature = "awp")]
+pub mod awp;
 
 #[cfg(feature = "agent-engine")]
 pub use agent_engine::{
@@ -91,13 +89,14 @@ pub use agent_engine::{
 // Background runs and cron scheduling re-exports
 #[cfg(feature = "background")]
 pub use background::{
-    BackgroundRun, BackgroundRunner, BackgroundState, RunStatus, RunStatusResponse, RunStore,
-    SubmitRunRequest, SubmitRunResponse, WorkflowExecutor, WorkflowRegistry, WorkflowState,
-    background_runs_router, background_runs_router_with_state,
+    BackgroundState, DurableScheduler, DurableWorker, DurableWorkerConfig, GovernanceRefusal,
+    ParkReason, RunStatus, RunStatusResponse, SchedulerTick, SubmitRunRequest, SubmitRunResponse,
+    WorkerHandle, WorkerHooks, WorkflowExecutor, WorkflowRegistry, WorkflowRunContext,
+    WorkflowState, background_runs_router, background_runs_router_with_state,
 };
 #[cfg(feature = "background")]
 pub use background::{
-    ConcurrencyPolicy, CreateCronJobRequest, CronJob, CronJobResponse, CronJobStatus, CronState,
+    ConcurrencyPolicy, CreateCronJobRequest, CronJobResponse, CronJobStatus, CronState,
     cron_jobs_router, cron_jobs_router_with_state, start_cron_scheduler, validate_cron_expression,
 };
 
@@ -107,9 +106,12 @@ pub use a2a::{
 };
 #[cfg(feature = "a2a-v1")]
 pub use a2a::{A2aServer, A2aServerApp, A2aServerBuilder};
-pub use auth_bridge::{RequestContext, RequestContextError, RequestContextExtractor};
-pub use config::{SecurityConfig, ServerConfig};
+pub use auth_bridge::{
+    AuthenticatedCaller, RequestContext, RequestContextError, RequestContextExtractor,
+};
+pub use config::{ADMIN_SCOPE, DEFAULT_RUN_TIMEOUT, SecurityConfig, ServerConfig};
 pub use rest::{
-    A2aController, RuntimeController, ServerBuilder, SessionController, ShutdownHandle, create_app,
-    create_app_with_a2a, shutdown_signal,
+    A2aController, A2aTaskRetention, FreezeDelegate, FreezeReport, GovernanceController,
+    GovernanceStatus, RunningRuns, RuntimeController, ServerBuilder, SessionController,
+    ShutdownHandle, create_app, create_app_with_a2a, shutdown_signal,
 };

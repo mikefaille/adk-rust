@@ -4,48 +4,139 @@
 // Based on adk-go's connectionRefresher pattern.
 //
 // Handles:
-// - Connection closed errors
-// - EOF errors
-// - Session not found errors
+// - A closed transport, as when a stdio server process exits
+// - A broken pipe, reset connection, or interrupted HTTP stream
+// - An expired Streamable HTTP session
+// - HTTP 401 rejections, so a factory can reconnect with fresh credentials
 // - Automatic retry with reconnection
 
+use super::discovery::{ListError, McpDiscoveryLimits, list_tools};
 use rmcp::{
-    RoleClient,
+    RoleClient, ServiceError,
     model::{CallToolRequestParams, CallToolResponse, Tool as McpTool},
     service::RunningService,
 };
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, info, warn};
 
-/// Errors that should trigger a connection refresh
-pub fn should_refresh_connection(error: &str) -> bool {
-    let error_lower = error.to_lowercase();
+/// How a failed request relates to the connection that carried it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Failure {
+    /// The connection can no longer carry requests.
+    ConnectionLost,
+    /// The server rejected the request's credentials with HTTP 401 before running it.
+    AuthRejected,
+    /// The server answered, or the request failed for a reason a new connection does not fix.
+    Other,
+}
 
-    // Connection closed
-    if error_lower.contains("connection closed") || error_lower.contains("connectionclosed") {
-        return true;
+/// Classifies `error` from its variant and the transport error it wraps.
+///
+/// Text the server chose, such as an HTTP error body, never decides the outcome.
+fn classify(error: &ServiceError) -> Failure {
+    match error {
+        ServiceError::TransportClosed => Failure::ConnectionLost,
+        ServiceError::TransportSend(error) => classify_transport(error.error.as_ref()),
+        // The server answered with a JSON-RPC error or an unexpected result, or the
+        // request ended on this side: none of these leaves the connection unusable.
+        _ => Failure::Other,
     }
+}
 
-    // EOF / pipe closed
-    if error_lower.contains("eof")
-        || error_lower.contains("closed pipe")
-        || error_lower.contains("broken pipe")
-    {
-        return true;
+/// The error ADK's own Streamable HTTP client reports.
+#[cfg(feature = "http-transport")]
+type HttpError = rmcp::transport::streamable_http_client::StreamableHttpError<reqwest_mcp::Error>;
+
+fn classify_transport(error: &(dyn std::error::Error + 'static)) -> Failure {
+    #[cfg(feature = "http-transport")]
+    if let Some(error) = error.downcast_ref::<HttpError>() {
+        return classify_http(error);
     }
-
-    // Session not found (server restarted)
-    if error_lower.contains("session not found") || error_lower.contains("session missing") {
-        return true;
+    let mut current = Some(error);
+    while let Some(error) = current {
+        #[cfg(feature = "http-transport")]
+        if error.is::<rmcp::transport::streamable_http_client::AuthRequiredError>() {
+            return Failure::AuthRejected;
+        }
+        if let Some(error) = error.downcast_ref::<std::io::Error>() {
+            return classify_io(error);
+        }
+        current = error.source();
     }
+    Failure::Other
+}
 
-    // Transport errors
-    if error_lower.contains("transport error") || error_lower.contains("connection reset") {
-        return true;
+#[cfg(feature = "http-transport")]
+fn classify_http(error: &HttpError) -> Failure {
+    use rmcp::transport::streamable_http_client::{SseError, StreamableHttpError};
+    match error {
+        StreamableHttpError::AuthRequired(_) => Failure::AuthRejected,
+        // rmcp formats this as `HTTP {status}: {body}`, so the prefix is rmcp's, not the server's.
+        StreamableHttpError::UnexpectedServerResponse(message)
+            if message.starts_with("HTTP 401 ") =>
+        {
+            Failure::AuthRejected
+        }
+        StreamableHttpError::Client(error)
+            if error.status() == Some(reqwest_mcp::StatusCode::UNAUTHORIZED) =>
+        {
+            Failure::AuthRejected
+        }
+        StreamableHttpError::Io(error) => classify_io(error),
+        StreamableHttpError::Sse(SseError::Body(_))
+        | StreamableHttpError::UnexpectedEndOfStream
+        | StreamableHttpError::TransportChannelClosed
+        | StreamableHttpError::SessionExpired => Failure::ConnectionLost,
+        // A 5xx, an unparseable body, or any other answer the server sent on a live session.
+        _ => Failure::Other,
     }
+}
 
-    false
+fn classify_io(error: &std::io::Error) -> Failure {
+    use std::io::ErrorKind;
+    match error.kind() {
+        ErrorKind::BrokenPipe
+        | ErrorKind::ConnectionReset
+        | ErrorKind::ConnectionAborted
+        | ErrorKind::NotConnected
+        | ErrorKind::UnexpectedEof => Failure::ConnectionLost,
+        _ => Failure::Other,
+    }
+}
+
+/// Returns `true` when `error` shows the connection is unusable, or that the server
+/// rejected the request's credentials, so a new connection may succeed.
+///
+/// The decision comes from the error's variant: a closed transport, a broken pipe or
+/// reset connection, an interrupted HTTP stream, an expired session, or an HTTP 401.
+/// An answer from the server, such as an HTTP 5xx or a JSON-RPC error, never
+/// triggers a refresh, whatever its body says.
+///
+/// # Example
+///
+/// ```
+/// use adk_tool::mcp::{rmcp::ServiceError, should_refresh_connection};
+///
+/// assert!(should_refresh_connection(&ServiceError::TransportClosed));
+/// assert!(!should_refresh_connection(&ServiceError::UnexpectedResponse));
+/// ```
+pub fn should_refresh_connection(error: &ServiceError) -> bool {
+    match classify(error) {
+        Failure::ConnectionLost | Failure::AuthRejected => true,
+        Failure::Other => false,
+    }
+}
+
+/// Returns `true` when the transport reports that the server rejected the
+/// request's credentials with HTTP 401.
+///
+/// rmcp reports a 401 that carries `WWW-Authenticate` as `AuthRequired`, and
+/// one without it as an `HTTP 401` server response or reqwest's status error. A
+/// JSON-RPC error whose message merely mentions authorization is not matched:
+/// that request reached the server.
+pub(crate) fn is_auth_rejection(error: &ServiceError) -> bool {
+    classify(error) == Failure::AuthRejected
 }
 
 /// Replay of `tools/call` after an ambiguous connection failure is opt-in.
@@ -55,17 +146,20 @@ pub fn should_refresh_connection(error: &str) -> bool {
 /// or deletion executing more than once. See #504.
 pub(crate) const DEFAULT_RETRY_TOOL_CALLS: bool = false;
 
+/// A request rejected with HTTP 401 never ran, so it is retried after a
+/// reconnect even when replay is not allowed.
 pub(crate) fn should_retry_mcp_operation(
-    error: &str,
+    error: &ServiceError,
     attempt: u32,
     refresh_config: &RefreshConfig,
     has_connection_factory: bool,
     replay_allowed: bool,
 ) -> bool {
-    replay_allowed
+    let failure = classify(error);
+    (replay_allowed || failure == Failure::AuthRejected)
         && has_connection_factory
         && attempt < refresh_config.max_attempts
-        && should_refresh_connection(error)
+        && failure != Failure::Other
 }
 
 /// Result of an operation with retry information
@@ -143,6 +237,12 @@ where
 /// This is similar to adk-go's `connectionRefresher` struct. It transparently
 /// retries operations after reconnecting when the underlying session fails.
 ///
+/// Requests share the current connection and run concurrently: each one holds
+/// the connection only for its own lifetime, never a lock. A connection that
+/// has already closed, such as one to a stdio server process that exited, is
+/// replaced before the next request is sent, so that request is never a replay.
+/// Concurrent failures on one connection reconnect once.
+///
 /// # Type Parameters
 ///
 /// * `S` - The service type for the MCP client
@@ -185,14 +285,19 @@ where
     S: rmcp::service::Service<RoleClient> + Send + Sync + 'static,
     F: ConnectionFactory<S>,
 {
-    /// The current MCP client session
-    client: Arc<Mutex<Option<RunningService<RoleClient, S>>>>,
+    /// The current connection. Requests clone the `Arc` and release the lock before sending.
+    client: RwLock<Option<Arc<RunningService<RoleClient, S>>>>,
+    /// Held while a connection is created, so concurrent failures replace a dead
+    /// connection once instead of once per caller.
+    connecting: Mutex<()>,
     /// Factory for creating new connections
     factory: Arc<F>,
     /// Configuration for refresh behavior
     config: RefreshConfig,
     /// Whether ambiguous tool-call outcomes may be replayed after reconnection.
     retry_tool_calls: bool,
+    /// Bounds on `list_tools`.
+    discovery_limits: McpDiscoveryLimits,
 }
 
 impl<S, F> ConnectionRefresher<S, F>
@@ -208,10 +313,12 @@ where
     /// * `factory` - Factory for creating new connections when needed
     pub fn new(client: RunningService<RoleClient, S>, factory: Arc<F>) -> Self {
         Self {
-            client: Arc::new(Mutex::new(Some(client))),
+            client: RwLock::new(Some(Arc::new(client))),
+            connecting: Mutex::new(()),
             factory,
             config: RefreshConfig::default(),
             retry_tool_calls: DEFAULT_RETRY_TOOL_CALLS,
+            discovery_limits: McpDiscoveryLimits::default(),
         }
     }
 
@@ -220,10 +327,12 @@ where
     /// The first operation will trigger a connection.
     pub fn lazy(factory: Arc<F>) -> Self {
         Self {
-            client: Arc::new(Mutex::new(None)),
+            client: RwLock::new(None),
+            connecting: Mutex::new(()),
             factory,
             config: RefreshConfig::default(),
             retry_tool_calls: DEFAULT_RETRY_TOOL_CALLS,
+            discovery_limits: McpDiscoveryLimits::default(),
         }
     }
 
@@ -236,6 +345,22 @@ where
     /// Set the maximum number of reconnection attempts.
     pub fn with_max_attempts(mut self, attempts: u32) -> Self {
         self.config.max_attempts = attempts;
+        self
+    }
+
+    /// Set the bounds on [`list_tools`](Self::list_tools).
+    ///
+    /// The timeout covers the whole listing, reconnect attempts included. See
+    /// [`McpDiscoveryLimits`] for the defaults.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let refresher = ConnectionRefresher::new(client, Arc::new(factory))
+    ///     .with_discovery_limits(McpDiscoveryLimits::default().with_max_pages(8));
+    /// ```
+    pub fn with_discovery_limits(mut self, limits: McpDiscoveryLimits) -> Self {
+        self.discovery_limits = limits;
         self
     }
 
@@ -257,252 +382,204 @@ where
         self
     }
 
-    /// Ensure we have a valid connection, creating one if needed.
-    async fn ensure_connected(&self) -> Result<(), String> {
-        let mut guard = self.client.lock().await;
-
-        if guard.is_none() {
-            if self.config.log_reconnections {
-                info!("MCP client not connected, creating connection");
-            }
-            let new_client = self.factory.create_connection().await?;
-            *guard = Some(new_client);
+    /// Returns a connection to send on: the current one, or a new one when there
+    /// is none or the current one has closed.
+    async fn connection(&self) -> Result<Arc<RunningService<RoleClient, S>>, String> {
+        if let Some(client) = self.client.read().await.as_ref()
+            && !is_connection_closed(client)
+        {
+            return Ok(Arc::clone(client));
         }
-
-        Ok(())
+        self.replace(None).await
     }
 
-    /// Refresh the connection by creating a new client.
-    async fn refresh_connection(&self) -> Result<(), String> {
-        let mut guard = self.client.lock().await;
-
-        // Close existing connection if any
-        if let Some(old_client) = guard.take() {
-            if self.config.log_reconnections {
-                debug!("Closing old MCP connection");
-            }
-            let token = old_client.cancellation_token();
-            token.cancel();
-            // Give it a moment to clean up
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    /// Installs a new connection unless another caller already replaced `failed`
+    /// with a live one, and returns the connection to use.
+    ///
+    /// With `failed` set to `None`, only a missing or closed connection is replaced.
+    async fn replace(
+        &self,
+        failed: Option<&Arc<RunningService<RoleClient, S>>>,
+    ) -> Result<Arc<RunningService<RoleClient, S>>, String> {
+        let _connecting = self.connecting.lock().await;
+        if let Some(current) = self.client.read().await.as_ref()
+            && !is_connection_closed(current)
+            && failed.is_none_or(|failed| !Arc::ptr_eq(current, failed))
+        {
+            return Ok(Arc::clone(current));
         }
 
         if self.config.log_reconnections {
-            info!("Refreshing MCP connection");
+            info!("creating MCP connection");
         }
-        let new_client = self.factory.create_connection().await?;
-        *guard = Some(new_client);
+        // The old connection closes once the last in-flight request on it drops its `Arc`.
+        let created = Arc::new(self.factory.create_connection().await?);
+        *self.client.write().await = Some(Arc::clone(&created));
+        Ok(created)
+    }
 
-        Ok(())
+    /// Sends one request through `send`, reconnecting and resending after a
+    /// retryable connection failure when `replay_allowed` permits it.
+    async fn with_reconnect<T, Fut>(
+        &self,
+        operation: &str,
+        replay_allowed: bool,
+        mut send: impl FnMut(Arc<RunningService<RoleClient, S>>) -> Fut,
+    ) -> Result<RetryResult<T>, String>
+    where
+        Fut: std::future::Future<Output = Result<T, ListError>>,
+    {
+        let mut connection = self.connection().await?;
+        let mut attempt = 0u32;
+        loop {
+            let error = match send(Arc::clone(&connection)).await {
+                Ok(value) => return Ok(RetryResult { value, reconnected: attempt > 0 }),
+                Err(ListError::Service(error)) => error,
+                // A listing that ran past its bounds would do the same on a new connection.
+                Err(bound) => return Err(bound.to_string()),
+            };
+            if !should_retry_mcp_operation(&error, attempt, &self.config, true, replay_allowed) {
+                if !replay_allowed
+                    && should_refresh_connection(&error)
+                    && !is_auth_rejection(&error)
+                {
+                    return Err(format!(
+                        "MCP {operation} result is uncertain and was not replayed: {error}. \
+                         Enable tool-call retries only for replay-safe operations"
+                    ));
+                }
+                return Err(error.to_string());
+            }
+            if self.config.log_reconnections {
+                warn!(error = %error, operation, "MCP request failed, will retry with reconnection");
+            }
+
+            // A failed reconnect counts as an attempt, like a failed request.
+            loop {
+                attempt += 1;
+                if self.config.retry_delay_ms > 0 {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(
+                        self.config.retry_delay_ms,
+                    ))
+                    .await;
+                }
+                match self.replace(Some(&connection)).await {
+                    Ok(replacement) => {
+                        if self.config.log_reconnections {
+                            debug!(attempt, operation, "reconnected MCP connection");
+                        }
+                        connection = replacement;
+                        break;
+                    }
+                    Err(refresh_error) if attempt < self.config.max_attempts => {
+                        if self.config.log_reconnections {
+                            warn!(error = %refresh_error, attempt, "MCP reconnection failed");
+                        }
+                    }
+                    Err(refresh_error) => {
+                        return Err(format!("{error}; reconnecting failed: {refresh_error}"));
+                    }
+                }
+            }
+        }
     }
 
     /// List all tools from the MCP server with automatic reconnection.
     ///
     /// Handles pagination internally and restarts from scratch if
     /// reconnection occurs (per MCP spec, cursors don't persist across sessions).
+    /// The listing is bounded by the [discovery limits](Self::with_discovery_limits).
     pub async fn list_tools(&self) -> Result<RetryResult<Vec<McpTool>>, String> {
-        // Ensure we have a connection
-        self.ensure_connected().await?;
-
-        // First attempt
-        {
-            let guard = self.client.lock().await;
-            if let Some(ref client) = *guard {
-                match client.list_all_tools().await {
-                    Ok(tools) => return Ok(RetryResult::ok(tools)),
-                    Err(e) => {
-                        let error_str = e.to_string();
-                        if !should_refresh_connection(&error_str) {
-                            return Err(error_str);
-                        }
-                        if self.config.log_reconnections {
-                            warn!(error = %error_str, "list_tools failed, will retry with reconnection");
-                        }
-                    }
-                }
-            }
-        }
-
-        // Retry with reconnection
-        for attempt in 1..=self.config.max_attempts {
-            if self.config.log_reconnections {
-                info!(
-                    attempt = attempt,
-                    max = self.config.max_attempts,
-                    "Reconnection attempt for list_tools"
-                );
-            }
-
-            // Wait before retry
-            if self.config.retry_delay_ms > 0 {
-                tokio::time::sleep(tokio::time::Duration::from_millis(self.config.retry_delay_ms))
-                    .await;
-            }
-
-            // Try to refresh
-            if let Err(e) = self.refresh_connection().await {
-                if self.config.log_reconnections {
-                    warn!(error = %e, attempt = attempt, "Refresh failed");
-                }
-                continue;
-            }
-
-            // Retry operation
-            let guard = self.client.lock().await;
-            if let Some(ref client) = *guard {
-                match client.list_all_tools().await {
-                    Ok(tools) => {
-                        if self.config.log_reconnections {
-                            debug!(
-                                attempt = attempt,
-                                tool_count = tools.len(),
-                                "list_tools succeeded after reconnection"
-                            );
-                        }
-                        return Ok(RetryResult::reconnected(tools));
-                    }
-                    Err(e) => {
-                        if self.config.log_reconnections {
-                            warn!(error = %e, attempt = attempt, "list_tools failed after reconnection");
-                        }
-                    }
-                }
-            }
-        }
-
-        // Final attempt
-        let guard = self.client.lock().await;
-        if let Some(ref client) = *guard {
-            client.list_all_tools().await.map(RetryResult::ok).map_err(|e| e.to_string())
-        } else {
-            Err("No MCP client available".to_string())
-        }
+        let limits = self.discovery_limits;
+        let listing = self.with_reconnect("list_tools", true, |client| async move {
+            list_tools(client.peer(), limits.max_pages).await
+        });
+        tokio::time::timeout(limits.timeout, listing).await.unwrap_or_else(|_| {
+            Err(ListError::Timeout { method: "tools/list", timeout: limits.timeout }.to_string())
+        })
     }
 
     /// Call a tool on the MCP server.
     ///
     /// Tool calls are not replayed by default after an ambiguous connection
     /// failure. Use [`Self::with_tool_call_retries`] only when the operation is
-    /// known to be replay-safe.
+    /// known to be replay-safe. A call rejected with HTTP 401 never ran, so it is
+    /// resent after a reconnect either way.
     pub async fn call_tool(
         &self,
         params: CallToolRequestParams,
     ) -> Result<RetryResult<CallToolResponse>, String> {
-        // Ensure we have a connection
-        self.ensure_connected().await?;
-
-        // First attempt
-        {
-            let guard = self.client.lock().await;
-            if let Some(ref client) = *guard {
-                match client.call_tool_once(params.clone()).await {
-                    Ok(result) => return Ok(RetryResult::ok(result)),
-                    Err(e) => {
-                        let error_str = e.to_string();
-                        if !should_refresh_connection(&error_str) {
-                            return Err(error_str);
-                        }
-                        if !self.retry_tool_calls {
-                            return Err(format!(
-                                "MCP tool call result is uncertain and was not replayed: \
-                                 {error_str}. Enable tool-call retries only for replay-safe \
-                                 operations"
-                            ));
-                        }
-                        if self.config.log_reconnections {
-                            warn!(error = %error_str, tool = %params.name, "call_tool failed, will retry with reconnection");
-                        }
-                    }
-                }
-            }
-        }
-
-        // Retry with reconnection
-        for attempt in 1..=self.config.max_attempts {
-            if self.config.log_reconnections {
-                info!(attempt = attempt, max = self.config.max_attempts, tool = %params.name, "Reconnection attempt for call_tool");
-            }
-
-            // Wait before retry
-            if self.config.retry_delay_ms > 0 {
-                tokio::time::sleep(tokio::time::Duration::from_millis(self.config.retry_delay_ms))
-                    .await;
-            }
-
-            // Try to refresh
-            if let Err(e) = self.refresh_connection().await {
-                if self.config.log_reconnections {
-                    warn!(error = %e, attempt = attempt, "Refresh failed");
-                }
-                continue;
-            }
-
-            // Retry operation
-            let guard = self.client.lock().await;
-            if let Some(ref client) = *guard {
-                match client.call_tool_once(params.clone()).await {
-                    Ok(result) => {
-                        if self.config.log_reconnections {
-                            debug!(attempt = attempt, tool = %params.name, "call_tool succeeded after reconnection");
-                        }
-                        return Ok(RetryResult::reconnected(result));
-                    }
-                    Err(e) => {
-                        if self.config.log_reconnections {
-                            warn!(error = %e, attempt = attempt, "call_tool failed after reconnection");
-                        }
-                    }
-                }
-            }
-        }
-
-        // Final attempt
-        let guard = self.client.lock().await;
-        if let Some(ref client) = *guard {
-            client.call_tool_once(params).await.map(RetryResult::ok).map_err(|e| e.to_string())
-        } else {
-            Err("No MCP client available".to_string())
-        }
+        self.with_reconnect("tool call", self.retry_tool_calls, |client| {
+            let params = params.clone();
+            async move { Ok(client.call_tool_once(params).await?) }
+        })
+        .await
     }
 
     /// Get the cancellation token for the current connection.
     pub async fn cancellation_token(
         &self,
     ) -> Option<rmcp::service::RunningServiceCancellationToken> {
-        let guard = self.client.lock().await;
-        guard.as_ref().map(|c| c.cancellation_token())
+        self.client.read().await.as_ref().map(|client| client.cancellation_token())
     }
 
     /// Check if currently connected.
     pub async fn is_connected(&self) -> bool {
-        let guard = self.client.lock().await;
-        guard.is_some()
+        self.client.read().await.is_some()
     }
 
     /// Force a reconnection.
+    ///
+    /// Requests already in flight finish on the old connection.
     pub async fn reconnect(&self) -> Result<(), String> {
-        self.refresh_connection().await
+        let current = self.client.read().await.clone();
+        match current {
+            Some(current) => self.replace(Some(&current)).await.map(drop),
+            None => self.replace(None).await.map(drop),
+        }
     }
 
     /// Close the connection.
     pub async fn close(&self) {
-        let mut guard = self.client.lock().await;
-        if let Some(client) = guard.take() {
-            let token = client.cancellation_token();
-            token.cancel();
+        if let Some(client) = self.client.write().await.take() {
+            client.cancellation_token().cancel();
         }
     }
+}
+
+/// Returns `true` when `client` can no longer carry requests: its service loop was
+/// cancelled, or its transport closed, as it does when a stdio server process exits.
+pub(crate) fn is_connection_closed<S>(client: &RunningService<RoleClient, S>) -> bool
+where
+    S: rmcp::service::Service<RoleClient>,
+{
+    client.is_closed() || client.peer().is_transport_closed()
 }
 
 /// Simple wrapper for MCP clients that don't support reconnection.
 ///
 /// Use this for stdio-based MCP servers where reconnection isn't possible
-/// without restarting the server process.
+/// without restarting the server process. Requests share the connection and
+/// run concurrently.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use adk_tool::mcp::{SimpleClient, rmcp::{ServiceExt, transport::TokioChildProcess}};
+/// use tokio::process::Command;
+///
+/// let client = ().serve(TokioChildProcess::new(Command::new("my-mcp-server"))?).await?;
+/// let simple = SimpleClient::new(client);
+/// let (tools, peer_info) = tokio::join!(simple.list_tools(), async {
+///     simple.inner().peer_info()
+/// });
+/// ```
 pub struct SimpleClient<S>
 where
     S: rmcp::service::Service<RoleClient> + Send + Sync + 'static,
 {
-    client: Arc<Mutex<RunningService<RoleClient, S>>>,
+    client: Arc<RunningService<RoleClient, S>>,
+    discovery_limits: McpDiscoveryLimits,
 }
 
 impl<S> SimpleClient<S>
@@ -511,13 +588,33 @@ where
 {
     /// Create a new simple client wrapper.
     pub fn new(client: RunningService<RoleClient, S>) -> Self {
-        Self { client: Arc::new(Mutex::new(client)) }
+        Self { client: Arc::new(client), discovery_limits: McpDiscoveryLimits::default() }
     }
 
-    /// List all tools from the MCP server.
+    /// Set the bounds on [`list_tools`](Self::list_tools). See [`McpDiscoveryLimits`]
+    /// for the defaults.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let simple = SimpleClient::new(client)
+    ///     .with_discovery_limits(McpDiscoveryLimits::default().with_max_pages(8));
+    /// ```
+    pub fn with_discovery_limits(mut self, limits: McpDiscoveryLimits) -> Self {
+        self.discovery_limits = limits;
+        self
+    }
+
+    /// List all tools from the MCP server, within the [discovery limits](Self::with_discovery_limits).
     pub async fn list_tools(&self) -> Result<Vec<McpTool>, String> {
-        let client = self.client.lock().await;
-        client.list_all_tools().await.map_err(|e| e.to_string())
+        let limits = self.discovery_limits;
+        super::discovery::within(
+            "tools/list",
+            limits.timeout,
+            list_tools(self.client.peer(), limits.max_pages),
+        )
+        .await
+        .map_err(|error| error.to_string())
     }
 
     /// Call a tool on the MCP server.
@@ -525,18 +622,18 @@ where
         &self,
         params: CallToolRequestParams,
     ) -> Result<CallToolResponse, String> {
-        let client = self.client.lock().await;
-        client.call_tool_once(params).await.map_err(|e| e.to_string())
+        self.client.call_tool_once(params).await.map_err(|e| e.to_string())
     }
 
     /// Get the cancellation token.
     pub async fn cancellation_token(&self) -> rmcp::service::RunningServiceCancellationToken {
-        let client = self.client.lock().await;
-        client.cancellation_token()
+        self.client.cancellation_token()
     }
 
-    /// Get access to the underlying client mutex.
-    pub fn inner(&self) -> &Arc<Mutex<RunningService<RoleClient, S>>> {
+    /// Get the shared connection.
+    ///
+    /// Clone the `Arc` to send requests directly; nothing serializes them.
+    pub fn inner(&self) -> &Arc<RunningService<RoleClient, S>> {
         &self.client
     }
 }
@@ -545,21 +642,140 @@ where
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_should_refresh_connection() {
-        assert!(should_refresh_connection("connection closed"));
-        assert!(should_refresh_connection("ConnectionClosed"));
-        assert!(should_refresh_connection("EOF"));
-        assert!(should_refresh_connection("eof error"));
-        assert!(should_refresh_connection("broken pipe"));
-        assert!(should_refresh_connection("session not found"));
-        assert!(should_refresh_connection("transport error"));
-        assert!(should_refresh_connection("connection reset"));
+    fn transport_error(error: impl std::error::Error + Send + Sync + 'static) -> ServiceError {
+        ServiceError::TransportSend(rmcp::transport::DynamicTransportError::from_parts(
+            "test",
+            std::any::TypeId::of::<()>(),
+            Box::new(error),
+        ))
+    }
 
-        // Should not refresh for other errors
-        assert!(!should_refresh_connection("invalid argument"));
-        assert!(!should_refresh_connection("permission denied"));
-        assert!(!should_refresh_connection("tool not found"));
+    fn io(kind: std::io::ErrorKind, message: &str) -> std::io::Error {
+        std::io::Error::new(kind, message.to_string())
+    }
+
+    #[test]
+    fn a_lost_connection_triggers_a_refresh() {
+        use std::io::ErrorKind;
+        // rmcp's `ServiceError::TransportClosed`, reported once a stdio server exits.
+        assert!(should_refresh_connection(&ServiceError::TransportClosed));
+        for kind in [
+            ErrorKind::BrokenPipe,
+            ErrorKind::ConnectionReset,
+            ErrorKind::ConnectionAborted,
+            ErrorKind::NotConnected,
+            ErrorKind::UnexpectedEof,
+        ] {
+            assert!(should_refresh_connection(&transport_error(io(kind, "lost"))), "{kind:?}");
+        }
+    }
+
+    /// An I/O error a transport wraps in its own error type is found through `source()`.
+    #[test]
+    fn a_wrapped_io_error_is_classified_by_its_kind() {
+        #[derive(Debug)]
+        struct Codec(std::io::Error);
+        impl std::fmt::Display for Codec {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "codec failed")
+            }
+        }
+        impl std::error::Error for Codec {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+        let broken = Codec(io(std::io::ErrorKind::BrokenPipe, "pipe"));
+        assert!(should_refresh_connection(&transport_error(broken)));
+    }
+
+    /// Server-chosen text that mentions a lost connection never triggers a refresh.
+    #[test]
+    fn error_text_does_not_trigger_a_refresh() {
+        let text = "upstream geoffrey: EOF, broken pipe, connection reset, transport closed, \
+                    session not found";
+        let errors = [
+            transport_error(io(std::io::ErrorKind::Other, text)),
+            ServiceError::McpError(rmcp::ErrorData::internal_error(text.to_string(), None)),
+            ServiceError::UnexpectedResponse,
+            ServiceError::Timeout { timeout: std::time::Duration::from_secs(1) },
+        ];
+        for error in errors {
+            assert!(!should_refresh_connection(&error), "{error}");
+            assert!(!is_auth_rejection(&error), "{error}");
+        }
+    }
+
+    #[test]
+    fn server_errors_that_mention_authorization_are_not_auth_rejections() {
+        let error = ServiceError::McpError(rmcp::ErrorData::new(
+            rmcp::model::ErrorCode(-32001),
+            "upstream returned 401 Unauthorized; auth required",
+            None,
+        ));
+        assert!(!is_auth_rejection(&error));
+        assert!(!should_refresh_connection(&error));
+    }
+
+    #[cfg(feature = "http-transport")]
+    mod http {
+        use super::*;
+        use rmcp::transport::streamable_http_client::AuthRequiredError;
+
+        fn http(error: HttpError) -> ServiceError {
+            transport_error(error)
+        }
+
+        #[test]
+        fn http_401_rejections_trigger_a_refresh() {
+            let with_challenge =
+                http(HttpError::AuthRequired(AuthRequiredError::new("Bearer".to_string())));
+            let without_challenge =
+                http(HttpError::UnexpectedServerResponse("HTTP 401 Unauthorized: ".into()));
+            for error in [with_challenge, without_challenge] {
+                assert!(is_auth_rejection(&error), "{error}");
+                assert!(should_refresh_connection(&error), "{error}");
+            }
+        }
+
+        #[test]
+        fn a_5xx_never_triggers_a_refresh_whatever_its_body_says() {
+            let error = http(HttpError::UnexpectedServerResponse(
+                "HTTP 500 Internal Server Error: upstream geoffrey: EOF; Transport closed; \
+                 connection reset; session not found; HTTP 401 Unauthorized"
+                    .into(),
+            ));
+            assert!(!should_refresh_connection(&error), "{error}");
+            assert!(!is_auth_rejection(&error), "{error}");
+        }
+
+        #[test]
+        fn an_interrupted_stream_or_expired_session_triggers_a_refresh() {
+            for error in [
+                HttpError::UnexpectedEndOfStream,
+                HttpError::TransportChannelClosed,
+                HttpError::SessionExpired,
+                HttpError::Io(io(std::io::ErrorKind::ConnectionReset, "reset")),
+            ] {
+                let error = http(error);
+                assert!(should_refresh_connection(&error), "{error}");
+                assert!(!is_auth_rejection(&error), "{error}");
+            }
+        }
+
+        #[test]
+        fn a_rejected_tool_call_is_retried_without_replay_opt_in() {
+            let config = RefreshConfig::default();
+            let rejected = http(HttpError::AuthRequired(AuthRequiredError::new("Bearer".into())));
+            assert!(should_retry_mcp_operation(&rejected, 0, &config, true, false));
+            assert!(!should_retry_mcp_operation(
+                &ServiceError::TransportClosed,
+                0,
+                &config,
+                true,
+                false
+            ));
+        }
     }
 
     #[test]

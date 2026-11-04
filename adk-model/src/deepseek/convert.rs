@@ -6,10 +6,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// DeepSeek chat message.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Message {
     pub role: String,
     pub content: Option<String>,
+    #[serde(skip)]
+    pub content_parts: Option<Vec<Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -19,6 +21,32 @@ pub struct Message {
     /// Reasoning content from thinking mode (only in responses).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
+}
+
+impl Serialize for Message {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("role", &self.role)?;
+        if let Some(parts) = &self.content_parts {
+            map.serialize_entry("content", parts)?;
+        } else {
+            map.serialize_entry("content", &self.content)?;
+        }
+        if let Some(name) = &self.name {
+            map.serialize_entry("name", name)?;
+        }
+        if let Some(calls) = &self.tool_calls {
+            map.serialize_entry("tool_calls", calls)?;
+        }
+        if let Some(id) = &self.tool_call_id {
+            map.serialize_entry("tool_call_id", id)?;
+        }
+        if let Some(reasoning) = &self.reasoning_content {
+            map.serialize_entry("reasoning_content", reasoning)?;
+        }
+        map.end()
+    }
 }
 
 /// Tool call in a message.
@@ -82,6 +110,10 @@ pub struct ChatCompletionRequest {
     /// Stop sequences.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frequency_penalty: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub presence_penalty: Option<f32>,
 }
 
 /// Response format configuration.
@@ -126,8 +158,9 @@ pub struct ChatCompletionResponse {
     #[serde(rename = "model")]
     pub _model: String,
     pub choices: Vec<Choice>,
+    /// The `usage` object as received; counts are read from it leniently.
     #[serde(default)]
-    pub usage: Option<Usage>,
+    pub usage: Option<Value>,
 }
 
 /// Response choice.
@@ -177,29 +210,25 @@ pub struct DeltaFunction {
     pub arguments: Option<String>,
 }
 
-/// Token usage information.
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct Usage {
-    pub prompt_tokens: u32,
-    pub completion_tokens: u32,
-    pub total_tokens: u32,
-    /// Tokens used for reasoning (thinking mode).
-    #[serde(default)]
-    pub reasoning_tokens: Option<u32>,
-    /// Cache hit tokens for prefix caching.
-    #[serde(default)]
-    pub prompt_cache_hit_tokens: Option<u32>,
-    /// Non-cached input tokens.
-    #[serde(default)]
-    pub prompt_cache_miss_tokens: Option<u32>,
+/// Normalizes a DeepSeek `usage` object, keeping it as received. DeepSeek reports cache hits
+/// as `prompt_cache_hit_tokens` and may report `reasoning_tokens` at the top level; a `null`
+/// or missing count never fails the response.
+pub fn usage(u: &Value) -> Option<UsageMetadata> {
+    use crate::usage_json::count;
+    let mut meta = crate::usage_json::chat_completions(u)?;
+    meta.thinking_token_count = count(u, "/reasoning_tokens").or(meta.thinking_token_count);
+    // Cache misses are ordinary input, not separately billed cache writes.
+    meta.cache_read_input_token_count =
+        count(u, "/prompt_cache_hit_tokens").or(meta.cache_read_input_token_count);
+    Some(meta)
 }
 
-/// Convert ADK Content to DeepSeek Message.
 /// Builds a system message carrying `text`.
 pub fn system_message(text: impl Into<String>) -> Message {
     Message {
         role: "system".to_string(),
         content: Some(text.into()),
+        content_parts: None,
         name: None,
         tool_calls: None,
         tool_call_id: None,
@@ -207,6 +236,33 @@ pub fn system_message(text: impl Into<String>) -> Message {
     }
 }
 
+/// Convert one ADK content to the DeepSeek messages that carry it.
+///
+/// A content holding function responses becomes one `tool` message per response, in order,
+/// followed by a user message with any other parts; every other content is one message.
+pub fn content_to_messages(content: &Content) -> Vec<Message> {
+    if matches!(content.role.as_str(), "user" | "function" | "tool")
+        && let Some((responses, rest)) = crate::tool_result::split_function_responses(content)
+    {
+        let mut messages: Vec<Message> = responses
+            .into_iter()
+            .map(|(id, response)| Message {
+                role: "tool".to_string(),
+                content: Some(crate::tool_result::serialize_tool_result(&response.response)),
+                content_parts: None,
+                name: None,
+                tool_calls: None,
+                tool_call_id: id.map(str::to_string),
+                reasoning_content: None,
+            })
+            .collect();
+        messages.extend(rest.map(|rest| content_to_message(&rest)));
+        return messages;
+    }
+    vec![content_to_message(content)]
+}
+
+/// Convert ADK Content to DeepSeek Message.
 pub fn content_to_message(content: &Content) -> Message {
     let role = match content.role.as_str() {
         "model" | "assistant" => "assistant",
@@ -220,8 +276,11 @@ pub fn content_to_message(content: &Content) -> Message {
     let mut reasoning_parts = Vec::new();
     let mut tool_calls = Vec::new();
     let mut tool_call_id = None;
+    let mut content_parts = Vec::new();
+    let mut has_image = false;
 
     for part in &content.parts {
+        let previous = text_parts.len();
         match part {
             Part::Text { text } => text_parts.push(text.clone()),
             Part::FunctionCall { name, args, id, .. } => {
@@ -239,6 +298,19 @@ pub fn content_to_message(content: &Content) -> Message {
                 tool_call_id = id.clone();
                 text_parts
                     .push(crate::tool_result::serialize_tool_result(&function_response.response));
+            }
+            Part::InlineData { mime_type, data, .. }
+                if role == "user"
+                    && matches!(
+                        mime_type.as_str(),
+                        "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+                    ) =>
+            {
+                has_image = true;
+                content_parts.push(serde_json::json!({
+                    "type": "image_url",
+                    "image_url": {"url": format!("data:{mime_type};base64,{}", attachment::encode_base64(data))}
+                }));
             }
             Part::InlineData { mime_type, data, .. } => {
                 text_parts.push(attachment::inline_attachment_to_text(mime_type, data));
@@ -260,20 +332,84 @@ pub fn content_to_message(content: &Content) -> Message {
                 }
             },
         }
+        content_parts.extend(
+            text_parts[previous..]
+                .iter()
+                .map(|text| serde_json::json!({"type":"text", "text":text})),
+        );
     }
 
-    let content_str = if text_parts.is_empty() { None } else { Some(text_parts.join("\n")) };
+    // Interrupted calls and cross-provider histories may retain only thinking.
+    // DeepSeek rejects an assistant with neither content nor tool_calls; an
+    // explicit empty string preserves the reasoning without inventing an answer.
+    let content_str = if text_parts.is_empty() {
+        (role == "assistant" && tool_calls.is_empty()).then(String::new)
+    } else {
+        Some(text_parts.join("\n"))
+    };
     let reasoning_content =
         if reasoning_parts.is_empty() { None } else { Some(reasoning_parts.join("\n")) };
 
     Message {
         role: role.to_string(),
         content: content_str,
+        content_parts: has_image.then_some(content_parts),
         name: None,
         tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
         tool_call_id,
         reasoning_content,
     }
+}
+
+/// Reasoning that the terminal chunk still owes the consumer.
+///
+/// With thinking enabled, each `reasoning_content` delta is yielded as a
+/// partial `Part::Thinking` while it arrives, so the terminal chunk must not
+/// replay `buffer`. With thinking disabled the deltas are buffered and never
+/// yielded, so the terminal chunk is the only place they can surface.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// // thinking enabled: already streamed, nothing left to emit
+/// assert!(pending_reasoning(&mut buffer, true).is_none());
+/// ```
+pub fn pending_reasoning(buffer: &mut String, thinking_enabled: bool) -> Option<String> {
+    if thinking_enabled || buffer.is_empty() {
+        return None;
+    }
+    Some(std::mem::take(buffer))
+}
+
+/// Parts the terminal chunk of a stream contributes, on top of everything its
+/// earlier chunks already yielded.
+///
+/// ADK accumulates the parts of *every* chunk it receives, partial ones
+/// included, so each piece of a response must be emitted exactly once across
+/// the stream. The terminal chunk therefore carries only its own `delta` —
+/// plus any reasoning that was buffered but never streamed.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// // The usual DeepSeek finish chunk has an empty delta and contributes nothing.
+/// assert!(final_chunk_parts(None, &mut String::new(), false).is_empty());
+/// ```
+pub fn final_chunk_parts(
+    delta: Option<&DeltaMessage>,
+    reasoning_buffer: &mut String,
+    thinking_enabled: bool,
+) -> Vec<Part> {
+    let mut parts = Vec::new();
+    if let Some(thinking) = pending_reasoning(reasoning_buffer, thinking_enabled) {
+        parts.push(Part::Thinking { thinking, signature: None });
+    }
+    if let Some(text) = delta.and_then(|d| d.content.as_deref())
+        && !text.is_empty()
+    {
+        parts.push(Part::Text { text: text.to_string() });
+    }
+    parts
 }
 
 /// Convert ADK tools to DeepSeek tools.
@@ -314,7 +450,7 @@ pub fn from_response(response: &ChatCompletionResponse) -> LlmResponse {
             "length" => FinishReason::MaxTokens,
             "tool_calls" => FinishReason::Stop,
             "content_filter" => FinishReason::Safety,
-            _ => FinishReason::Stop,
+            _ => FinishReason::Other,
         });
 
         if let Some(msg) = &choice.message {
@@ -337,8 +473,11 @@ pub fn from_response(response: &ChatCompletionResponse) -> LlmResponse {
             // Add tool calls
             if let Some(tool_calls) = &msg.tool_calls {
                 for tc in tool_calls {
-                    let args: Value = serde_json::from_str(&tc.function.arguments)
-                        .unwrap_or(serde_json::json!({}));
+                    let args = crate::tool_args::tool_call_arguments(
+                        "deepseek",
+                        &tc.function.name,
+                        Some(&Value::String(tc.function.arguments.clone())),
+                    );
                     parts.push(Part::FunctionCall {
                         name: tc.function.name.clone(),
                         args,
@@ -363,15 +502,7 @@ pub fn from_response(response: &ChatCompletionResponse) -> LlmResponse {
         (None, None)
     };
 
-    let usage = response.usage.as_ref().map(|u| UsageMetadata {
-        prompt_token_count: u.prompt_tokens as i32,
-        candidates_token_count: u.completion_tokens as i32,
-        total_token_count: u.total_tokens as i32,
-        thinking_token_count: u.reasoning_tokens.map(|t| t as i32),
-        cache_read_input_token_count: u.prompt_cache_hit_tokens.map(|t| t as i32),
-        cache_creation_input_token_count: u.prompt_cache_miss_tokens.map(|t| t as i32),
-        ..Default::default()
-    });
+    let usage = response.usage.as_ref().and_then(usage);
 
     // A turn that emits tool calls is not complete — tool results must still be
     // processed and sent back to the model (issue #401).
@@ -389,6 +520,8 @@ pub fn from_response(response: &ChatCompletionResponse) -> LlmResponse {
         error_message: None,
         provider_metadata: None,
         interaction_id: None,
+        model: None,
+        provider: None,
     }
 }
 
@@ -426,11 +559,51 @@ pub fn create_tool_call_response(
         error_message: None,
         provider_metadata: None,
         interaction_id: None,
+        model: None,
+        provider: None,
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pending_reasoning_is_owed_only_when_it_was_never_streamed() {
+        // Thinking enabled: the deltas were yielded as they arrived.
+        let mut buffer = String::from("because");
+        assert_eq!(pending_reasoning(&mut buffer, true), None);
+        assert_eq!(buffer, "because", "buffer must not be consumed");
+
+        // Thinking disabled: the terminal chunk is the only place it can surface.
+        assert_eq!(pending_reasoning(&mut buffer, false), Some("because".to_string()));
+        assert!(buffer.is_empty(), "buffer is drained once emitted");
+        assert_eq!(pending_reasoning(&mut buffer, false), None);
+    }
+
+    #[test]
+    fn final_chunk_carries_only_its_own_delta() {
+        // Regression: the terminal chunk used to replay the accumulated text
+        // buffer on top of the deltas it had already yielded, so consumers that
+        // accumulate every chunk saw the whole response twice.
+        let delta = DeltaMessage { content: Some("tail".into()), ..Default::default() };
+        let parts = final_chunk_parts(Some(&delta), &mut String::new(), false);
+        assert_eq!(parts.len(), 1);
+        assert!(matches!(&parts[0], Part::Text { text } if text == "tail"));
+
+        // The usual DeepSeek finish chunk has an empty delta.
+        assert!(final_chunk_parts(None, &mut String::new(), false).is_empty());
+        let empty = DeltaMessage { content: Some(String::new()), ..Default::default() };
+        assert!(final_chunk_parts(Some(&empty), &mut String::new(), false).is_empty());
+    }
+
+    #[test]
+    fn final_chunk_orders_unstreamed_reasoning_before_text() {
+        let delta = DeltaMessage { content: Some("answer".into()), ..Default::default() };
+        let mut buffer = String::from("because");
+        let parts = final_chunk_parts(Some(&delta), &mut buffer, false);
+        assert!(matches!(&parts[0], Part::Thinking { thinking, .. } if thinking == "because"));
+        assert!(matches!(&parts[1], Part::Text { text } if text == "answer"));
+    }
+
     use super::*;
 
     #[test]
@@ -470,6 +643,22 @@ mod tests {
     }
 
     #[test]
+    fn thinking_only_history_has_explicit_content() {
+        let content = Content {
+            role: "model".into(),
+            parts: vec![Part::Thinking {
+                thinking: "Retained reasoning from an interrupted turn".into(),
+                signature: None,
+            }],
+        };
+        let message = content_to_message(&content);
+        let json = serde_json::to_value(&message).unwrap();
+        assert_eq!(json["content"], "");
+        assert_eq!(json["reasoning_content"], "Retained reasoning from an interrupted turn");
+        assert!(json.get("tool_calls").is_none());
+    }
+
+    #[test]
     fn content_to_message_maps_thinking_to_reasoning_content() {
         let content = Content {
             role: "model".to_string(),
@@ -487,5 +676,36 @@ mod tests {
         assert_eq!(message.role, "assistant");
         assert_eq!(message.reasoning_content.as_deref(), Some("reason through the tool plan"));
         assert_eq!(message.content.as_deref(), Some("let me check the prices"));
+    }
+
+    #[test]
+    fn several_function_responses_become_one_tool_message_each() {
+        let response = |id: &str| Part::FunctionResponse {
+            function_response: adk_core::FunctionResponseData::new(
+                "get_weather",
+                serde_json::json!({"ok": id}),
+            ),
+            id: Some(id.to_string()),
+            annotations: None,
+        };
+        let content = Content {
+            role: "function".to_string(),
+            parts: vec![
+                response("call_a"),
+                response("call_b"),
+                Part::Text { text: "note".to_string() },
+            ],
+        };
+        let messages = content_to_messages(&content);
+        let shape: Vec<(String, Option<String>)> =
+            messages.iter().map(|m| (m.role.clone(), m.tool_call_id.clone())).collect();
+        assert_eq!(
+            shape,
+            vec![
+                ("tool".to_string(), Some("call_a".to_string())),
+                ("tool".to_string(), Some("call_b".to_string())),
+                ("user".to_string(), None),
+            ]
+        );
     }
 }

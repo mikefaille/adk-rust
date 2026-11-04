@@ -496,6 +496,8 @@ pub fn error_category(err: &RealtimeError) -> &'static str {
         RealtimeError::ConfigError(_) => "config",
         RealtimeError::AudioFormatError(_) => "audio-format",
         RealtimeError::ToolError(_) => "tool",
+        RealtimeError::OutputBlocked { .. } => "output-blocked",
+        RealtimeError::SpendRefused(_) => "spend-refused",
         RealtimeError::ServerError { .. } => "server",
         RealtimeError::Timeout(_) => "timeout",
         RealtimeError::SerializationError(_) => "serialization",

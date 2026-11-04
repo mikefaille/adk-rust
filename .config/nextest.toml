@@ -26,3 +26,92 @@ fail-fast = true
 status-level = "retry"
 final-status-level = "slow"
 slow-timeout = { period = "60s", terminate-after = 2 }
+
+# The Firestore emulator serializes contended transactions slowly; its suites get a
+# longer budget than the live database servers.
+[[profile.default.overrides]]
+filter = "binary(store_conformance_firestore) | (binary_id(adk-kernel::integration) and test(/^store_conformance_firestore::/))"
+slow-timeout = { period = "60s", terminate-after = 4 }
+
+# The SQLite process store's sustained-write suites commit a few thousand times to files
+# opened as harness.db is, synchronized; a Windows runner's disk takes 45–90 s for that.
+[[profile.default.overrides]]
+filter = "binary_id(adk-kernel::integration) and test(/^process_store_sqlite::/)"
+slow-timeout = { period = "60s", terminate-after = 4 }
+
+# The away property test restarts a SQLite-backed kernel store in each of its cases; a Windows
+# runner needs over 90 s for the run.
+[[profile.default.overrides]]
+filter = "binary_id(adk-kernel::integration) and test(/^away_property_tests::/)"
+slow-timeout = { period = "60s", terminate-after = 4 }
+
+# S19's scaled run simulates four hours of feeds and an hour of live blog against
+# DirectoryHost: about 55 s on a macOS runner and over 90 s on a Windows one.
+[[profile.default.overrides]]
+filter = "package(adk-site) and binary(s19_constant_updates)"
+slow-timeout = { period = "60s", terminate-after = 4 }
+
+# "Hire a helper" waits out the kernel's one-minute audit checkpoint before it verifies the
+# record with `adk-rust audit verify`.
+[[profile.default.overrides]]
+filter = "package(adk-cli) and binary(hire_a_helper)"
+slow-timeout = { period = "60s", terminate-after = 4 }
+
+# "Correct me, then check" waits out the same checkpoint, and up to three and a half minutes
+# for the kernel's first tidy-up, which is held while another of its processes runs.
+[[profile.default.overrides]]
+filter = "package(adk-cli) and binary(correct_me_then_check)"
+slow-timeout = { period = "60s", terminate-after = 5 }
+
+# The durability gates on one server share its stores (schedules are global to a
+# store), so they run one at a time per backend; different backends run in parallel.
+# Each gate starts several processes and waits out leases and staleness limits.
+[test-groups]
+durability-gates-postgres = { max-threads = 1 }
+durability-gates-redis = { max-threads = 1 }
+durability-gates-mongodb = { max-threads = 1 }
+durability-gates-neo4j = { max-threads = 1 }
+durability-gates-firestore = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = "package(adk-durability-gates) and test(/^postgres::/)"
+test-group = "durability-gates-postgres"
+
+[[profile.default.overrides]]
+filter = "package(adk-durability-gates) and test(/^redis::/)"
+test-group = "durability-gates-redis"
+
+[[profile.default.overrides]]
+filter = "package(adk-durability-gates) and test(/^mongodb::/)"
+test-group = "durability-gates-mongodb"
+
+[[profile.default.overrides]]
+filter = "package(adk-durability-gates) and test(/^neo4j::/)"
+test-group = "durability-gates-neo4j"
+
+[[profile.default.overrides]]
+filter = "package(adk-durability-gates) and test(/^firestore::/)"
+test-group = "durability-gates-firestore"
+
+[[profile.default.overrides]]
+filter = "package(adk-durability-gates)"
+slow-timeout = { period = "60s", terminate-after = 3 }
+
+# The live ultracode runs drive a real model through a whole implement-and-review run per
+# provider, then build the fixture.
+[[profile.default.overrides]]
+filter = "binary(harness_ultracode_live)"
+slow-timeout = { period = "120s", terminate-after = 10 }
+
+# S19's full day (spec 3.5 §11): 50,000 products fed for 24 simulated hours, run only by the nightly
+# `site-soak` job; an optimised build takes a few hours.
+[[profile.default.overrides]]
+filter = "binary(s19_constant_updates) and test(s19_full_day)"
+slow-timeout = { period = "600s", terminate-after = 30 }
+
+# adk-site's host suites against real servers (MinIO, Azurite, an SSH server) and its real
+# generators, and the CalDAV driver's live run, run only by the nightly `site-hosts` and
+# `site-generators` jobs: each publishes dozens of releases or builds a site twice.
+[[profile.default.overrides]]
+filter = "test(s3_compatible_store) | test(azure_storage) | test(rsync_over_ssh) | test(builds_the_fixture_site_sandboxed) | test(live_caldav)"
+slow-timeout = { period = "120s", terminate-after = 10 }

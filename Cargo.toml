@@ -54,7 +54,10 @@ members = [
     # Repo-internal task runner (publish = false, never published)
     "xtask",
 
-    # Local LLM inference (now publishable - mistralrs on crates.io)
+    # Multi-process durability gates on every durable backend (publish = false)
+    "adk-durability-gates",
+
+    # Local LLM inference via mistral.rs; GPU features (cuda, metal) are opt-in
     "adk-mistralrs",
 
     # Managed agent runtime
@@ -65,6 +68,24 @@ members = [
 
     # Benchmarking framework
     "adk-bench",
+
+    # Governed harness agent (spec 3.1)
+    "adk-harness",
+
+    # Agent kernel: the harness's resident form (spec 3.2)
+    "adk-kernel",
+
+    # Agent surfaces: one engine, every surface (spec 3.3)
+    "adk-surface",
+
+    # Site pipeline for AWP 2.0 websites (spec 3.5)
+    "adk-site",
+
+    # Service drivers: DNS, email, analytics, social, advertising (spec 3.5 §7.13)
+    "adk-drivers",
+
+    # The prebuilt AWP website: kinds, team, onboarding, jobs (spec 3.5 Part C)
+    "adk-website",
 ]
 exclude = [
     # Extracted to standalone repo: https://github.com/zavora-ai/adk-studio
@@ -75,12 +96,11 @@ exclude = [
     "examples/enterprise_hello",
     "examples/eval_showcase",
 
-    # Reference implementations (not part of workspace)
-    "reference/adk-go",
-    "reference/mcp-rust-sdk",
-    "reference/gemini-rust",
-    # Learning materials (gitignored, not part of CI)
+    # Local-only directories (gitignored, not part of CI)
     "learning",
+
+    # The desktop tray: its own unpublished, Experimental workspace (spec 3.3 §5.5)
+    "adk-surface/desktop",
 ]
 
 [profile.dev]
@@ -119,7 +139,7 @@ strip = false
 opt-level = 2
 
 [workspace.package]
-version = "2.1.0"
+version = "3.0.0"
 edition = "2024"
 rust-version = "1.95"
 license = "Apache-2.0"
@@ -155,50 +175,60 @@ sha2 = "0.10"
 hex = "0.4"
 flate2 = "1.0"
 tar = "0.4"
-zip = { version = "7.2", default-features = false, features = ["deflate"] }
+zip = { version = "9.0", default-features = false, features = ["deflate"] }
 livekit = { version = "=0.9.1", default-features = false, features = ["tokio", "native-tls"] }
 livekit-api = { version = "=0.7.1", default-features = false, features = ["access-token", "services"] }
 livekit-datatrack = { version = "=0.1.15", default-features = false }
 
+# Shared database API types; all public pool constructors use this SQLx line.
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio"] }
+pgvector = "0.4.2"
+
 # ADK internal crates (use { workspace = true } in member crates)
-adk-core = { path = "adk-core", version = "2.1.0" }
-adk-schema = { path = "adk-schema", version = "2.1.0" }
-adk-rust-macros = { path = "adk-rust-macros", version = "2.1.0" }
-adk-agent = { path = "adk-agent", version = "2.1.0", default-features = false }
-adk-model = { path = "adk-model", version = "2.1.0", default-features = false }
-adk-tool = { path = "adk-tool", version = "2.1.0" }
-adk-runner = { path = "adk-runner", version = "2.1.0", default-features = false }
-adk-server = { path = "adk-server", version = "2.1.0" }
-adk-session = { path = "adk-session", version = "2.1.0" }
-adk-artifact = { path = "adk-artifact", version = "2.1.0" }
-adk-memory = { path = "adk-memory", version = "2.1.0" }
-adk-cli = { path = "adk-cli", version = "2.1.0", default-features = false }
-adk-realtime = { path = "adk-realtime", version = "2.1.0" }
-adk-graph = { path = "adk-graph", version = "2.1.0" }
-adk-browser = { path = "adk-browser", version = "2.1.0" }
-adk-computer-use = { path = "adk-computer-use", version = "2.1.0" }
-adk-eval = { path = "adk-eval", version = "2.1.0" }
-adk-telemetry = { path = "adk-telemetry", version = "2.1.0" }
-adk-guardrail = { path = "adk-guardrail", version = "2.1.0" }
-adk-auth = { path = "adk-auth", version = "2.1.0" }
-adk-plugin = { path = "adk-plugin", version = "2.1.0" }
-adk-skill = { path = "adk-skill", version = "2.1.0" }
-adk-gemini = { path = "adk-gemini", version = "2.1.0" }
-adk-gcp = { path = "adk-gcp", version = "2.1.0" }
-adk-code = { path = "adk-code", version = "2.1.0" }
-adk-codeact-monty = { path = "adk-codeact-monty", version = "2.1.0" }
-adk-devtools = { path = "adk-devtools", version = "2.1.0" }
-adk-sandbox = { path = "adk-sandbox", version = "2.1.0" }
-adk-rag = { path = "adk-rag", version = "2.1.0" }
-adk-audio = { path = "adk-audio", version = "2.1.0" }
-adk-mistralrs = { path = "adk-mistralrs", version = "2.1.0", default-features = false }
-adk-deploy = { path = "adk-deploy", version = "2.1.0" }
-adk-payments = { path = "adk-payments", version = "2.1.0" }
-adk-action = { path = "adk-action", version = "2.1.0" }
-adk-anthropic = { path = "adk-anthropic", version = "2.1.0" }
-adk-managed = { path = "adk-managed", version = "2.1.0", default-features = false }
-adk-enterprise = { path = "adk-enterprise", version = "2.1.0" }
-adk-bench = { path = "adk-bench", version = "2.1.0" }
-awp-types = { path = "awp-types", version = "2.1.0" }
-adk-awp = { path = "adk-awp", version = "2.1.0" }
-adk-acp = { path = "adk-acp", version = "2.1.0" }
+adk-core = { path = "adk-core", version = "3.0.0" }
+adk-schema = { path = "adk-schema", version = "3.0.0" }
+adk-rust-macros = { path = "adk-rust-macros", version = "3.0.0" }
+adk-agent = { path = "adk-agent", version = "3.0.0", default-features = false }
+adk-model = { path = "adk-model", version = "3.0.0", default-features = false }
+adk-tool = { path = "adk-tool", version = "3.0.0" }
+adk-runner = { path = "adk-runner", version = "3.0.0", default-features = false }
+adk-server = { path = "adk-server", version = "3.0.0" }
+adk-session = { path = "adk-session", version = "3.0.0" }
+adk-artifact = { path = "adk-artifact", version = "3.0.0" }
+adk-memory = { path = "adk-memory", version = "3.0.0" }
+adk-cli = { path = "adk-cli", version = "3.0.0", default-features = false }
+adk-realtime = { path = "adk-realtime", version = "3.0.0" }
+adk-graph = { path = "adk-graph", version = "3.0.0" }
+adk-browser = { path = "adk-browser", version = "3.0.0" }
+adk-computer-use = { path = "adk-computer-use", version = "3.0.0" }
+adk-eval = { path = "adk-eval", version = "3.0.0" }
+adk-telemetry = { path = "adk-telemetry", version = "3.0.0" }
+adk-guardrail = { path = "adk-guardrail", version = "3.0.0" }
+adk-auth = { path = "adk-auth", version = "3.0.0" }
+adk-plugin = { path = "adk-plugin", version = "3.0.0" }
+adk-skill = { path = "adk-skill", version = "3.0.0" }
+adk-gemini = { path = "adk-gemini", version = "3.0.0" }
+adk-gcp = { path = "adk-gcp", version = "3.0.0" }
+adk-code = { path = "adk-code", version = "3.0.0" }
+adk-codeact-monty = { path = "adk-codeact-monty", version = "3.0.0" }
+adk-devtools = { path = "adk-devtools", version = "3.0.0" }
+adk-sandbox = { path = "adk-sandbox", version = "3.0.0" }
+adk-rag = { path = "adk-rag", version = "3.0.0" }
+adk-audio = { path = "adk-audio", version = "3.0.0" }
+adk-mistralrs = { path = "adk-mistralrs", version = "3.0.0", default-features = false }
+adk-deploy = { path = "adk-deploy", version = "3.0.0" }
+adk-payments = { path = "adk-payments", version = "3.0.0" }
+adk-action = { path = "adk-action", version = "3.0.0" }
+adk-anthropic = { path = "adk-anthropic", version = "3.0.0" }
+adk-managed = { path = "adk-managed", version = "3.0.0", default-features = false }
+adk-enterprise = { path = "adk-enterprise", version = "3.0.0" }
+adk-bench = { path = "adk-bench", version = "3.0.0" }
+adk-harness = { path = "adk-harness", version = "3.0.0" }
+adk-kernel = { path = "adk-kernel", version = "3.0.0" }
+adk-surface = { path = "adk-surface", version = "3.0.0" }
+adk-drivers = { path = "adk-drivers", version = "3.0.0" }
+awp-types = { path = "awp-types", version = "3.0.0" }
+adk-awp = { path = "adk-awp", version = "3.0.0" }
+adk-acp = { path = "adk-acp", version = "3.0.0" }
+adk-site = { path = "adk-site", version = "3.0.0" }
+adk-website = { path = "adk-website", version = "3.0.0" }

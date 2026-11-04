@@ -27,7 +27,7 @@ sha2.workspace = true
 hex.workspace = true
 flate2.workspace = true
 tar.workspace = true
-dirs = "6"
+dirs = "7"
 url = "2"
 # Optional: Agent Engine (ReasoningEngine) deployment client
 adk-core = { workspace = true, optional = true }
@@ -42,3 +42,7 @@ gcp = ["adk-core", "adk-gcp", "google-cloud-auth"]
 tempfile = "3"
 axum = "0.8"
 tokio = { workspace = true, features = ["rt", "macros", "net"] }
+
+# Document every feature-gated API on docs.rs.
+[package.metadata.docs.rs]
+all-features = true

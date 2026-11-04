@@ -1,77 +1,226 @@
+#[cfg(feature = "audit")]
+mod audit;
+#[cfg(feature = "website")]
+mod awp_cli;
 mod cli;
 mod deploy;
 mod graph;
+#[cfg(feature = "harness")]
+mod harness_cli;
+#[cfg(feature = "harness")]
+mod kernel_cli;
+#[cfg(not(feature = "harness"))]
+mod legacy;
+#[cfg(all(feature = "harness", feature = "persist"))]
+mod manage;
+#[cfg(all(windows, any(feature = "audit", feature = "persist", feature = "harness")))]
+mod owner_only;
+#[cfg(feature = "harness")]
+mod pair_cli;
+#[cfg(feature = "vertex-agent-registry")]
+mod registry;
+#[cfg(feature = "scripted-model")]
+mod scripted;
+#[cfg(feature = "persist")]
+mod sessions;
 mod setup;
+#[cfg(feature = "harness")]
+mod shared_store;
+#[cfg(feature = "website")]
+mod site_cli;
 mod skills;
+#[cfg(all(feature = "harness", feature = "persist", feature = "encrypted"))]
+mod store;
 mod ultra;
+#[cfg(feature = "voice")]
+mod voice_cli;
+#[cfg(feature = "website")]
+mod website_cli;
 
 use adk_agent::LlmAgentBuilder;
-use adk_agent::coding::CodingAgent;
 use adk_cli::{Launcher, launcher::ThinkingDisplayMode};
-use adk_core::{Content, Llm, Part, SessionId, UserId};
-use adk_devtools::Workspace;
+use adk_core::Llm;
 use adk_model::ModelProvider;
-use adk_runner::Runner;
-use adk_session::{CreateRequest, InMemorySessionService, SessionService};
 use adk_tool::GoogleSearchTool;
 use anyhow::Result;
 use clap::Parser;
-use cli::{Cli, Commands, ThinkingMode};
-use futures::StreamExt;
+use cli::{AgentOptions, ChatArgs, Cli, Commands, Provider, ThinkingMode};
 use std::sync::Arc;
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let cli = Cli::parse();
+/// The stack the commands and the runtime's workers run on. Debug builds of the argument
+/// parser and the command futures outgrow the 1 MiB Windows gives a process's main thread
+/// and the service dispatcher's thread, and debug builds of `up`'s request handlers outgrow
+/// the 2 MiB a runtime worker gets by default, so every platform runs them with the 8 MiB
+/// Linux and macOS give their main thread.
+const COMMAND_STACK: usize = 8 * 1024 * 1024;
 
-    match cli.command {
-        None | Some(Commands::Chat) => {
-            let agent = build_agent(
-                cli.provider,
-                cli.model,
-                cli.api_key,
-                cli.instruction,
-                cli.thinking_budget,
-            )?;
-            Launcher::new(Arc::new(agent))
-                .app_name("adk-rust")
-                .with_thinking_mode(map_thinking_mode(cli.thinking_mode))
-                .run_console_directly()
-                .await
-                .map_err(Into::into)
+fn main() -> Result<()> {
+    on_command_stack("main", || {
+        tokio::runtime::Builder::new_multi_thread()
+            .thread_stack_size(COMMAND_STACK)
+            .enable_all()
+            .build()?
+            .block_on(run())
+    })?
+}
+
+/// Runs `work` on a thread named `name` with [`COMMAND_STACK`] and returns its result; a
+/// panic in `work` is resumed on the caller. The process's main thread and the Windows
+/// service's thread both run their command this way.
+///
+/// # Errors
+///
+/// Returns the error when the thread cannot be started.
+fn on_command_stack<T: Send + 'static>(
+    name: &str,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> std::io::Result<T> {
+    let thread =
+        std::thread::Builder::new().name(name.to_string()).stack_size(COMMAND_STACK).spawn(work)?;
+    Ok(thread.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic)))
+}
+
+async fn run() -> Result<()> {
+    let parsed = Cli::parse();
+    #[cfg(feature = "voice")]
+    let voice = parsed.voice.clone();
+    #[cfg(feature = "tui")]
+    let surface = parsed.surface.clone();
+    #[cfg(feature = "harness")]
+    let Cli { command, options, harness, .. } = parsed;
+    #[cfg(not(feature = "harness"))]
+    let Cli { command, options } = parsed;
+    // A subcommand takes its own --server, --home and --token: before it, the terminal's
+    // would reach no kernel, or the local one in place of the named one (spec 3.3 §5.2).
+    #[cfg(feature = "tui")]
+    if command.is_some() && surface.given() {
+        anyhow::bail!(
+            "--server, --home, --token, --pair, --ui, --output, --theme and --message before a \
+             subcommand are the terminal's; give them after the subcommand, as in `adk-rust \
+             freeze --server URL`"
+        );
+    }
+
+    match command {
+        #[cfg(feature = "harness")]
+        None => {
+            #[cfg(feature = "voice")]
+            let in_process = voice.voice.is_some();
+            #[cfg(not(feature = "voice"))]
+            let in_process = false;
+            // The terminal surface: full screen, inline or JSON, on the kernel or in process
+            // (spec 3.3 §5.2).
+            // `--ui repl` keeps the line-by-line console the full screen replaced (spec 3.3 §5.2).
+            #[cfg(feature = "tui")]
+            let repl = surface.ui == Some(cli::UiChoice::Repl);
+            #[cfg(feature = "tui")]
+            if repl && surface.output == adk_surface::tui::OutputFormat::Json {
+                anyhow::bail!("--ui repl has no JSON output; use --output json without --ui");
+            }
+            // `--voice` on a terminal opens the terminal's voice mode, in process (spec 3.3
+            // §5.6).
+            #[cfg(all(feature = "tui", feature = "voice"))]
+            if harness_cli::surface::voice_mode(&voice, &surface) {
+                let model = resolve_model(&options).await?;
+                let instruction = options.instruction.clone();
+                return exit_with(
+                    harness_cli::surface::voice(model, instruction, harness, surface).await?,
+                );
+            }
+            #[cfg(feature = "tui")]
+            if !in_process && !repl {
+                let reach = harness_cli::surface::reach(&surface, &harness).await?;
+                let model = match reach {
+                    harness_cli::surface::Reach::InProcess => Some(resolve_model(&options).await?),
+                    harness_cli::surface::Reach::Kernel { .. } => None,
+                };
+                let instruction = options.instruction.clone();
+                return exit_with(
+                    harness_cli::surface::run(reach, model, instruction, harness, surface).await?,
+                );
+            }
+            // A running kernel owns the sessions, so the REPL attaches to it; --ephemeral,
+            // --continue and --voice keep the in-process REPL (spec 3.2 §7.11).
+            if !in_process
+                && !harness.ephemeral
+                && !harness.continue_session
+                && let Some(client) = kernel_cli::local().await?
+            {
+                return kernel_cli::repl(client, harness.session.clone()).await;
+            }
+            let model = resolve_model(&options).await?;
+            #[cfg(feature = "voice")]
+            if voice.voice.is_some() {
+                return exit_with(
+                    harness_cli::voice(model, options.instruction.clone(), harness, voice).await?,
+                );
+            }
+            harness_cli::repl(model, options.instruction.clone(), harness).await
         }
-        Some(Commands::Serve { port }) => {
-            let agent = build_agent(
-                cli.provider,
-                cli.model,
-                cli.api_key,
-                cli.instruction,
-                cli.thinking_budget,
-            )?;
-            Launcher::new(Arc::new(agent))
-                .app_name("adk-rust")
-                .run_serve_directly(port)
-                .await
-                .map_err(Into::into)
-        }
-        Some(Commands::Code { task, dir, read_only }) => {
-            run_code(
-                cli.provider,
-                cli.model,
-                cli.api_key,
-                cli.thinking_budget,
-                dir,
-                read_only,
-                task,
+        #[cfg(not(feature = "harness"))]
+        None => run_chat(&options, ChatArgs::default()).await,
+        Some(Commands::Chat(args)) => run_chat(&options, args).await,
+        #[cfg(feature = "harness")]
+        Some(Commands::Serve {
+            port,
+            host,
+            agent: cli::ServeAgent::Harness,
+            auth_token,
+            store,
+            #[cfg(feature = "genui-apps")]
+            apps_origin,
+            harness,
+        }) => {
+            let model = resolve_model(&options).await?;
+            let auth_token = auth_token.or_else(|| std::env::var("ADK_SERVE_TOKEN").ok());
+            let instruction = options.instruction.clone();
+            #[cfg(not(feature = "genui-apps"))]
+            let apps_origin = None;
+            harness_cli::serve(
+                model,
+                instruction,
+                harness,
+                port,
+                host,
+                auth_token,
+                store,
+                apps_origin,
             )
             .await
         }
+        #[cfg(feature = "harness")]
+        Some(Commands::Serve { port, host, agent: cli::ServeAgent::Chat, .. }) => {
+            serve_chat(&options, port, host).await
+        }
+        #[cfg(not(feature = "harness"))]
+        Some(Commands::Serve { port, host }) => serve_chat(&options, port, host).await,
+        #[cfg(feature = "harness")]
+        Some(Commands::Code { task, harness, read_only }) => {
+            let model = resolve_model(&options).await?;
+            exit_with(
+                harness_cli::code(model, options.instruction.clone(), harness, read_only, task)
+                    .await?,
+            )
+        }
+        #[cfg(not(feature = "harness"))]
+        Some(Commands::Code { task, dir, read_only }) => {
+            let model = resolve_model(&options).await?;
+            legacy::run_code(model, options.instruction, dir, read_only, task).await
+        }
+        #[cfg(feature = "harness")]
+        Some(Commands::Goal { goal, until, harness, max_iters, check_timeout, state, resume }) => {
+            let model = resolve_model(&options).await?;
+            let check_timeout = std::time::Duration::from_secs(check_timeout);
+            let goal =
+                harness_cli::GoalArgs { goal, until, max_iters, check_timeout, state, resume };
+            exit_with(harness_cli::goal(model, options.instruction.clone(), harness, goal).await?)
+        }
+        #[cfg(not(feature = "harness"))]
         Some(Commands::Goal { goal, until, dir, max_iters, state, resume }) => {
-            run_goal(GoalArgs {
-                provider: cli.provider,
-                model: cli.model,
-                api_key: cli.api_key,
-                thinking_budget: cli.thinking_budget,
+            let model = resolve_model(&options).await?;
+            legacy::run_goal(legacy::GoalArgs {
+                model,
+                instruction: options.instruction,
                 dir,
                 goal,
                 until,
@@ -81,456 +230,578 @@ async fn main() -> Result<()> {
             })
             .await
         }
-        Some(Commands::Ultracode { task, dir, max_rounds }) => {
-            ultra::run(
-                cli.provider,
-                cli.model,
-                cli.api_key,
-                cli.thinking_budget,
-                dir,
+        #[cfg(feature = "harness")]
+        Some(Commands::Ultracode {
+            task,
+            harness,
+            max_rounds,
+            architecture,
+            router,
+            max_model_calls,
+            receipt,
+        }) => {
+            let model = resolve_model(&options).await?;
+            let ultra = harness_cli::UltracodeArgs {
                 task,
                 max_rounds,
-            )
-            .await
-        }
-        Some(Commands::Skills { command }) => skills::run(command),
-        Some(Commands::Deploy { command }) => deploy::run(command).await,
-        Some(Commands::Graph { command }) => graph::run(command).await,
-    }
-}
-
-/// Resolve the provider and its display model id from the CLI flags.
-///
-/// This is deliberately kept free of any credential handling: the returned
-/// `model_id` is derived only from `--provider` / `--model` (or the provider's
-/// default) and is therefore safe to echo to the console. Key material is
-/// resolved separately by [`build_model`], so no code path can conflate the
-/// two.
-fn resolve_model_id(
-    cli_provider: Option<ModelProvider>,
-    cli_model: Option<String>,
-) -> (ModelProvider, String) {
-    let provider = cli_provider.unwrap_or(ModelProvider::Gemini);
-    let model_id = cli_model.unwrap_or_else(|| provider.default_model().to_string());
-    (provider, model_id)
-}
-
-/// Build the model for an already-resolved provider and model id.
-///
-/// The API key comes from `--api-key` or the provider's conventional
-/// environment variable. Nothing derived from the key is returned.
-fn build_model(
-    provider: ModelProvider,
-    model_id: &str,
-    cli_api_key: Option<String>,
-    thinking_budget: Option<u32>,
-) -> Result<Arc<dyn Llm>> {
-    let api_key = cli_api_key.or_else(|| env_api_key(provider));
-    create_model(provider, model_id, api_key.as_deref(), thinking_budget)
-}
-
-/// Drive one agent turn on an existing runner/session, streaming the trace.
-async fn stream_turn(runner: &Runner, session_id: &str, prompt: &str) -> Result<()> {
-    let mut stream = runner
-        .run(
-            UserId::new("user")?,
-            SessionId::new(session_id)?,
-            Content::new("user").with_text(prompt),
-        )
-        .await?;
-    let mut pending = String::new();
-    while let Some(event) = stream.next().await {
-        let event = event?;
-        if let Some(content) = &event.llm_response.content {
-            for part in &content.parts {
-                match part {
-                    Part::FunctionCall { name, args, .. } => {
-                        flush_text(&mut pending);
-                        println!("  🔧 {name}({})", first_line(&args.to_string()));
-                    }
-                    Part::FunctionResponse { function_response, .. } => {
-                        flush_text(&mut pending);
-                        println!("  ↩  {}", first_line(&function_response.response.to_string()));
-                    }
-                    Part::Text { text } if !text.is_empty() => pending.push_str(text),
-                    _ => {}
-                }
-            }
-        }
-    }
-    flush_text(&mut pending);
-    Ok(())
-}
-
-/// Run a shell command in `dir`; returns (exit_code, combined stdout+stderr).
-/// Run the goal-mode success check.
-///
-/// Uses the same environment policy as the agent's `bash` tool, so a check cannot see
-/// credentials the agent itself is not allowed to see.
-fn run_check(dir: &str, command: &str) -> (Option<i32>, String) {
-    let mut cmd = std::process::Command::new("sh");
-    cmd.arg("-c").arg(command).current_dir(dir);
-
-    let workspace = adk_devtools::Workspace::new(dir);
-    if !workspace.inherits_env() {
-        cmd.env_clear();
-        for (key, value) in workspace.bash_env() {
-            cmd.env(key, value);
-        }
-    }
-
-    match cmd.output() {
-        Ok(o) => {
-            let mut out = String::from_utf8_lossy(&o.stdout).to_string();
-            out.push_str(&String::from_utf8_lossy(&o.stderr));
-            (o.status.code(), out)
-        }
-        Err(e) => (None, e.to_string()),
-    }
-}
-
-/// Arguments for [`run_goal`].
-struct GoalArgs {
-    provider: Option<ModelProvider>,
-    model: Option<String>,
-    api_key: Option<String>,
-    thinking_budget: Option<u32>,
-    dir: String,
-    goal: String,
-    until: String,
-    max_iters: u32,
-    state: Option<String>,
-    resume: bool,
-}
-
-/// Durable goal state, checkpointed to disk after every iteration so a run can
-/// resume across restarts (mirrors Codex/Hermes persistent `/goal`).
-#[derive(serde::Serialize, serde::Deserialize, Default)]
-struct GoalState {
-    goal: String,
-    until: String,
-    iteration: u32,
-    /// "running" | "done" | "exhausted".
-    status: String,
-    last_output: String,
-}
-
-/// Autonomous goal mode: loop plan → act → verify until `until` passes or budget.
-async fn run_goal(args: GoalArgs) -> Result<()> {
-    let GoalArgs {
-        provider,
-        model,
-        api_key,
-        thinking_budget,
-        dir,
-        goal,
-        until,
-        max_iters,
-        state,
-        resume,
-    } = args;
-
-    let (provider, model_id) = resolve_model_id(provider, model);
-    let model = build_model(provider, &model_id, api_key, thinking_budget)?;
-    let coding = CodingAgent::builder().model(model).workspace(Workspace::new(&dir)).build()?;
-
-    let state_path = state.unwrap_or_else(|| format!("{dir}/.adk/goal.json"));
-
-    // Resume: if a saved state exists and is still running, continue from it.
-    let mut gs = if resume {
-        match std::fs::read_to_string(&state_path)
-            .ok()
-            .and_then(|s| serde_json::from_str::<GoalState>(&s).ok())
-        {
-            Some(saved) if saved.status == "done" => {
-                println!("goal already complete (per {state_path}); nothing to do.");
-                return Ok(());
-            }
-            Some(saved) => {
-                println!("resuming goal from {state_path} (iteration {})", saved.iteration);
-                saved
-            }
-            None => {
-                println!("no resumable state at {state_path}; starting fresh.");
-                GoalState {
-                    goal: goal.clone(),
-                    until: until.clone(),
-                    status: "running".into(),
-                    ..Default::default()
-                }
-            }
-        }
-    } else {
-        GoalState {
-            goal: goal.clone(),
-            until: until.clone(),
-            status: "running".into(),
-            ..Default::default()
-        }
-    };
-
-    // One runner/session: the agent remembers prior attempts across iterations.
-    let sessions: Arc<dyn SessionService> = Arc::new(InMemorySessionService::new());
-    sessions
-        .create(CreateRequest {
-            app_name: "adk-rust".into(),
-            user_id: "user".into(),
-            session_id: Some("goal".into()),
-            state: Default::default(),
-        })
-        .await?;
-    let runner = Runner::builder()
-        .app_name("adk-rust")
-        .agent(coding.agent())
-        .session_service(sessions)
-        .build()?;
-
-    println!("goal mode ({model_id}) on {dir}");
-    println!("goal:  {goal}");
-    println!("until: {until}  (budget: {max_iters} iterations, state: {state_path})\n");
-
-    let start = gs.iteration + 1;
-    for iter in start..=max_iters {
-        println!("━━ iteration {iter}/{max_iters} ━━");
-        let prompt = if iter == 1 {
-            format!(
-                "Goal: {goal}\n\nWhen you believe the goal is met, the command `{until}` must \
-                 succeed (exit 0). Work toward that now."
-            )
-        } else {
-            format!(
-                "The success check `{until}` is not passing yet. Its latest output was:\n\
-                 ---\n{}\n---\nDiagnose and fix this, continuing toward the goal: {goal}",
-                gs.last_output
-            )
-        };
-        stream_turn(&runner, "goal", &prompt).await?;
-
-        let (code, output) = run_check(&dir, &until);
-        gs.iteration = iter;
-        gs.last_output = first_lines(&output, 40);
-        gs.status = if code == Some(0) { "done".into() } else { "running".into() };
-        save_goal_state(&state_path, &gs); // checkpoint after every iteration
-
-        if code == Some(0) {
-            println!(
-                "\n✅ goal met after {iter} iteration(s): `{until}` passed. (state: {state_path})"
-            );
-            return Ok(());
-        }
-        println!("  ✗ check `{until}` exited {code:?}; iterating.\n");
-    }
-    gs.status = "exhausted".into();
-    save_goal_state(&state_path, &gs);
-    println!("\n⚠️  budget exhausted; `{until}` still failing. Resume later with --resume.");
-    std::process::exit(1);
-}
-
-/// Atomically checkpoint goal state to disk (write temp + rename).
-fn save_goal_state(path: &str, state: &GoalState) {
-    let p = std::path::Path::new(path);
-    if let Some(parent) = p.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Ok(json) = serde_json::to_string_pretty(state) {
-        let tmp = format!("{path}.tmp");
-        if std::fs::write(&tmp, json).is_ok() {
-            let _ = std::fs::rename(&tmp, path);
-        }
-    }
-}
-
-/// First `n` lines of `s` (for compact failure feedback).
-fn first_lines(s: &str, n: usize) -> String {
-    s.lines().take(n).collect::<Vec<_>>().join("\n")
-}
-
-/// Run the coding agent on a single task in a workspace directory.
-#[allow(clippy::too_many_arguments)]
-async fn run_code(
-    cli_provider: Option<ModelProvider>,
-    cli_model: Option<String>,
-    cli_api_key: Option<String>,
-    thinking_budget: Option<u32>,
-    dir: String,
-    read_only: bool,
-    task: String,
-) -> Result<()> {
-    let (provider, model_id) = resolve_model_id(cli_provider, cli_model);
-    let model = build_model(provider, &model_id, cli_api_key, thinking_budget)?;
-    let workspace = if read_only { Workspace::read_only(&dir) } else { Workspace::new(&dir) };
-    let coding = CodingAgent::builder().model(model).workspace(workspace).build()?;
-
-    let sessions: Arc<dyn SessionService> = Arc::new(InMemorySessionService::new());
-    sessions
-        .create(CreateRequest {
-            app_name: "adk-rust".into(),
-            user_id: "user".into(),
-            session_id: Some("code".into()),
-            state: Default::default(),
-        })
-        .await?;
-    let runner = Runner::builder()
-        .app_name("adk-rust")
-        .agent(coding.agent())
-        .session_service(sessions)
-        .build()?;
-
-    println!("coding agent ({model_id}) on {dir}\ntask: {task}\n");
-    stream_turn(&runner, "code", &task).await?;
-
-    let todos = coding.todos();
-    if !todos.is_empty() {
-        println!("\nplan:");
-        for t in todos {
-            let mark = match t.status.as_str() {
-                "completed" => "✓",
-                "in_progress" => "▶",
-                _ => "·",
+                architecture,
+                router,
+                max_model_calls,
+                receipt,
             };
-            println!("  {mark} {}", t.content);
+            exit_with(
+                harness_cli::ultracode(model, options.instruction.clone(), harness, ultra).await?,
+            )
         }
+        #[cfg(not(feature = "harness"))]
+        Some(Commands::Ultracode { task, dir, max_rounds }) => {
+            let model = resolve_model(&options).await?;
+            let agents = Arc::new(ultra::legacy::CodingAgents {
+                model: model.llm,
+                root: std::path::PathBuf::from(&dir),
+                instruction: options.instruction,
+            });
+            ultra::run_with(agents, &model.id, &dir, task, max_rounds.unwrap_or(2)).await.map(drop)
+        }
+        #[cfg(feature = "harness")]
+        Some(Commands::Up(mut up)) => {
+            #[cfg(windows)]
+            if let Some(name) = up.windows_service.take() {
+                return harness_cli::run_windows_service(name, options, *up).await;
+            }
+            if up.uninstall {
+                return harness_cli::uninstall_service(&up);
+            }
+            if up.print {
+                return harness_cli::print_service(&up);
+            }
+            // First-run setup saves the provider key where the installed service reads it.
+            let model = resolve_model(&options).await?;
+            if up.install {
+                return harness_cli::install_service(&up).await;
+            }
+            up.auth_token = up.auth_token.or_else(|| std::env::var("ADK_SERVE_TOKEN").ok());
+            harness_cli::up(model, options.instruction.clone(), *up).await
+        }
+        #[cfg(feature = "harness")]
+        Some(Commands::Attach { session, kernel }) => kernel_cli::attach(&kernel, session).await,
+        #[cfg(feature = "harness")]
+        Some(Commands::Ps { partition, state, limit, kernel }) => {
+            kernel_cli::ps(&kernel, partition, state, limit).await
+        }
+        #[cfg(feature = "harness")]
+        Some(Commands::Top { partition, interval, kernel }) => {
+            kernel_cli::top(&kernel, partition, interval).await
+        }
+        #[cfg(feature = "harness")]
+        Some(Commands::Kill { pid, reason, kernel }) => {
+            kernel_cli::act(&kernel, &pid, kernel_cli::Action::Kill(reason)).await
+        }
+        #[cfg(feature = "harness")]
+        Some(Commands::Suspend { pid, kernel }) => {
+            kernel_cli::act(&kernel, &pid, kernel_cli::Action::Suspend).await
+        }
+        #[cfg(feature = "harness")]
+        Some(Commands::Resume { pid, kernel }) => {
+            kernel_cli::act(&kernel, &pid, kernel_cli::Action::Resume).await
+        }
+        #[cfg(feature = "harness")]
+        Some(Commands::Agents { output, yes, kernel, args }) => {
+            harness_cli::agents::command(&kernel, &args, output == "json", yes).await
+        }
+        #[cfg(feature = "harness")]
+        Some(Commands::Partitions { command, kernel }) => {
+            kernel_cli::partitions(command, kernel).await
+        }
+        #[cfg(feature = "harness")]
+        Some(Commands::Freeze { reason, kernel }) => {
+            kernel_cli::freeze(&kernel, reason.as_deref()).await
+        }
+        #[cfg(feature = "harness")]
+        Some(Commands::Unfreeze { kernel }) => kernel_cli::unfreeze(&kernel).await,
+        #[cfg(feature = "harness")]
+        Some(Commands::Events { follow, after, json, kernel }) => {
+            kernel_cli::events(&kernel, follow, after, json).await
+        }
+        #[cfg(feature = "harness")]
+        Some(Commands::Nice { pid, queue, kernel }) => kernel_cli::nice(&kernel, &pid, queue).await,
+        #[cfg(feature = "harness")]
+        Some(Commands::Agenda { command, kernel }) => match command {
+            None => kernel_cli::agenda_list(&kernel, None, None, None).await,
+            Some(cli::AgendaCommand::List { partition, state, limit }) => {
+                kernel_cli::agenda_list(&kernel, partition, state, limit).await
+            }
+            Some(cli::AgendaCommand::Approve { id }) => {
+                kernel_cli::agenda_act(&kernel, &id, kernel_cli::AgendaAction::Approve).await
+            }
+            Some(cli::AgendaCommand::Reject { id, reason }) => {
+                kernel_cli::agenda_act(&kernel, &id, kernel_cli::AgendaAction::Reject(reason)).await
+            }
+            Some(cli::AgendaCommand::Schedule { id, at, cron }) => {
+                let wake = kernel_cli::schedule_wake(at.as_deref(), cron.as_deref())?;
+                kernel_cli::agenda_act(&kernel, &id, kernel_cli::AgendaAction::Schedule(wake)).await
+            }
+        },
+        #[cfg(feature = "harness")]
+        Some(Commands::Wake { file, cron, webhook, session, task, kernel }) => {
+            let on = kernel_cli::wake_on(file.as_deref(), cron.as_deref(), webhook.as_deref())?;
+            kernel_cli::wake(&kernel, on, &task.join(" "), session).await
+        }
+        #[cfg(feature = "harness")]
+        Some(Commands::Drivers { command, kernel }) => kernel_cli::drivers(&kernel, command).await,
+        #[cfg(feature = "harness")]
+        Some(Commands::Pair { command, issue, kernel }) => {
+            pair_cli::run(&kernel, command, issue).await
+        }
+        #[cfg(feature = "harness")]
+        Some(Commands::Proc { view, partition, kind, agent, since, limit, export, kernel }) => {
+            let query = kernel_cli::ProcQuery { partition, kind, agent, since, limit, export };
+            kernel_cli::proc(&kernel, view, query).await
+        }
+        #[cfg(all(feature = "harness", feature = "persist"))]
+        Some(Commands::Sessions { command }) => manage::sessions(command).await,
+        #[cfg(all(feature = "harness", feature = "persist"))]
+        Some(Commands::Rules { command, store }) => manage::rules(command, store).await,
+        #[cfg(all(feature = "harness", feature = "persist"))]
+        Some(Commands::Memory { command }) => manage::memory(command).await,
+        #[cfg(all(feature = "harness", feature = "persist", feature = "encrypted"))]
+        Some(Commands::Store { command, store_key }) => store::run(command, store_key).await,
+        #[cfg(all(feature = "harness", feature = "persist"))]
+        Some(Commands::Approvals { command, server, token }) => {
+            let token = token.or_else(|| std::env::var("ADK_SERVE_TOKEN").ok());
+            manage::approvals(command, server, token).await
+        }
+        Some(Commands::Skills { command }) => skills::run(command).await,
+        Some(Commands::Deploy { command }) => deploy::run(command).await,
+        #[cfg(feature = "vertex-agent-registry")]
+        Some(Commands::Registry { command }) => registry::run(command).await,
+        Some(Commands::Graph { command }) => graph::run(command).await,
+        #[cfg(feature = "audit")]
+        Some(Commands::Audit { command }) => audit::run(command).await,
+        #[cfg(feature = "website")]
+        Some(Commands::Site { command, target }) => site_cli::run(command, target).await,
+        #[cfg(feature = "website")]
+        Some(Commands::Awp { command }) => awp_cli::run(command).await,
+        #[cfg(feature = "website")]
+        Some(Commands::Website { command }) => website_cli::run(command).await,
+    }
+}
+
+/// Exits with `code` when it is not success; harness commands report held calls with 3.
+#[cfg(feature = "harness")]
+fn exit_with(code: i32) -> Result<()> {
+    if code != 0 {
+        std::process::exit(code);
     }
     Ok(())
 }
 
-/// Read the API key for a provider from its conventional environment variable.
-fn env_api_key(provider: ModelProvider) -> Option<String> {
-    let try_vars: &[&str] = match provider {
-        ModelProvider::Gemini => &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
-        ModelProvider::Openai => &["OPENAI_API_KEY"],
-        ModelProvider::Anthropic => &["ANTHROPIC_API_KEY"],
-        ModelProvider::Deepseek => &["DEEPSEEK_API_KEY"],
-        ModelProvider::Groq => &["GROQ_API_KEY"],
-        ModelProvider::Ollama => &[],
-    };
-    try_vars.iter().find_map(|v| std::env::var(v).ok())
+/// `serve` with the plain chat agent.
+async fn serve_chat(options: &AgentOptions, port: u16, host: std::net::IpAddr) -> Result<()> {
+    let agent = build_agent(options).await?;
+    Launcher::new(Arc::new(agent))
+        .app_name("adk-rust")
+        .with_bind_address(host)
+        .run_serve_directly(port)
+        .await
+        .map_err(Into::into)
 }
 
-fn flush_text(pending: &mut String) {
-    let trimmed = pending.trim();
-    if !trimmed.is_empty() {
-        println!("  🤖 {trimmed}");
+/// A model client, and the same model as a `CacheCapable` when it caches its context
+/// explicitly (Gemini).
+#[derive(Clone)]
+pub(crate) struct BuiltModel {
+    pub(crate) llm: Arc<dyn Llm>,
+    #[cfg_attr(not(feature = "harness"), allow(dead_code))]
+    pub(crate) cache_capable: Option<Arc<dyn adk_core::CacheCapable>>,
+}
+
+/// The model an agent command runs on, resolved through [`setup::resolve`].
+#[derive(Clone)]
+pub(crate) struct ResolvedModel {
+    pub(crate) llm: Arc<dyn Llm>,
+    /// Display id, derived from the flags or saved config only, never from the key.
+    pub(crate) id: String,
+    provider: Option<Provider>,
+    /// The chat instruction: `--instruction`, or the default one.
+    instruction: String,
+    /// The provider key, for the long-term memory embedder (spec 3.1 §7.15.2).
+    #[cfg_attr(not(feature = "harness"), allow(dead_code))]
+    api_key: Option<String>,
+    /// The model as a `CacheCapable`, when it caches its context explicitly.
+    #[cfg_attr(not(feature = "harness"), allow(dead_code))]
+    cache_capable: Option<Arc<dyn adk_core::CacheCapable>>,
+}
+
+impl ResolvedModel {
+    /// The model's client; the harness sets each request's effort, so one client serves
+    /// every mode and role (spec 3.1 §7.23).
+    #[cfg(feature = "harness")]
+    pub(crate) fn built(&self) -> BuiltModel {
+        BuiltModel { llm: self.llm.clone(), cache_capable: self.cache_capable.clone() }
     }
-    pending.clear();
+
+    /// The provider, for the long-term memory embedder and the local posture.
+    #[cfg(feature = "harness")]
+    pub(crate) fn provider(&self) -> Option<Provider> {
+        self.provider
+    }
 }
 
-fn first_line(s: &str) -> String {
-    let line = s.lines().next().unwrap_or("").trim();
-    if line.len() > 160 { format!("{}…", &line[..160]) } else { line.to_string() }
-}
-
-fn build_agent(
-    cli_provider: Option<ModelProvider>,
-    cli_model: Option<String>,
-    cli_api_key: Option<String>,
-    cli_instruction: Option<String>,
-    thinking_budget: Option<u32>,
-) -> Result<adk_agent::LlmAgent> {
-    let resolved = setup::resolve(cli_provider, cli_model, cli_api_key, cli_instruction)?;
-    let model = create_model(
+/// Resolves the model from the flags, saved config, secure storage, or first-run setup
+/// (spec 3.1 §8.1).
+async fn resolve_model(options: &AgentOptions) -> Result<ResolvedModel> {
+    #[cfg(feature = "scripted-model")]
+    if let Some(script) = &options.model_script {
+        return Ok(ResolvedModel {
+            llm: scripted::model(script)?,
+            id: "scripted".to_string(),
+            provider: None,
+            instruction: options.instruction.clone().unwrap_or_else(setup::default_instruction),
+            api_key: None,
+            cache_capable: None,
+        });
+    }
+    let resolved = setup::resolve(
+        options.provider,
+        options.model.clone(),
+        options.api_key.clone(),
+        options.instruction.clone(),
+    )?;
+    let built = create_model(
         resolved.provider,
         &resolved.model,
         resolved.api_key.as_deref(),
-        thinking_budget,
-    )?;
+        options.thinking_budget,
+    )
+    .await?;
+    Ok(ResolvedModel {
+        llm: built.llm,
+        id: resolved.model,
+        provider: Some(resolved.provider),
+        instruction: resolved.instruction,
+        api_key: resolved.api_key,
+        cache_capable: built.cache_capable,
+    })
+}
+
+/// The interactive console, with its conversation kept per [`ChatArgs`].
+async fn run_chat(options: &AgentOptions, args: ChatArgs) -> Result<()> {
+    let agent = build_agent(options).await?;
+    let launcher = Launcher::new(Arc::new(agent))
+        .app_name("adk-rust")
+        .with_thinking_mode(map_thinking_mode(options.thinking_mode));
+    with_chat_sessions(launcher, args).await?.run_console_directly().await.map_err(Into::into)
+}
+
+/// Keeps the conversation in `harness.db` unless `--ephemeral` (spec 3.1 §8.1).
+#[cfg(feature = "persist")]
+async fn with_chat_sessions(launcher: Launcher, args: ChatArgs) -> Result<Launcher> {
+    if args.ephemeral {
+        return Ok(launcher);
+    }
+    let store = sessions::open().await?;
+    let user_id = sessions::os_user();
+    let session_id = match args.session {
+        Some(session_id) => Some(session_id),
+        None if args.continue_session => {
+            let latest = sessions::latest(store.as_ref(), &user_id).await?;
+            if latest.is_none() {
+                println!("No earlier session to continue; starting a new one.");
+            }
+            latest
+        }
+        None => None,
+    };
+    let launcher = launcher.with_session_service(store).with_user_id(user_id);
+    Ok(match session_id {
+        Some(session_id) => launcher.with_session_id(session_id),
+        None => launcher,
+    })
+}
+
+#[cfg(not(feature = "persist"))]
+async fn with_chat_sessions(launcher: Launcher, args: ChatArgs) -> Result<Launcher> {
+    if args.session.is_some() || args.continue_session {
+        anyhow::bail!(
+            "persistent sessions are not compiled into this adk-cli build. Reinstall with \
+             `--features persist`, or start without --session and --continue."
+        );
+    }
+    Ok(launcher)
+}
+
+async fn build_agent(options: &AgentOptions) -> Result<adk_agent::LlmAgent> {
+    let model = resolve_model(options).await?;
 
     let mut builder = LlmAgentBuilder::new("adk_agent")
         .description("Default ADK-Rust CLI agent")
-        .instruction(resolved.instruction)
-        .model(model);
+        .instruction(model.instruction)
+        .model(model.llm);
 
     // Google Search grounding only works with Gemini
-    if resolved.provider == ModelProvider::Gemini {
+    if model.provider == Some(Provider::Model(ModelProvider::Gemini)) {
         builder = builder.tool(Arc::new(GoogleSearchTool::new()));
+    }
+
+    #[cfg(feature = "scripted-model")]
+    if options.approval_fixture {
+        builder = builder
+            .tool(Arc::new(scripted::RecordNote))
+            .require_tool_confirmation(scripted::RecordNote::NAME);
     }
 
     builder.build().map_err(Into::into)
 }
 
-fn create_model(
-    provider: ModelProvider,
+/// Builds the client of `provider` for `model`. The harness sets each request's effort
+/// (spec 3.1 §7.23), which the client maps to its own control.
+async fn create_model(
+    provider: Provider,
     model: &str,
     api_key: Option<&str>,
     thinking_budget: Option<u32>,
-) -> Result<Arc<dyn Llm>> {
+) -> Result<BuiltModel> {
+    let plain = |llm: Arc<dyn Llm>| BuiltModel { llm, cache_capable: None };
+    // `--no-default-features` compiles every provider out, and then each arm refuses; with
+    // only the key-less Ollama and mistral.rs compiled, no arm reads the key.
+    #[cfg(not(any(
+        feature = "gemini",
+        feature = "openai",
+        feature = "anthropic",
+        feature = "deepseek",
+        feature = "groq",
+        feature = "muse",
+        feature = "openrouter",
+        feature = "opencode",
+        feature = "bedrock",
+        feature = "azure-ai"
+    )))]
+    let _ = api_key;
+    #[cfg(not(any(
+        feature = "gemini",
+        feature = "openai",
+        feature = "anthropic",
+        feature = "deepseek",
+        feature = "groq",
+        feature = "ollama",
+        feature = "muse",
+        feature = "openrouter",
+        feature = "opencode",
+        feature = "bedrock",
+        feature = "azure-ai",
+        feature = "mistralrs"
+    )))]
+    let _ = (model, thinking_budget, plain);
     match provider {
         #[cfg(feature = "gemini")]
-        ModelProvider::Gemini => {
+        Provider::Model(ModelProvider::Gemini) => {
             reject_unsupported_thinking_budget(provider, thinking_budget)?;
             let key = api_key.ok_or_else(|| anyhow::anyhow!("Gemini requires an API key"))?;
-            let m = adk_model::GeminiModel::new(key, model)?;
-            Ok(Arc::new(m))
+            let m = Arc::new(adk_model::GeminiModel::new(key, model)?);
+            Ok(BuiltModel { cache_capable: Some(m.clone()), ..plain(m) })
         }
         #[cfg(not(feature = "gemini"))]
-        ModelProvider::Gemini => provider_feature_disabled(provider, "gemini"),
+        Provider::Model(ModelProvider::Gemini) => Err(setup::not_compiled(provider)),
         #[cfg(feature = "openai")]
-        ModelProvider::Openai => {
+        Provider::Model(ModelProvider::Openai) => {
             reject_unsupported_thinking_budget(provider, thinking_budget)?;
             let key = api_key.ok_or_else(|| anyhow::anyhow!("OpenAI requires an API key"))?;
+            // The Responses API serves OpenAI's provider search and the Responses-only
+            // features (spec 3.1 §7.20); older models stay on Chat Completions.
+            if openai_responses_model(model) {
+                let config = adk_model::openai::OpenAIResponsesConfig::new(key, model);
+                // Chat Completions does not store responses by default; keep that.
+                let store_off: adk_model::openai::RequestAdapter = Arc::new(|body, _headers| {
+                    if let Some(body) = body.as_object_mut() {
+                        body.entry("store").or_insert(serde_json::Value::Bool(false));
+                    }
+                    Ok(())
+                });
+                let client = adk_model::openai::OpenAIResponsesClient::new(config)?
+                    .with_request_adapter(store_off);
+                return Ok(plain(Arc::new(client)));
+            }
             let config = adk_model::OpenAIConfig::new(key, model);
-            let m = adk_model::OpenAIClient::new(config)?;
-            Ok(Arc::new(m))
+            Ok(plain(Arc::new(adk_model::OpenAIClient::new(config)?)))
         }
         #[cfg(not(feature = "openai"))]
-        ModelProvider::Openai => provider_feature_disabled(provider, "openai"),
+        Provider::Model(ModelProvider::Openai) => Err(setup::not_compiled(provider)),
         #[cfg(feature = "anthropic")]
-        ModelProvider::Anthropic => {
+        Provider::Model(ModelProvider::Anthropic) => {
             let key = api_key.ok_or_else(|| anyhow::anyhow!("Anthropic requires an API key"))?;
             let mut config = adk_model::anthropic::AnthropicConfig::new(key, model);
-            if let Some(budget) = thinking_budget {
-                if budget == 0 {
+            match thinking_budget {
+                Some(0) => {
                     return Err(anyhow::anyhow!("--thinking-budget must be greater than 0"));
                 }
-                config = config.with_thinking(budget);
+                Some(budget) => config = config.with_thinking(budget),
+                None => {}
             }
-            let m = adk_model::AnthropicClient::new(config)?;
-            Ok(Arc::new(m))
+            Ok(plain(Arc::new(adk_model::AnthropicClient::new(config)?)))
         }
         #[cfg(not(feature = "anthropic"))]
-        ModelProvider::Anthropic => provider_feature_disabled(provider, "anthropic"),
+        Provider::Model(ModelProvider::Anthropic) => Err(setup::not_compiled(provider)),
         #[cfg(feature = "deepseek")]
-        ModelProvider::Deepseek => {
+        Provider::Model(ModelProvider::Deepseek) => {
             reject_unsupported_thinking_budget(provider, thinking_budget)?;
             let key = api_key.ok_or_else(|| anyhow::anyhow!("DeepSeek requires an API key"))?;
             let config = adk_model::DeepSeekConfig::new(key, model);
-            let m = adk_model::DeepSeekClient::new(config)?;
-            Ok(Arc::new(m))
+            Ok(plain(Arc::new(adk_model::DeepSeekClient::new(config)?)))
         }
         #[cfg(not(feature = "deepseek"))]
-        ModelProvider::Deepseek => provider_feature_disabled(provider, "deepseek"),
+        Provider::Model(ModelProvider::Deepseek) => Err(setup::not_compiled(provider)),
         #[cfg(feature = "groq")]
-        ModelProvider::Groq => {
+        Provider::Model(ModelProvider::Groq) => {
             reject_unsupported_thinking_budget(provider, thinking_budget)?;
             let key = api_key.ok_or_else(|| anyhow::anyhow!("Groq requires an API key"))?;
             let config = adk_model::GroqConfig::new(key, model);
-            let m = adk_model::GroqClient::new(config)?;
-            Ok(Arc::new(m))
+            Ok(plain(Arc::new(adk_model::GroqClient::new(config)?)))
         }
         #[cfg(not(feature = "groq"))]
-        ModelProvider::Groq => provider_feature_disabled(provider, "groq"),
+        Provider::Model(ModelProvider::Groq) => Err(setup::not_compiled(provider)),
         #[cfg(feature = "ollama")]
-        ModelProvider::Ollama => {
+        Provider::Model(ModelProvider::Ollama) => {
             reject_unsupported_thinking_budget(provider, thinking_budget)?;
             let config = adk_model::OllamaConfig::new(model);
-            let m = adk_model::OllamaModel::new(config)?;
-            Ok(Arc::new(m))
+            Ok(plain(Arc::new(adk_model::OllamaModel::new(config)?)))
         }
         #[cfg(not(feature = "ollama"))]
-        ModelProvider::Ollama => provider_feature_disabled(provider, "ollama"),
+        Provider::Model(ModelProvider::Ollama) => Err(setup::not_compiled(provider)),
+        #[cfg(feature = "muse")]
+        Provider::Model(ModelProvider::Muse) => {
+            reject_unsupported_thinking_budget(provider, thinking_budget)?;
+            let key = api_key.ok_or_else(|| anyhow::anyhow!("Meta Muse requires an API key"))?;
+            let config = adk_model::MuseConfig::new(key, model);
+            Ok(plain(Arc::new(adk_model::MuseClient::new(config)?)))
+        }
+        #[cfg(not(feature = "muse"))]
+        Provider::Model(ModelProvider::Muse) => Err(setup::not_compiled(provider)),
+        #[cfg(feature = "openrouter")]
+        Provider::Model(ModelProvider::Openrouter) => {
+            reject_unsupported_thinking_budget(provider, thinking_budget)?;
+            let key = api_key.ok_or_else(|| anyhow::anyhow!("OpenRouter requires an API key"))?;
+            let config = adk_model::OpenRouterConfig::new(key, model);
+            Ok(plain(Arc::new(adk_model::OpenRouterClient::new(config)?)))
+        }
+        #[cfg(not(feature = "openrouter"))]
+        Provider::Model(ModelProvider::Openrouter) => Err(setup::not_compiled(provider)),
+        #[cfg(feature = "opencode")]
+        Provider::Model(variant @ (ModelProvider::Opencode | ModelProvider::OpencodeGo)) => {
+            use adk_model::OpenCodeService;
+            reject_unsupported_thinking_budget(provider, thinking_budget)?;
+            let key = api_key.ok_or_else(|| anyhow::anyhow!("OpenCode requires an API key"))?;
+            let (service, table) = if variant == ModelProvider::OpencodeGo {
+                (OpenCodeService::Go, "https://opencode.ai/docs/go/#endpoints")
+            } else {
+                (OpenCodeService::Zen, "https://opencode.ai/docs/zen/#endpoints")
+            };
+            if service.api(model).is_none() {
+                anyhow::bail!(
+                    "{} does not route model '{model}': pass --model with a model from its \
+                     endpoint table, {table}",
+                    variant.display_name()
+                );
+            }
+            // OpenCode asks for one session id per conversation; the CLI builds one client per
+            // process, so the id names the process.
+            let started = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_millis());
+            let config = adk_model::OpenCodeConfig::new(service, key, model)
+                .with_user_agent(concat!("adk-rust/", env!("CARGO_PKG_VERSION")))
+                .with_session_id(format!("adk-rust-{}-{started}", std::process::id()));
+            Ok(plain(Arc::new(adk_model::OpenCodeClient::new(config)?)))
+        }
+        #[cfg(not(feature = "opencode"))]
+        Provider::Model(ModelProvider::Opencode | ModelProvider::OpencodeGo) => {
+            Err(setup::not_compiled(provider))
+        }
+        #[cfg(feature = "bedrock")]
+        Provider::Model(ModelProvider::Bedrock) => {
+            reject_unsupported_thinking_budget(provider, thinking_budget)?;
+            let region = ["AWS_REGION", "AWS_DEFAULT_REGION"]
+                .iter()
+                .find_map(|name| std::env::var(name).ok().filter(|value| !value.trim().is_empty()))
+                .unwrap_or_else(|| "us-east-1".to_string());
+            let config = adk_model::BedrockConfig::new(region, model);
+            let client = match api_key {
+                Some(key) => adk_model::BedrockClient::new_with_api_key(config, key)?,
+                None => adk_model::BedrockClient::new(config).await?,
+            };
+            Ok(plain(Arc::new(client)))
+        }
+        #[cfg(not(feature = "bedrock"))]
+        Provider::Model(ModelProvider::Bedrock) => Err(setup::not_compiled(provider)),
+        #[cfg(feature = "azure-ai")]
+        Provider::Model(ModelProvider::AzureAi) => {
+            reject_unsupported_thinking_budget(provider, thinking_budget)?;
+            let key =
+                api_key.ok_or_else(|| anyhow::anyhow!("Azure AI Inference requires an API key"))?;
+            let endpoint = std::env::var("AZURE_AI_ENDPOINT")
+                .ok()
+                .filter(|endpoint| !endpoint.trim().is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Azure AI Inference needs its endpoint: set AZURE_AI_ENDPOINT to the \
+                         endpoint URL of the deployment"
+                    )
+                })?;
+            let config = adk_model::AzureAIConfig::new(endpoint, key, model);
+            Ok(plain(Arc::new(adk_model::AzureAIClient::new(config)?)))
+        }
+        #[cfg(not(feature = "azure-ai"))]
+        Provider::Model(ModelProvider::AzureAi) => Err(setup::not_compiled(provider)),
+        // mistral.rs in process (spec 3.1 §8.1): a Hugging Face id, or a `.gguf` path.
+        #[cfg(feature = "mistralrs")]
+        Provider::MistralRs => {
+            reject_unsupported_thinking_budget(provider, thinking_budget)?;
+            let m = if model.ends_with(".gguf") {
+                adk_mistralrs::MistralRsModel::from_gguf(model).await?
+            } else {
+                adk_mistralrs::MistralRsModel::from_hf(model).await?
+            };
+            Ok(plain(Arc::new(m)))
+        }
+        #[cfg(not(feature = "mistralrs"))]
+        Provider::MistralRs => Err(setup::not_compiled(provider)),
     }
 }
 
-fn provider_feature_disabled(provider: ModelProvider, feature: &str) -> Result<Arc<dyn Llm>> {
-    Err(anyhow::anyhow!(
-        "{} support is not compiled into this adk-cli build. Reinstall with `--features {}` or `--features all-providers`.",
-        provider.display_name(),
-        feature
-    ))
+/// Whether the CLI runs `model` on the OpenAI Responses API: GPT-5.6 and every later GPT
+/// generation, the models whose tool calls `OpenAIClient` already sends there because Chat
+/// Completions rejects them with reasoning on.
+#[cfg(feature = "openai")]
+fn openai_responses_model(model: &str) -> bool {
+    let model = model.strip_prefix("ft:").unwrap_or(model);
+    let Some(version) = model.strip_prefix("gpt-") else {
+        return false;
+    };
+    let end = version.find(|c: char| !c.is_ascii_digit() && c != '.').unwrap_or(version.len());
+    let mut numbers = version[..end].split('.').map(str::parse::<u32>);
+    match (numbers.next(), numbers.next()) {
+        (Some(Ok(major)), Some(Ok(minor))) => (major, minor) >= (5, 6),
+        (Some(Ok(major)), None) => major >= 6,
+        _ => false,
+    }
 }
 
+/// Refuses a thinking budget for a provider without one: every provider but Anthropic.
+#[cfg(any(
+    feature = "gemini",
+    feature = "openai",
+    feature = "deepseek",
+    feature = "groq",
+    feature = "ollama",
+    feature = "muse",
+    feature = "openrouter",
+    feature = "opencode",
+    feature = "bedrock",
+    feature = "azure-ai",
+    feature = "mistralrs"
+))]
 fn reject_unsupported_thinking_budget(
-    provider: ModelProvider,
+    provider: Provider,
     thinking_budget: Option<u32>,
 ) -> Result<()> {
     if thinking_budget.is_some() {
@@ -545,5 +816,29 @@ fn map_thinking_mode(mode: ThinkingMode) -> ThinkingDisplayMode {
         ThinkingMode::Auto => ThinkingDisplayMode::Auto,
         ThinkingMode::Show => ThinkingDisplayMode::Show,
         ThinkingMode::Hide => ThinkingDisplayMode::Hide,
+    }
+}
+
+#[cfg(all(test, feature = "openai"))]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn openai_models_on_the_responses_api_serve_the_provider_search() {
+        let openai = Provider::Model(ModelProvider::Openai);
+        for model in ["gpt-5.6-terra", "gpt-5.6-luna", "gpt-6-astra", "ft:gpt-5.6-terra:acme::x1"] {
+            let built = create_model(openai, model, Some("sk-test"), None).await.unwrap();
+            let search = built.llm.native_web_search().expect(model);
+            assert_eq!(
+                (search.provider, search.tool),
+                ("openai", adk_core::NativeWebSearchTool::OpenAiWebSearch),
+                "{model}"
+            );
+        }
+        // Older models stay on Chat Completions, which serves no provider search.
+        for model in ["gpt-5.5", "gpt-5", "gpt-4.1", "o4-mini"] {
+            let built = create_model(openai, model, Some("sk-test"), None).await.unwrap();
+            assert!(built.llm.native_web_search().is_none(), "{model}");
+        }
     }
 }

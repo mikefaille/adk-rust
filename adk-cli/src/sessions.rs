@@ -1,0 +1,610 @@
+//! Persistent sessions and the harness stores in `<config dir>/adk-rust/harness.db`
+//! (spec 3.1 §8.1).
+
+use std::path::Path;
+use std::sync::Arc;
+
+use adk_session::{ListRequest, SessionService, SqliteSessionService};
+use anyhow::{Context, Result};
+
+/// The application name `chat` sessions are kept under.
+pub const APP_NAME: &str = "adk-rust";
+
+/// The directory `harness.db` lives in by default: `<config dir>/adk-rust`, which is also
+/// the default kernel home (spec 3.2 §7.2).
+pub fn default_dir() -> Result<std::path::PathBuf> {
+    Ok(dirs::config_dir()
+        .context("could not determine the config directory; pass --ephemeral")?
+        .join("adk-rust"))
+}
+
+/// Opens (and migrates) the session store, creating the file readable by its owner only.
+pub async fn open() -> Result<Arc<SqliteSessionService>> {
+    open_in(&default_dir()?).await
+}
+
+/// [`open`], with `harness.db` in `dir` (`adk-rust up --home`; spec 3.2 §7.2).
+///
+/// The database runs in write-ahead-log mode, so readers never block the writer and a
+/// commit appends to `harness.db-wal` rather than rewriting a rollback journal. Several
+/// processes share the file (`adk-rust up`, `chat`, `serve`), and on Windows a
+/// rollback-journal commit costs about four times a WAL one: under the kernel's write load
+/// writers waited past the 30-second busy timeout.
+pub async fn open_in(dir: &Path) -> Result<Arc<SqliteSessionService>> {
+    let path = dir.join("harness.db");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+        // SQLite creates `harness.db-wal` and `-shm` itself, so on Windows they take the
+        // directory's DACL: owner-only, as `harness.db` is (spec 3.2 §10 W4).
+        #[cfg(windows)]
+        crate::owner_only::protect_dir(parent).with_context(|| {
+            format!("failed to make {} readable by its owner only", parent.display())
+        })?;
+    }
+    create_private(&path)?;
+    let service = SqliteSessionService::new(&sqlite_url(&path)).await.with_context(|| {
+        format!(
+            "failed to open the session store {}; pass --ephemeral to keep the conversation in memory",
+            path.display()
+        )
+    })?;
+    // Persistent in the file. The switch needs the file to itself, so while an older
+    // process still has it open in rollback mode, this one keeps that mode.
+    match sqlx::query_scalar::<_, String>("PRAGMA journal_mode = WAL")
+        .fetch_one(service.pool())
+        .await
+    {
+        Ok(mode) if mode.eq_ignore_ascii_case("wal") => {}
+        Ok(mode) => tracing::warn!(journal.mode = %mode, "harness.db stays out of WAL mode"),
+        Err(error) => tracing::warn!(error = %error, "harness.db keeps its journal mode for now"),
+    }
+    service.migrate().await?;
+    Ok(Arc::new(service))
+}
+
+/// Creates `path` with owner-only permissions when it does not exist yet; conversations
+/// can hold anything the person typed.
+fn create_private(path: &Path) -> Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    #[cfg(not(windows))]
+    let created = options.open(path);
+    // A DACL granting the owner alone access stands in for mode 0600 (spec 3.2 §10 W4).
+    #[cfg(windows)]
+    let created = crate::owner_only::create_new(path);
+    match created {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("failed to create {}", path.display())),
+    }
+}
+
+/// A `sqlite://` URL for `path`. The driver percent-decodes the path and splits off
+/// parameters at `?`, so only `%`, `?` and `#` need escaping.
+fn sqlite_url(path: &Path) -> String {
+    let mut url = String::from("sqlite://");
+    for c in path.to_string_lossy().chars() {
+        match c {
+            '%' => url.push_str("%25"),
+            '?' => url.push_str("%3F"),
+            '#' => url.push_str("%23"),
+            c => url.push(c),
+        }
+    }
+    url.push_str("?mode=rwc");
+    url
+}
+
+pub use crate::setup::os_user;
+
+/// Every harness store in `harness.db`, sharing one connection pool; each store keeps its
+/// own migration table (spec 3.1 §8.1).
+#[cfg(feature = "harness")]
+pub struct HarnessDb {
+    /// The one pool every store writes through; the kernel's stores join it with their own
+    /// migration tables (spec 3.2 §7.1).
+    pub pool: sqlx::SqlitePool,
+    /// Sessions; `EncryptedSession` over SQLite under a store key (spec 3.1 §7.12).
+    pub sessions: Arc<dyn SessionService>,
+    pub modes: Arc<adk_harness::SqliteModeStore>,
+    pub rules: Arc<adk_harness::SqliteStandingRuleStore>,
+    pub ledger: Arc<adk_harness::SqliteShellLedger>,
+    /// Background shells' processes, so the next start reaps what a crash left running
+    /// (spec 3.1 §7.29).
+    pub shell_pids: Arc<adk_harness::SqliteShellPidRegistry>,
+    /// Held calls and decisions; `EncryptedApprovalStore` under a store key.
+    pub approvals: Arc<dyn adk_core::ApprovalStore>,
+    pub runs: Arc<adk_session::SqliteRunStore>,
+    /// Long-term facts (spec 3.1 §7.15.2).
+    pub facts: Arc<adk_harness::SqliteFactStore>,
+    /// Goals (spec 3.1 §7.11).
+    pub goals: Arc<adk_harness::SqliteGoalStore>,
+    /// The file tools' read records, so a held edit approved in a later process finds the
+    /// read that preceded it (spec 3.1 §7.26, §7.33 fix 5).
+    pub reads: Arc<adk_harness::SqliteReadRecords>,
+    /// The id of the key the stores are sealed under, if any.
+    pub key_id: Option<String>,
+    /// Plan and goal checkpoints, sealed under the store key when one is configured
+    /// (spec 3.1 §7.11, §7.12, §13 Q5).
+    pub plans: Arc<dyn adk_graph::Checkpointer>,
+    /// The keyring the stores are sealed under, if any.
+    #[cfg(feature = "encrypted")]
+    pub keyring: Option<adk_harness::encrypted::StoreKeyring>,
+    /// Snapshot records (spec 3.1 §7.27), sealed under the store key when one is
+    /// configured; their objects live under [`snapshots_dir`](Self::snapshots_dir).
+    pub snapshots: Arc<adk_harness::snapshot::SqliteSnapshotStore>,
+    /// The directory `harness.db` is in: the config dir, or the kernel home.
+    pub dir: std::path::PathBuf,
+    /// The action ledger, so a call with side effects that began before a restart is
+    /// answered from its record rather than run again (spec 3.1 §7.12; spec 3.3 §12 phase 1).
+    pub actions: Arc<dyn adk_core::ActionLedger>,
+    /// The spend ledger model calls reserve against, kept across restarts (spec 3.1 §7.13).
+    pub spend: Arc<dyn adk_core::SpendLedger>,
+}
+
+/// The action ledger of a `harness.db` sealed under a store key: a failed call's error text
+/// is a payload, so it is not kept at rest (spec 3.1 §7.12, I57). A refused call's
+/// `not run` text stays, as the agent reads it back to tell a call that never ran.
+#[cfg(all(feature = "harness", feature = "encrypted"))]
+#[derive(Debug)]
+struct SealedActions(adk_session::SqliteActionLedger);
+
+#[cfg(all(feature = "harness", feature = "encrypted"))]
+#[async_trait::async_trait]
+impl adk_core::ActionLedger for SealedActions {
+    async fn begin(&self, record: &adk_core::ActionRecord) -> adk_core::Result<()> {
+        self.0.begin(record).await
+    }
+
+    async fn complete(&self, key: &str, outcome: adk_core::ActionOutcome) -> adk_core::Result<()> {
+        let outcome = match outcome {
+            adk_core::ActionOutcome::Failed { error }
+                if !adk_core::action_ledger::is_not_run(&error) =>
+            {
+                adk_core::ActionOutcome::Failed {
+                    error: "the tool returned an error; a sealed harness.db keeps no error text"
+                        .to_string(),
+                }
+            }
+            outcome => outcome,
+        };
+        self.0.complete(key, outcome).await
+    }
+
+    async fn get(&self, key: &str) -> adk_core::Result<Option<adk_core::ActionRecord>> {
+        self.0.get(key).await
+    }
+}
+
+#[cfg(feature = "harness")]
+impl HarnessDb {
+    /// Where snapshot objects live: `snapshots/` beside `harness.db`, one directory per
+    /// workspace (spec 3.1 §7.27, I68).
+    pub fn snapshots_dir(&self) -> std::path::PathBuf {
+        self.dir.join("snapshots")
+    }
+
+    /// The snapshot objects of the workspace at `root` (canonical), sealed like the
+    /// database.
+    pub fn snapshot_objects(&self, root: &Path) -> adk_harness::snapshot::FileSnapshotObjects {
+        let objects =
+            adk_harness::snapshot::FileSnapshotObjects::for_workspace(&self.snapshots_dir(), root);
+        #[cfg(feature = "encrypted")]
+        let objects = match &self.keyring {
+            Some(keyring) => objects.with_keyring(keyring.clone()),
+            None => objects,
+        };
+        objects
+    }
+}
+
+/// Opens `harness.db` with the keyring the user config names, if any (spec 3.1 §7.12).
+#[cfg(all(feature = "harness", feature = "encrypted"))]
+pub async fn open_default_db() -> Result<HarnessDb> {
+    let (keyring, _) = crate::store::resolve_keyring(None).await?;
+    open_harness_db(keyring.as_ref()).await
+}
+
+/// Opens `harness.db` as it is.
+#[cfg(all(feature = "harness", not(feature = "encrypted")))]
+pub async fn open_default_db() -> Result<HarnessDb> {
+    open_harness_db().await
+}
+
+/// Opens `harness.db` and migrates every store in it, sealed under `keyring` when one is
+/// given (spec 3.1 §7.12, I57): a database sealed under a key refuses to open without it or
+/// with another, and one holding plaintext rows refuses a key until `adk-rust store
+/// rotate-key` seals them.
+#[cfg(all(feature = "harness", feature = "encrypted"))]
+pub async fn open_harness_db(
+    keyring: Option<&adk_harness::encrypted::StoreKeyring>,
+) -> Result<HarnessDb> {
+    open_harness_db_in(&default_dir()?, keyring).await
+}
+
+/// [`open_harness_db`] in `dir` (`adk-rust up --home`; spec 3.2 §7.2).
+#[cfg(all(feature = "harness", feature = "encrypted"))]
+pub async fn open_harness_db_in(
+    dir: &Path,
+    keyring: Option<&adk_harness::encrypted::StoreKeyring>,
+) -> Result<HarnessDb> {
+    let base = open_in(dir).await?;
+    let pool = base.pool().clone();
+    let marker = adk_harness::encrypted::SqliteStoreMarker::new(pool.clone());
+    marker.migrate().await?;
+    marker.check(keyring).await?;
+    let modes = adk_harness::SqliteModeStore::new(pool.clone());
+    modes.migrate().await?;
+    let rules = adk_harness::SqliteStandingRuleStore::new(pool.clone());
+    rules.migrate().await?;
+    let ledger = adk_harness::SqliteShellLedger::new(pool.clone());
+    ledger.migrate().await?;
+    let shell_pids = adk_harness::SqliteShellPidRegistry::new(pool.clone());
+    shell_pids.migrate().await?;
+    let approvals = adk_session::SqliteApprovalStore::from_pool(pool.clone());
+    approvals.migrate().await?;
+    let runs = adk_session::SqliteRunStore::from_pool(pool.clone());
+    runs.migrate().await?;
+    let facts = adk_harness::SqliteFactStore::new(pool.clone());
+    facts.migrate().await?;
+    let goals = adk_harness::SqliteGoalStore::new(pool.clone());
+    goals.migrate().await?;
+    let reads = adk_harness::SqliteReadRecords::new(pool.clone());
+    reads.migrate().await?;
+    let plans: Arc<dyn adk_graph::Checkpointer> =
+        Arc::new(adk_graph::SqliteCheckpointer::from_pool(pool.clone()).await?);
+    let snapshots = adk_harness::snapshot::SqliteSnapshotStore::new(pool.clone());
+    snapshots.migrate().await?;
+    let actions = adk_session::SqliteActionLedger::from_pool(pool.clone());
+    actions.migrate().await?;
+    let spend = adk_session::SqliteSpendLedger::from_pool(pool.clone());
+    spend.migrate().await?;
+    let Some(keyring) = keyring else {
+        return Ok(HarnessDb {
+            pool,
+            sessions: base,
+            modes: Arc::new(modes),
+            rules: Arc::new(rules),
+            ledger: Arc::new(ledger),
+            shell_pids: Arc::new(shell_pids),
+            approvals: Arc::new(approvals),
+            runs: Arc::new(runs),
+            facts: Arc::new(facts),
+            goals: Arc::new(goals),
+            reads: Arc::new(reads),
+            key_id: None,
+            plans,
+            keyring: None,
+            snapshots: Arc::new(snapshots),
+            dir: dir.to_path_buf(),
+            actions: Arc::new(actions),
+            spend: Arc::new(spend),
+        });
+    };
+    if marker.key_id().await?.is_none() {
+        let (rows,): (i64,) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM sessions) + (SELECT count(*) FROM adk_harness_rules) \
+             + (SELECT count(*) FROM adk_harness_facts) + (SELECT count(*) FROM adk_approval_pending) \
+             + (SELECT count(*) FROM graph_checkpoints) \
+             + (SELECT count(*) FROM adk_harness_snapshots)",
+        )
+        .fetch_one(&pool)
+        .await?;
+        if rows > 0 {
+            anyhow::bail!(
+                "harness.db holds {rows} rows written before a store key was configured; run \
+                 `adk-rust store rotate-key` to seal them under the key, or drop --store-key"
+            );
+        }
+        marker.set_key_id(&keyring.key_id()).await?;
+    }
+    let sessions = adk_session::EncryptedSession::new(
+        SqliteSessionService::from_pool(pool.clone()),
+        keyring.current_key(),
+        keyring.previous_keys(),
+    );
+    let approvals = adk_session::EncryptedApprovalStore::new(
+        approvals,
+        keyring.current_key(),
+        keyring.previous_keys(),
+    );
+    Ok(HarnessDb {
+        pool,
+        sessions: Arc::new(sessions),
+        modes: Arc::new(modes.with_keyring(keyring.clone())),
+        rules: Arc::new(rules.with_keyring(keyring.clone())),
+        ledger: Arc::new(ledger.with_keyring(keyring.clone())),
+        shell_pids: Arc::new(shell_pids),
+        approvals: Arc::new(approvals),
+        runs: Arc::new(runs),
+        facts: Arc::new(facts.with_keyring(keyring.clone())),
+        goals: Arc::new(goals.with_keyring(keyring.clone())),
+        reads: Arc::new(reads.with_keyring(keyring.clone())),
+        key_id: Some(keyring.key_id()),
+        plans: Arc::new(adk_harness::SealedCheckpointer::new(plans, keyring.clone())),
+        keyring: Some(keyring.clone()),
+        snapshots: Arc::new(snapshots.with_keyring(keyring.clone())),
+        dir: dir.to_path_buf(),
+        actions: Arc::new(SealedActions(actions)),
+        spend: Arc::new(spend),
+    })
+}
+
+/// Opens `harness.db` and migrates every store in it.
+#[cfg(all(feature = "harness", not(feature = "encrypted")))]
+pub async fn open_harness_db() -> Result<HarnessDb> {
+    open_harness_db_in(&default_dir()?).await
+}
+
+/// [`open_harness_db`] in `dir` (`adk-rust up --home`; spec 3.2 §7.2).
+#[cfg(all(feature = "harness", not(feature = "encrypted")))]
+pub async fn open_harness_db_in(dir: &Path) -> Result<HarnessDb> {
+    let sessions = open_in(dir).await?;
+    let pool = sessions.pool().clone();
+    let modes = adk_harness::SqliteModeStore::new(pool.clone());
+    modes.migrate().await?;
+    let rules = adk_harness::SqliteStandingRuleStore::new(pool.clone());
+    rules.migrate().await?;
+    let ledger = adk_harness::SqliteShellLedger::new(pool.clone());
+    ledger.migrate().await?;
+    let shell_pids = adk_harness::SqliteShellPidRegistry::new(pool.clone());
+    shell_pids.migrate().await?;
+    let approvals = adk_session::SqliteApprovalStore::from_pool(pool.clone());
+    approvals.migrate().await?;
+    let runs = adk_session::SqliteRunStore::from_pool(pool.clone());
+    runs.migrate().await?;
+    let facts = adk_harness::SqliteFactStore::new(pool.clone());
+    facts.migrate().await?;
+    let goals = adk_harness::SqliteGoalStore::new(pool.clone());
+    goals.migrate().await?;
+    let reads = adk_harness::SqliteReadRecords::new(pool.clone());
+    reads.migrate().await?;
+    let plans = adk_graph::SqliteCheckpointer::from_pool(pool.clone()).await?;
+    let snapshots = adk_harness::snapshot::SqliteSnapshotStore::new(pool.clone());
+    snapshots.migrate().await?;
+    let actions = adk_session::SqliteActionLedger::from_pool(pool.clone());
+    actions.migrate().await?;
+    let spend = adk_session::SqliteSpendLedger::from_pool(pool.clone());
+    spend.migrate().await?;
+    Ok(HarnessDb {
+        pool,
+        sessions,
+        modes: Arc::new(modes),
+        rules: Arc::new(rules),
+        ledger: Arc::new(ledger),
+        shell_pids: Arc::new(shell_pids),
+        approvals: Arc::new(approvals),
+        runs: Arc::new(runs),
+        facts: Arc::new(facts),
+        goals: Arc::new(goals),
+        reads: Arc::new(reads),
+        key_id: None,
+        plans: Arc::new(plans),
+        snapshots: Arc::new(snapshots),
+        dir: dir.to_path_buf(),
+        actions: Arc::new(actions),
+        spend: Arc::new(spend),
+    })
+}
+
+/// The id of `user_id`'s most recently updated session, if any.
+pub async fn latest(sessions: &dyn SessionService, user_id: &str) -> Result<Option<String>> {
+    let recent = sessions
+        .list(ListRequest {
+            app_name: APP_NAME.to_string(),
+            user_id: user_id.to_string(),
+            limit: Some(1),
+            offset: None,
+        })
+        .await?;
+    Ok(recent.first().map(|session| session.id().to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use adk_session::CreateRequest;
+    use std::path::PathBuf;
+
+    #[test]
+    fn the_url_keeps_spaces_and_escapes_what_the_driver_would_split_on() {
+        assert_eq!(
+            sqlite_url(&PathBuf::from("/Users/a b/Application Support/adk-rust/harness.db")),
+            "sqlite:///Users/a b/Application Support/adk-rust/harness.db?mode=rwc"
+        );
+        assert_eq!(
+            sqlite_url(&PathBuf::from("/tmp/a?b#c%d.db")),
+            "sqlite:///tmp/a%3Fb%23c%25d.db?mode=rwc"
+        );
+    }
+
+    #[tokio::test]
+    async fn sessions_survive_reopening_and_continue_picks_the_latest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dir with space").join("harness.db");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        create_private(&path).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        #[cfg(windows)]
+        assert!(crate::owner_only::is_owner_only(&path).unwrap(), "the store is not owner-only");
+
+        let url = sqlite_url(&path);
+        let store = SqliteSessionService::new(&url).await.unwrap();
+        store.migrate().await.unwrap();
+        assert_eq!(latest(&store, "ana").await.unwrap(), None);
+        for id in ["first", "second"] {
+            store
+                .create(CreateRequest {
+                    app_name: APP_NAME.into(),
+                    user_id: "ana".into(),
+                    session_id: Some(id.into()),
+                    state: Default::default(),
+                })
+                .await
+                .unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        drop(store);
+
+        let reopened = SqliteSessionService::new(&url).await.unwrap();
+        reopened.migrate().await.unwrap();
+        assert_eq!(latest(&reopened, "ana").await.unwrap().as_deref(), Some("second"));
+        assert_eq!(latest(&reopened, "bo").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn harness_db_runs_in_wal_mode_and_stays_owner_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_in(dir.path()).await.unwrap();
+        let mode: String =
+            sqlx::query_scalar("PRAGMA journal_mode").fetch_one(store.pool()).await.unwrap();
+        assert_eq!(mode, "wal");
+        store
+            .create(CreateRequest {
+                app_name: APP_NAME.into(),
+                user_id: "ana".into(),
+                session_id: Some("first".into()),
+                state: Default::default(),
+            })
+            .await
+            .unwrap();
+        // The log and the shared memory hold the database's rows, so they get its protection.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let wal = dir.path().join("harness.db-wal");
+            assert_eq!(std::fs::metadata(&wal).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        #[cfg(windows)]
+        for file in ["harness.db-wal", "harness.db-shm"] {
+            let path = dir.path().join(file);
+            assert!(
+                crate::owner_only::only_the_owner_has_access(&path).unwrap(),
+                "{file} is not owner-only"
+            );
+        }
+        drop(store);
+        let reopened = open_in(dir.path()).await.unwrap();
+        assert_eq!(latest(reopened.as_ref(), "ana").await.unwrap().as_deref(), Some("first"));
+    }
+
+    /// Creates the session `id` of user `ana` in `store`, which writes to the log.
+    async fn write(store: &SqliteSessionService, id: &str) {
+        store
+            .create(CreateRequest {
+                app_name: APP_NAME.into(),
+                user_id: "ana".into(),
+                session_id: Some(id.into()),
+                state: Default::default(),
+            })
+            .await
+            .unwrap();
+    }
+
+    /// SQLite deletes `harness.db-wal` and `-shm` when the file's last connection closes and
+    /// creates them again at the next open, whichever process opens it, so their protection
+    /// comes from the directory: only the owner has access after a checkpoint, after a plain
+    /// SQLite open re-creates them and after `open_in` reopens the store (spec 3.2 §10 W4).
+    #[tokio::test]
+    async fn the_wal_files_stay_owner_only_through_checkpoints_and_reopens() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = ["harness.db-wal", "harness.db-shm"].map(|file| dir.path().join(file));
+        let owner_only = |stage: &str| {
+            for path in &files {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mode = std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+                    assert_eq!(mode, 0o600, "{} after {stage}", path.display());
+                }
+                #[cfg(windows)]
+                assert!(
+                    crate::owner_only::only_the_owner_has_access(path).unwrap(),
+                    "{} is not owner-only after {stage}",
+                    path.display()
+                );
+            }
+        };
+
+        let store = open_in(dir.path()).await.unwrap();
+        write(&store, "first").await;
+        owner_only("the first open");
+        sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)").execute(store.pool()).await.unwrap();
+        write(&store, "second").await;
+        owner_only("a checkpoint");
+        store.pool().close().await;
+        drop(store);
+        for path in &files {
+            assert!(!path.exists(), "{} outlived the last connection", path.display());
+        }
+
+        let plain =
+            SqliteSessionService::new(&sqlite_url(&dir.path().join("harness.db"))).await.unwrap();
+        write(&plain, "third").await;
+        owner_only("a plain SQLite open re-created them");
+        plain.pool().close().await;
+        drop(plain);
+
+        let reopened = open_in(dir.path()).await.unwrap();
+        write(&reopened, "fourth").await;
+        owner_only("reopening");
+        assert_eq!(latest(reopened.as_ref(), "ana").await.unwrap().as_deref(), Some("fourth"));
+    }
+
+    /// Wave 2 gate, core item d: the action and spend ledgers are in `harness.db`, so a
+    /// restart keeps them; under a store key a failed call's error text is not kept, and a
+    /// refused call's `not run` text is (spec 3.1 §7.12, §7.13, I57).
+    #[cfg(all(feature = "harness", feature = "encrypted"))]
+    #[tokio::test]
+    async fn the_ledgers_survive_reopening_and_a_sealed_db_keeps_no_error_text() {
+        use adk_core::{
+            ActionOutcome, ActionRecord, AdkError, SpendKey, SpendPeriod, ToolEffect,
+            action_ledger::not_run_text,
+        };
+        let begun = |key: &str| {
+            ActionRecord::new(key, "write_file", &serde_json::json!({}), ToolEffect::NonIdempotent)
+        };
+        let failed = || ActionOutcome::Failed { error: "disk full at /private/diary.txt".into() };
+        let dir = tempfile::tempdir().unwrap();
+        let spend_key = SpendKey::org(APP_NAME);
+        let db = open_harness_db_in(dir.path(), None).await.unwrap();
+        let held = db.spend.reserve(&spend_key, 1_500).await.unwrap();
+        db.spend.commit(held, 1_200).await.unwrap();
+        db.actions.begin(&begun("k1")).await.unwrap();
+        db.actions.complete("k1", failed()).await.unwrap();
+        db.pool.close().await;
+        drop(db);
+
+        let db = open_harness_db_in(dir.path(), None).await.unwrap();
+        assert_eq!(db.spend.spent(&spend_key, SpendPeriod::Day).await.unwrap(), 1_200);
+        assert_eq!(db.actions.get("k1").await.unwrap().unwrap().outcome, Some(failed()));
+
+        let sealed = tempfile::tempdir().unwrap();
+        let keyring = adk_harness::encrypted::StoreKeyring::generate();
+        let db = open_harness_db_in(sealed.path(), Some(&keyring)).await.unwrap();
+        let refused = not_run_text(&AdkError::agent("stopped from the web home"));
+        for (key, outcome) in
+            [("k2", failed()), ("k3", ActionOutcome::Failed { error: refused.clone() })]
+        {
+            db.actions.begin(&begun(key)).await.unwrap();
+            db.actions.complete(key, outcome).await.unwrap();
+        }
+        let stored: String =
+            sqlx::query_scalar("SELECT group_concat(outcome, ' ') FROM adk_action_ledger")
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        assert!(!stored.contains("diary"), "{stored}");
+        assert_eq!(
+            db.actions.get("k3").await.unwrap().unwrap().outcome,
+            Some(ActionOutcome::Failed { error: refused })
+        );
+    }
+}

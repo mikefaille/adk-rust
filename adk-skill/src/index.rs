@@ -1,11 +1,50 @@
 use crate::discovery::{discover_instruction_files, discover_instruction_files_with_extras};
 use crate::error::SkillResult;
-use crate::model::{SkillDocument, SkillIndex};
+use crate::model::{ParsedSkill, SkillDocument, SkillIndex};
 use crate::parser::parse_instruction_markdown;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
+
+/// Builds an indexed [`SkillDocument`] from a parsed skill and its raw
+/// content, assigning the content-hash-based identifier.
+///
+/// Shared by the filesystem loaders and the registry loader so documents
+/// from both sources are constructed identically.
+pub(crate) fn build_document(
+    parsed: ParsedSkill,
+    path: PathBuf,
+    content: &str,
+    last_modified: Option<i64>,
+) -> SkillDocument {
+    let mut hasher = Sha256::new();
+    hasher.update(content.as_bytes());
+    let hash = format!("{:x}", hasher.finalize());
+
+    let id =
+        format!("{}-{}", normalize_id(&parsed.name), &hash.chars().take(12).collect::<String>());
+
+    SkillDocument {
+        id,
+        name: parsed.name,
+        description: parsed.description,
+        version: parsed.version,
+        license: parsed.license,
+        compatibility: parsed.compatibility,
+        tags: parsed.tags,
+        allowed_tools: parsed.allowed_tools,
+        references: parsed.references,
+        trigger: parsed.trigger,
+        hint: parsed.hint,
+        metadata: parsed.metadata,
+        body: parsed.body,
+        path,
+        hash,
+        last_modified,
+        triggers: parsed.triggers,
+    }
+}
 
 /// Loads a [`SkillIndex`] by discovering and parsing all instruction files under `root`.
 ///
@@ -23,12 +62,11 @@ pub fn load_skill_index(root: impl AsRef<Path>) -> SkillResult<SkillIndex> {
         // to coexist under .skills/ without causing parse errors.
         let parsed = match parse_instruction_markdown(&path, &content) {
             Ok(p) => p,
-            Err(_) => continue,
+            Err(error) => {
+                warn_unparsed_skill(&path, &content, &error);
+                continue;
+            }
         };
-
-        let mut hasher = Sha256::new();
-        hasher.update(content.as_bytes());
-        let hash = format!("{:x}", hasher.finalize());
 
         let last_modified = fs::metadata(&path)
             .ok()
@@ -36,28 +74,7 @@ pub fn load_skill_index(root: impl AsRef<Path>) -> SkillResult<SkillIndex> {
             .and_then(|ts| ts.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_secs() as i64);
 
-        let id =
-            format!("{}-{}", normalize_id(&parsed.name), hash.chars().take(12).collect::<String>());
-
-        skills.push(SkillDocument {
-            id,
-            name: parsed.name,
-            description: parsed.description,
-            version: parsed.version,
-            license: parsed.license,
-            compatibility: parsed.compatibility,
-            tags: parsed.tags,
-            allowed_tools: parsed.allowed_tools,
-            references: parsed.references,
-            trigger: parsed.trigger,
-            hint: parsed.hint,
-            metadata: parsed.metadata,
-            body: parsed.body,
-            path,
-            hash,
-            last_modified,
-            triggers: parsed.triggers,
-        });
+        skills.push(build_document(parsed, path, &content, last_modified));
     }
 
     skills.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.path.cmp(&b.path)));
@@ -87,12 +104,11 @@ pub fn load_skill_index_with_extras(
         };
         let parsed = match parse_instruction_markdown(&path, &content) {
             Ok(p) => p,
-            Err(_) => continue,
+            Err(error) => {
+                warn_unparsed_skill(&path, &content, &error);
+                continue;
+            }
         };
-
-        let mut hasher = Sha256::new();
-        hasher.update(content.as_bytes());
-        let hash = format!("{:x}", hasher.finalize());
 
         let last_modified = fs::metadata(&path)
             .ok()
@@ -100,28 +116,7 @@ pub fn load_skill_index_with_extras(
             .and_then(|ts| ts.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_secs() as i64);
 
-        let id =
-            format!("{}-{}", normalize_id(&parsed.name), hash.chars().take(12).collect::<String>());
-
-        skills.push(SkillDocument {
-            id,
-            name: parsed.name,
-            description: parsed.description,
-            version: parsed.version,
-            license: parsed.license,
-            compatibility: parsed.compatibility,
-            tags: parsed.tags,
-            allowed_tools: parsed.allowed_tools,
-            references: parsed.references,
-            trigger: parsed.trigger,
-            hint: parsed.hint,
-            metadata: parsed.metadata,
-            body: parsed.body,
-            path,
-            hash,
-            last_modified,
-            triggers: parsed.triggers,
-        });
+        skills.push(build_document(parsed, path, &content, last_modified));
     }
 
     // Deduplicate by name, preferring project-local skills (.skills/, .claude/skills/)
@@ -153,6 +148,15 @@ pub fn load_skill_index_with_extras(
 
     deduped.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.path.cmp(&b.path)));
     Ok(SkillIndex::new(deduped))
+}
+
+/// Warns about a file that was meant as a skill, one with frontmatter, but did not parse.
+///
+/// Other Markdown, such as a README under `.skills/`, is skipped without a word.
+fn warn_unparsed_skill(path: &Path, content: &str, error: &crate::SkillError) {
+    if content.trim_start().starts_with("---") {
+        tracing::warn!(skill.path = %path.display(), error = %error, "skipping skill that does not parse");
+    }
 }
 
 fn normalize_id(value: &str) -> String {

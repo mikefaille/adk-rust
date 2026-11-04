@@ -22,6 +22,17 @@ pub struct WhisperApiStt {
 }
 
 impl WhisperApiStt {
+    /// Create with an explicit API key (useful for testing without env vars).
+    #[doc(hidden)]
+    pub fn with_api_key(api_key: String) -> Self {
+        Self {
+            api_key,
+            client: reqwest::Client::new(),
+            base_url: "https://api.openai.com".into(),
+            model: "whisper-1".into(),
+        }
+    }
+
     /// Create from environment variable `OPENAI_API_KEY`.
     pub fn from_env() -> AudioResult<Self> {
         let api_key = std::env::var("OPENAI_API_KEY").map_err(|_| AudioError::Stt {
@@ -39,6 +50,10 @@ impl WhisperApiStt {
 
 #[async_trait]
 impl SttProvider for WhisperApiStt {
+    fn billing(&self) -> Option<crate::AudioBilling> {
+        Some(crate::AudioBilling::new("openai", self.model.clone()))
+    }
+
     async fn transcribe(&self, audio: &AudioFrame, opts: &SttOptions) -> AudioResult<Transcript> {
         let wav_bytes = frame_to_wav_bytes(audio)?;
         let url = format!("{}/v1/audio/transcriptions", self.base_url);
@@ -109,8 +124,12 @@ impl SttProvider for WhisperApiStt {
         &self,
         _audio: Pin<Box<dyn Stream<Item = AudioFrame> + Send>>,
         _opts: &SttOptions,
-    ) -> AudioResult<Pin<Box<dyn Stream<Item = AudioResult<Transcript>> + Send>>> {
-        // Whisper API doesn't support native streaming; use windowed fallback
-        Ok(Box::pin(futures::stream::empty()))
+    ) -> AudioResult<crate::TranscriptStream> {
+        Err(AudioError::Stt {
+            provider: "whisper".into(),
+            message: "streaming transcription not yet implemented; call `transcribe` with the \
+                      buffered audio"
+                .into(),
+        })
     }
 }

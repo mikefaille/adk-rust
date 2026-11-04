@@ -11,6 +11,11 @@ documentation = "https://docs.rs/adk-rag"
 keywords = ["ai", "agent", "adk", "rag", "retrieval"]
 categories = ["api-bindings", "asynchronous"]
 readme = "README.md"
+homepage.workspace = true
+
+[package.metadata.docs.rs]
+# lancedb needs protoc and surrealdb builds RocksDB from C++, so both are left out.
+features = ["gemini", "openai", "qdrant", "pgvector", "agent-retrieval", "vertex-rag"]
 
 [dependencies]
 adk-core.workspace = true
@@ -27,6 +32,9 @@ adk-gemini = { workspace = true, optional = true }
 google-cloud-auth = { version = "1.8", optional = true, default-features = false, features = ["default-rustls-provider"] }
 reqwest = { workspace = true, optional = true }
 qdrant-client = { version = "1.13", optional = true }
+# Qdrant point IDs and Agent Retrieval Data Object IDs are UUID v5 values derived from
+# scopes and chunk IDs.
+uuid = { workspace = true, features = ["v5"], optional = true }
 # lancedb's public API takes and returns arrow types, so our arrow types must come from
 # the exact arrow line lancedb was compiled against. Since 0.28 lancedb re-exports every
 # arrow crate it depends on (`lancedb::arrow::{arrow_array, arrow_schema, ...}`), so we
@@ -34,11 +42,21 @@ qdrant-client = { version = "1.13", optional = true }
 # -- by lancedb -- and cannot drift out from under us.
 lancedb = { version = "0.31", optional = true }
 futures = { version = "0.3", optional = true }
-sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres"], optional = true }
+sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls-aws-lc-rs", "postgres", "json"], optional = true }
 surrealdb = { version = "3.0.1", features = ["kv-mem", "kv-rocksdb"], optional = true }
 surrealdb-types = { version = "3.0.1", optional = true }
+# `OnnxEmbeddingProvider` (feature `onnx`). The ort pin is adk-audio's: rc.12 renamed
+# `ort::execution_providers` to `ort::ep`, so a floating pre-release breaks every ONNX
+# feature. Code uses the `ort::ep`-era paths.
+ort = { version = "=2.0.0-rc.13", optional = true }
+# `esaxx_fast` links a C++ object built against the static CRT, which rust-lld refuses next
+# to ort's dynamic-CRT objects on MSVC; `onig` alone is the feature set candle-core uses.
+tokenizers = { version = "0.22", default-features = false, features = ["onig"], optional = true }
+hf-hub = { version = "0.5", optional = true, default-features = false, features = ["ureq"] }
 
 [dev-dependencies]
+adk-core = { path = "../adk-core", features = ["conformance"] }
+adk-tool = { path = "../adk-tool" }
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
 axum = "0.8"
 proptest = "1.6"
@@ -48,10 +66,13 @@ tempfile = "3"
 default = []
 gemini = ["dep:adk-gemini"]
 openai = ["dep:reqwest"]
-qdrant = ["dep:qdrant-client"]
+qdrant = ["dep:qdrant-client", "dep:uuid"]
 lancedb = ["dep:lancedb", "dep:futures"]
 pgvector = ["dep:sqlx"]
-agent-retrieval = ["dep:adk-gcp", "dep:google-cloud-auth", "dep:reqwest"]
+agent-retrieval = ["dep:adk-gcp", "dep:google-cloud-auth", "dep:reqwest", "dep:uuid"]
 surrealdb = ["dep:surrealdb", "dep:surrealdb-types"]
 vertex-rag = ["dep:adk-gcp", "dep:google-cloud-auth", "dep:reqwest"]
+# A sentence-transformer ONNX model run in process on the `ort` runtime: no network and no
+# provider key after one download into the Hugging Face hub cache (spec 3.1 §10 R1).
+onnx = ["dep:ort", "dep:tokenizers", "dep:hf-hub"]
 full = ["gemini", "openai", "qdrant", "lancedb", "pgvector", "surrealdb"]

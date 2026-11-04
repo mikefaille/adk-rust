@@ -39,6 +39,7 @@ async fn main() -> anyhow::Result<()> {
         name: "get_weather".into(),
         description: Some("Get current weather for a city".into()),
         behavior: None,
+        effect: adk_core::ToolEffect::NonIdempotent,
         parameters: Some(json!({
             "type": "object",
             "properties": {
@@ -105,6 +106,7 @@ async fn main() -> anyhow::Result<()> {
         name: "search_flights".into(),
         description: Some("Search for flights between cities".into()),
         behavior: None,
+        effect: adk_core::ToolEffect::NonIdempotent,
         parameters: Some(json!({
             "type": "object",
             "properties": {

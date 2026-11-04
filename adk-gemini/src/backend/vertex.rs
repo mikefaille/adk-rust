@@ -3,8 +3,8 @@
 //! This backend communicates with `{region}-aiplatform.googleapis.com` for
 //! regional endpoints, or `aiplatform.googleapis.com` when the location is
 //! `global`. It uses Google Cloud credentials (ADC, service account, WIF, or
-//! API key), the gRPC SDK for non-streaming requests (with REST fallback on
-//! transport errors), and REST SSE for streaming.
+//! API key), the gRPC SDK for non-streaming requests and REST SSE for streaming.
+//! Model requests are never replayed through another transport after a failure.
 //!
 //! Cached-content operations (create, get, update, list, delete) go through the
 //! Vertex REST endpoint
@@ -25,14 +25,15 @@ use crate::{
         ListCachedContentsResponse,
     },
     client::{
-        BadResponseSnafu, DecodeResponseSnafu, DeserializeSnafu, Error,
-        GoogleCloudCredentialHeadersSnafu, GoogleCloudCredentialHeadersUnavailableSnafu,
-        GoogleCloudRequestDeserializeSnafu, GoogleCloudRequestNotObjectSnafu,
-        GoogleCloudRequestSerializeSnafu, GoogleCloudResponseDeserializeSnafu,
-        GoogleCloudResponseSerializeSnafu, Model, UrlParseSnafu, ValidationSnafu,
+        BadResponseSnafu, DecodeResponseSnafu, Error, GoogleCloudCredentialHeadersSnafu,
+        GoogleCloudCredentialHeadersUnavailableSnafu, GoogleCloudRequestDeserializeSnafu,
+        GoogleCloudRequestNotObjectSnafu, GoogleCloudRequestSerializeSnafu,
+        GoogleCloudResponseDeserializeSnafu, GoogleCloudResponseSerializeSnafu, Model,
+        UrlParseSnafu, ValidationSnafu,
     },
     embedding::{ContentEmbeddingResponse, EmbedContentRequest},
     generation::{GenerateContentRequest, GenerationResponse},
+    tools::model::VertexRagStore,
 };
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
@@ -88,8 +89,13 @@ impl VertexBackend {
     async fn check_response(response: reqwest::Response) -> Result<reqwest::Response, Error> {
         let status = response.status();
         if !status.is_success() {
+            let retry_after = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
             let description = response.text().await.ok();
-            BadResponseSnafu { code: status.as_u16(), description }.fail()
+            BadResponseSnafu { code: status.as_u16(), description, retry_after }.fail()
         } else {
             Ok(response)
         }
@@ -117,13 +123,85 @@ impl VertexBackend {
         }
     }
 
-    /// Non-streaming generate via REST (fallback when gRPC has transport issues).
-    async fn generate_content_rest(
+    /// Declare a Vertex RAG store as a `retrieval` entry in the serialized
+    /// request's `tools` array.
+    ///
+    /// Injected at the JSON layer because the typed [`crate::Tool`] enum is
+    /// exhaustive public API — adding a `Retrieval` variant would be a
+    /// breaking change for downstream exhaustive matches.
+    fn inject_vertex_rag_store(
+        request_value: &mut serde_json::Value,
+        store: &VertexRagStore,
+    ) -> Result<(), Error> {
+        let store_value = serde_json::to_value(store).context(GoogleCloudRequestSerializeSnafu)?;
+        let object = request_value.as_object_mut().context(GoogleCloudRequestNotObjectSnafu)?;
+        let tools = object.entry("tools").or_insert_with(|| serde_json::Value::Array(Vec::new()));
+        tools
+            .as_array_mut()
+            .context(GoogleCloudRequestNotObjectSnafu)?
+            .push(json!({"retrieval": {"vertexRagStore": store_value}}));
+        Ok(())
+    }
+
+    /// Shared non-streaming generate flow over gRPC, optionally declaring a Vertex RAG
+    /// store. A transport failure is returned, never retried over REST: it can follow
+    /// model admission.
+    async fn generate_content_impl(
         &self,
-        request: &GenerateContentRequest,
+        request: GenerateContentRequest,
+        store: Option<&VertexRagStore>,
     ) -> Result<GenerationResponse, Error> {
+        // Strip fields unsupported by Vertex AI before sending.
+        let mut request = request;
+        Self::strip_unsupported_fields(&mut request);
+
+        let mut request_value =
+            serde_json::to_value(&request).context(GoogleCloudRequestSerializeSnafu)?;
+        if let Some(store) = store {
+            Self::inject_vertex_rag_store(&mut request_value, store)?;
+        }
+
+        // Non-streaming gRPC requests carry the model resource in the body.
+
+        let model = self.model.to_string();
+        let request_object =
+            request_value.as_object_mut().context(GoogleCloudRequestNotObjectSnafu)?;
+        request_object.insert("model".to_string(), serde_json::Value::String(model));
+
+        let grpc_request: google_cloud_aiplatform_v1::model::GenerateContentRequest =
+            serde_json::from_value(request_value).context(GoogleCloudRequestDeserializeSnafu)?;
+
+        match self.prediction.generate_content().with_request(grpc_request).send().await {
+            Ok(response) => {
+                let value =
+                    serde_json::to_value(&response).context(GoogleCloudResponseSerializeSnafu)?;
+                serde_json::from_value(value).context(GoogleCloudResponseDeserializeSnafu)
+            }
+            // A transport failure can occur after model admission; never replay it.
+            Err(source) => Err(Error::GoogleCloudRequest { source }),
+        }
+    }
+
+    /// Shared streaming generate flow over REST SSE, optionally declaring a
+    /// Vertex RAG store.
+    async fn generate_content_stream_impl(
+        &self,
+        request: GenerateContentRequest,
+        store: Option<&VertexRagStore>,
+    ) -> Result<BackendStream<GenerationResponse>, Error> {
+        // Strip fields unsupported by Vertex AI before sending.
+        let mut request = request;
+        Self::strip_unsupported_fields(&mut request);
+
+        let mut request_value =
+            serde_json::to_value(&request).context(GoogleCloudRequestSerializeSnafu)?;
+        if let Some(store) = store {
+            Self::inject_vertex_rag_store(&mut request_value, store)?;
+        }
+
+        // Vertex AI REST supports streamGenerateContent with SSE, same as AI Studio.
         let url = Url::parse(&format!(
-            "{}/v1/{}:generateContent",
+            "{}/v1/{}:streamGenerateContent?alt=sse",
             self.endpoint.trim_end_matches('/'),
             self.model
         ))
@@ -131,21 +209,25 @@ impl VertexBackend {
 
         let auth_headers = self.auth_headers().await?;
 
-        let response = Client::new()
+        let response = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|source| Error::PerformRequestNew { source })?
             .post(url.clone())
             .headers(auth_headers)
-            .query(&[("$alt", "json;enum-encoding=int")])
-            .json(request)
+            .json(&request_value)
             .send()
             .await
             .map_err(|source| Error::PerformRequest { source, url })?;
         let response = Self::check_response(response).await?;
 
-        let vertex_resp: google_cloud_aiplatform_v1::model::GenerateContentResponse =
-            response.json().await.context(DecodeResponseSnafu)?;
-        let value =
-            serde_json::to_value(&vertex_resp).context(GoogleCloudResponseSerializeSnafu)?;
-        serde_json::from_value(value).context(GoogleCloudResponseDeserializeSnafu)
+        let stream = response
+            .bytes_stream()
+            .eventsource()
+            .map_err(|e| Error::BadPart { source: e })
+            .and_then(|event| async move { super::decode_generation_response(&event.data) });
+
+        Ok(Box::pin(stream))
     }
 
     // ── Cached-content plumbing ──────────────────────────────────
@@ -201,7 +283,10 @@ impl VertexBackend {
     /// GET a JSON resource with auth headers.
     async fn get_json<T: serde::de::DeserializeOwned>(&self, url: Url) -> Result<T, Error> {
         let auth_headers = self.auth_headers().await?;
-        let response = Client::new()
+        let response = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|source| Error::PerformRequestNew { source })?
             .get(url.clone())
             .headers(auth_headers)
             .send()
@@ -218,7 +303,10 @@ impl VertexBackend {
         body: &Req,
     ) -> Result<Res, Error> {
         let auth_headers = self.auth_headers().await?;
-        let response = Client::new()
+        let response = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|source| Error::PerformRequestNew { source })?
             .post(url.clone())
             .headers(auth_headers)
             .json(body)
@@ -236,78 +324,30 @@ impl GeminiBackend for VertexBackend {
         &self,
         request: GenerateContentRequest,
     ) -> Result<GenerationResponse, Error> {
-        // Strip fields unsupported by Vertex AI before sending.
-        let mut request = request;
-        Self::strip_unsupported_fields(&mut request);
-
-        // Try gRPC first, fall back to REST on transport errors.
-        let rest_request = request.clone();
-        let mut request_value =
-            serde_json::to_value(&request).context(GoogleCloudRequestSerializeSnafu)?;
-        let model = self.model.to_string();
-        let request_object =
-            request_value.as_object_mut().context(GoogleCloudRequestNotObjectSnafu)?;
-        request_object.insert("model".to_string(), serde_json::Value::String(model));
-
-        let grpc_request: google_cloud_aiplatform_v1::model::GenerateContentRequest =
-            serde_json::from_value(request_value).context(GoogleCloudRequestDeserializeSnafu)?;
-
-        match self.prediction.generate_content().with_request(grpc_request).send().await {
-            Ok(response) => {
-                let value =
-                    serde_json::to_value(&response).context(GoogleCloudResponseSerializeSnafu)?;
-                serde_json::from_value(value).context(GoogleCloudResponseDeserializeSnafu)
-            }
-            Err(source) => {
-                if Self::is_transport_error(&source.to_string()) {
-                    tracing::warn!(
-                        error = %source,
-                        "Vertex SDK transport error on generateContent; falling back to REST"
-                    );
-                    self.generate_content_rest(&rest_request).await
-                } else {
-                    Err(Error::GoogleCloudRequest { source })
-                }
-            }
-        }
+        self.generate_content_impl(request, None).await
     }
 
     async fn generate_content_stream(
         &self,
         request: GenerateContentRequest,
     ) -> Result<BackendStream<GenerationResponse>, Error> {
-        // Strip fields unsupported by Vertex AI before sending.
-        let mut request = request;
-        Self::strip_unsupported_fields(&mut request);
+        self.generate_content_stream_impl(request, None).await
+    }
 
-        // Vertex AI REST supports streamGenerateContent with SSE, same as AI Studio.
-        let url = Url::parse(&format!(
-            "{}/v1/{}:streamGenerateContent?alt=sse",
-            self.endpoint.trim_end_matches('/'),
-            self.model
-        ))
-        .context(UrlParseSnafu)?;
+    async fn generate_content_with_vertex_rag(
+        &self,
+        request: GenerateContentRequest,
+        store: VertexRagStore,
+    ) -> Result<GenerationResponse, Error> {
+        self.generate_content_impl(request, Some(&store)).await
+    }
 
-        let auth_headers = self.auth_headers().await?;
-
-        let response = Client::new()
-            .post(url.clone())
-            .headers(auth_headers)
-            .json(&request)
-            .send()
-            .await
-            .map_err(|source| Error::PerformRequest { source, url })?;
-        let response = Self::check_response(response).await?;
-
-        let stream = response
-            .bytes_stream()
-            .eventsource()
-            .map_err(|e| Error::BadPart { source: e })
-            .and_then(|event| async move {
-                serde_json::from_str::<GenerationResponse>(&event.data).context(DeserializeSnafu)
-            });
-
-        Ok(Box::pin(stream))
+    async fn generate_content_stream_with_vertex_rag(
+        &self,
+        request: GenerateContentRequest,
+        store: VertexRagStore,
+    ) -> Result<BackendStream<GenerationResponse>, Error> {
+        self.generate_content_stream_impl(request, Some(&store)).await
     }
 
     async fn embed_content(
@@ -350,7 +390,10 @@ impl GeminiBackend for VertexBackend {
 
         let auth_headers = self.auth_headers().await?;
 
-        let response = Client::new()
+        let response = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|source| Error::PerformRequestNew { source })?
             .post(url.clone())
             .headers(auth_headers)
             .query(&[("$alt", "json;enum-encoding=int")])
@@ -438,7 +481,10 @@ impl GeminiBackend for VertexBackend {
         debug!(cache.update_mask = update_mask, "updating cached content expiration");
 
         let auth_headers = self.auth_headers().await?;
-        let response = Client::new()
+        let response = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|source| Error::PerformRequestNew { source })?
             .patch(url.clone())
             .headers(auth_headers)
             .json(&update_payload)
@@ -453,7 +499,10 @@ impl GeminiBackend for VertexBackend {
     async fn delete_cached_content(&self, name: &str) -> Result<(), Error> {
         let url = self.cache_url(Some(name))?;
         let auth_headers = self.auth_headers().await?;
-        let response = Client::new()
+        let response = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|source| Error::PerformRequestNew { source })?
             .delete(url.clone())
             .headers(auth_headers)
             .send()
@@ -467,6 +516,32 @@ impl GeminiBackend for VertexBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn preserves_raw_retry_after() {
+        for header in [Some("7"), Some("Wed, 21 Oct 2037 07:28:00 GMT"), Some("invalid"), None] {
+            let server = wiremock::MockServer::start().await;
+            let mut response = wiremock::ResponseTemplate::new(503).set_body_string("fixture");
+            if let Some(value) = header {
+                response = response.insert_header("retry-after", value);
+            }
+            wiremock::Mock::given(wiremock::matchers::method("GET"))
+                .respond_with(response)
+                .expect(1)
+                .mount(&server)
+                .await;
+            let response = reqwest::get(server.uri()).await.unwrap();
+            let error = VertexBackend::check_response(response).await.unwrap_err();
+            match error {
+                Error::BadResponse { code, description, retry_after } => {
+                    assert_eq!(code, 503);
+                    assert_eq!(description.as_deref(), Some("fixture"));
+                    assert_eq!(retry_after.as_deref(), header);
+                }
+                other => panic!("expected an HTTP failure, got {other:?}"),
+            }
+        }
+    }
     use crate::models::Content;
     use serde_json::{Value, json};
     use wiremock::matchers::{body_partial_json, method, path, query_param};
@@ -492,6 +567,109 @@ mod tests {
             Model::Custom(format!("{PARENT}/publishers/google/models/gemini-2.5-flash")),
         )
         .await
+    }
+
+    fn empty_request() -> GenerateContentRequest {
+        GenerateContentRequest {
+            contents: vec![Content::text("What does the handbook say about vacation?")],
+            generation_config: None,
+            safety_settings: None,
+            tools: None,
+            tool_config: None,
+            system_instruction: None,
+            cached_content: None,
+        }
+    }
+
+    fn test_store() -> VertexRagStore {
+        VertexRagStore::corpus("projects/test-project/locations/us-central1/ragCorpora/123")
+            .with_top_k(5)
+    }
+
+    fn expected_retrieval_entry() -> Value {
+        json!({
+            "retrieval": {
+                "vertexRagStore": {
+                    "ragResources": [{
+                        "ragCorpus": "projects/test-project/locations/us-central1/ragCorpora/123"
+                    }],
+                    "ragRetrievalConfig": {"topK": 5}
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn inject_vertex_rag_store_appends_exact_tools_entry() {
+        let mut request_value = serde_json::to_value(empty_request()).unwrap();
+        VertexBackend::inject_vertex_rag_store(&mut request_value, &test_store()).unwrap();
+
+        assert_eq!(request_value["tools"], json!([expected_retrieval_entry()]));
+    }
+
+    #[test]
+    fn inject_vertex_rag_store_preserves_existing_tools() {
+        let mut request = empty_request();
+        request.tools = Some(vec![crate::Tool::google_search()]);
+        let mut request_value = serde_json::to_value(&request).unwrap();
+        VertexBackend::inject_vertex_rag_store(&mut request_value, &test_store()).unwrap();
+
+        assert_eq!(
+            request_value["tools"],
+            json!([{"google_search": {}}, expected_retrieval_entry()])
+        );
+    }
+
+    /// The gRPC path deserializes the injected JSON into the Google Cloud SDK
+    /// request type; the `retrieval` declaration must survive that conversion.
+    #[test]
+    fn injected_rag_store_survives_grpc_request_conversion() {
+        let mut request_value = serde_json::to_value(empty_request()).unwrap();
+        VertexBackend::inject_vertex_rag_store(&mut request_value, &test_store()).unwrap();
+        request_value.as_object_mut().unwrap().insert(
+            "model".to_string(),
+            Value::String(format!("{PARENT}/publishers/google/models/gemini-2.5-flash")),
+        );
+
+        let grpc_request: google_cloud_aiplatform_v1::model::GenerateContentRequest =
+            serde_json::from_value(request_value).unwrap();
+        let round_trip = serde_json::to_value(&grpc_request).unwrap();
+
+        assert_eq!(
+            round_trip["tools"][0]["retrieval"]["vertexRagStore"]["ragResources"][0]["ragCorpus"],
+            "projects/test-project/locations/us-central1/ragCorpora/123"
+        );
+        assert_eq!(
+            round_trip["tools"][0]["retrieval"]["vertexRagStore"]["ragRetrievalConfig"]["topK"],
+            5
+        );
+    }
+
+    /// End-to-end over the streaming REST path: the posted request body must
+    /// carry the injected `retrieval` tools entry.
+    #[tokio::test]
+    async fn streaming_request_body_carries_injected_retrieval_tool() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!(
+                "/v1/{PARENT}/publishers/google/models/gemini-2.5-flash:streamGenerateContent"
+            )))
+            .and(body_partial_json(json!({"tools": [expected_retrieval_entry()]})))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                "data: {\"candidates\": [{\"content\": {\"parts\": [{\"text\": \"ok\"}], \"role\": \"model\"}}]}\n\n",
+                "text/event-stream",
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let backend = backend(&server.uri()).await;
+        let mut stream = backend
+            .generate_content_stream_with_vertex_rag(empty_request(), test_store())
+            .await
+            .expect("stream should start");
+        let first = stream.try_next().await.expect("chunk should parse");
+        assert_eq!(first.expect("one chunk expected").text(), "ok");
     }
 
     fn cached_content_json(name: &str) -> Value {

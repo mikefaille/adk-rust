@@ -52,6 +52,14 @@ impl ReadonlyContext for SharedStateContext {
     fn user_content(&self) -> &Content {
         self.inner.user_content()
     }
+
+    fn acting_context(&self) -> adk_core::ActingContext {
+        self.inner.acting_context()
+    }
+
+    fn is_authenticated(&self) -> bool {
+        self.inner.is_authenticated()
+    }
 }
 
 #[async_trait]
@@ -135,6 +143,10 @@ impl InvocationContext for SharedStateContext {
 
     fn requires_tool_confirmation(&self, tool_name: &str) -> bool {
         self.inner.requires_tool_confirmation(tool_name)
+    }
+
+    fn steering_inbox(&self) -> Option<adk_core::SteeringInbox> {
+        self.inner.steering_inbox()
     }
 
     async fn get_secret(&self, name: &str) -> adk_core::Result<Option<String>> {

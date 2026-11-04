@@ -43,6 +43,19 @@ bigquery = ["dep:gcp-bigquery-client"]
 spanner = ["dep:google-cloud-spanner"]
 # Enable MCP sampling callback support (sampling/createMessage handling)
 mcp-sampling = ["mcp"]
+# MCP Apps on the client (spec 3.3 §6.1 `genui-apps`): declare the `io.modelcontextprotocol/ui`
+# extension, keep each tool's `_meta.ui`, leave app-only tools out of the model's tools, and
+# read `ui://` resources back for a host to show sandboxed.
+mcp-apps = ["mcp"]
+# Publish a set of adk_core::Tool as a Streamable HTTP MCP server with a Server Card
+# (spec 3.5 §7.9).
+mcp-server = [
+    "mcp",
+    "rmcp/server",
+    "rmcp/transport-streamable-http-server",
+    "dep:axum",
+    "dep:sha2",
+]
 # Enable the Vertex AI Example Store client and few-shot retrieval provider
 example-store = ["adk-gcp", "google-cloud-auth", "reqwest"]
 # Enable the Google Agent Registry client and the agent discovery tool
@@ -53,10 +66,11 @@ adk-core.workspace = true
 adk-rust-macros.workspace = true
 adk-telemetry.workspace = true
 async-trait.workspace = true
-tokio = { workspace = true, features = ["fs", "process", "sync", "time"] }
+tokio = { workspace = true, features = ["fs", "process", "rt", "sync", "time"] }
 serde.workspace = true
 serde_json.workspace = true
 schemars = "1.0"
+jsonschema = { workspace = true }
 rmcp = { version = "3.1", features = ["client", "transport-child-process", "elicitation"], optional = true }
 tracing.workspace = true
 base64 = "0.22"
@@ -83,13 +97,30 @@ google-cloud-spanner = { version = "0.33", optional = true }
 google-cloud-auth = { version = "1.8", optional = true, default-features = false, features = ["default-rustls-provider"] }
 # Optional: shared Google Cloud REST plumbing for the Example Store and Agent Registry clients
 adk-gcp = { workspace = true, optional = true }
+# Optional: the MCP server's HTTP router and its Server Card validators
+axum = { version = "0.8", optional = true }
+sha2 = { workspace = true, optional = true }
+
+# The Job Object that holds each managed stdio server's process tree on Windows
+# (spec 3.2 §10 W1).
+[target.'cfg(windows)'.dependencies]
+adk-sandbox = { workspace = true, features = ["process-tree"] }
+
+# The session and process group that holds each managed stdio server's process tree on
+# Unix (spec 3.2 §7.7, K-I5).
+[target.'cfg(unix)'.dependencies]
+adk-sandbox = { workspace = true, features = ["process-tree"] }
+
+# The Job Object tests wait for and end the processes a server started.
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
 
 [dev-dependencies]
 # Internal dev-deps are path-only (no version) so cargo strips them from the
 # published manifest — they can never block or reorder a crates.io publish.
 async-stream.workspace = true
 proptest = "1.5"
-tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread", "io-std"] }
 adk-code = { path = "../adk-code" }
 adk-sandbox = { path = "../adk-sandbox" }
 # Server side of rmcp, used only to drive an in-process peer in the protocol
@@ -97,6 +128,15 @@ adk-sandbox = { path = "../adk-sandbox" }
 rmcp = { version = "3.1", features = ["client", "server", "elicitation"] }
 # Mock upstream for the Example Store contract tests.
 axum = "0.8"
+# `Runner::close` reaching an agent's MCP toolset, in the MCP close tests.
+adk-agent = { path = "../adk-agent" }
+adk-runner = { path = "../adk-runner" }
+adk-session = { path = "../adk-session" }
+# The scripted and live agent runs against the MCP server.
+adk-model = { path = "../adk-model", default-features = false, features = ["anthropic"] }
+dotenvy = "0.15"
+# Drives the MCP server router in process in the HTTP tests.
+tower = { version = "0.5", features = ["util"] }
 
 [[test]]
 name = "mcp_server_lifecycle_integration_tests"
@@ -105,6 +145,34 @@ required-features = ["mcp"]
 [[test]]
 name = "mcp_roundtrip_property_tests"
 required-features = ["mcp"]
+
+[[test]]
+name = "mcp_close_tests"
+required-features = ["mcp"]
+
+[[test]]
+name = "mcp_apps_tests"
+required-features = ["mcp-apps"]
+
+[[test]]
+name = "mcp_server_tests"
+required-features = ["mcp-server", "http-transport"]
+
+[[test]]
+name = "mcp_server_http_tests"
+required-features = ["mcp-server"]
+
+[[test]]
+name = "mcp_server_card_tests"
+required-features = ["mcp-server"]
+
+[[test]]
+name = "mcp_server_agent_tests"
+required-features = ["mcp-server", "http-transport"]
+
+[[test]]
+name = "preload_memory_tests"
+required-features = ["memory-tools"]
 
 [[test]]
 name = "example_store_contract"
@@ -117,3 +185,7 @@ required-features = ["example-store"]
 [[test]]
 name = "agent_registry_contract"
 required-features = ["vertex-agent-registry"]
+
+# Document every feature-gated API on docs.rs.
+[package.metadata.docs.rs]
+all-features = true

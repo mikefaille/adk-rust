@@ -24,16 +24,71 @@
 //! | `agent-retrieval` | `AgentRetrievalStore` via Agent Retrieval (Vector Search 2.0) |
 //! | `surrealdb`  | `SurrealVectorStore` via surrealdb        |
 //! | `vertex-rag` | Vertex AI RAG Engine client + retrieval tool |
-//! | `full`       | All of the above except `vertex-rag` (external infrastructure) |
+//! | `full`       | `gemini`, `openai`, `qdrant`, `lancedb`, `pgvector`, `surrealdb` |
+//!
+//! ## Example
+//!
+//! The pipeline below runs offline with a toy embedder; swap in
+//! `GeminiEmbeddingProvider` or `OpenAIEmbeddingProvider` for real embeddings.
+//!
+//! ```rust
+//! use std::sync::Arc;
+//!
+//! use adk_rag::{
+//!     Document, EmbeddingProvider, InMemoryVectorStore, RagConfig, RagPipeline, RecursiveChunker,
+//!     Scope,
+//! };
+//! use async_trait::async_trait;
+//!
+//! struct LengthEmbedder;
+//!
+//! #[async_trait]
+//! impl EmbeddingProvider for LengthEmbedder {
+//!     async fn embed(&self, text: &str) -> adk_rag::Result<Vec<f32>> {
+//!         Ok(vec![text.len() as f32, 1.0])
+//!     }
+//!
+//!     fn dimensions(&self) -> usize {
+//!         2
+//!     }
+//! }
+//!
+//! # #[tokio::main]
+//! # async fn main() -> adk_rag::Result<()> {
+//! let pipeline = RagPipeline::builder()
+//!     .config(RagConfig::default())
+//!     .embedding_provider(Arc::new(LengthEmbedder))
+//!     .vector_store(Arc::new(InMemoryVectorStore::new()))
+//!     .chunker(Arc::new(RecursiveChunker::new(512, 100)))
+//!     .build()?;
+//!
+//! pipeline.create_collection("docs").await?;
+//! let document = Document::new("intro", "Rust is a systems programming language.")
+//!     .with_source_uri("https://example.com/rust")
+//!     .with_title("About Rust");
+//!
+//! // Every read and write names a scope; an application with one tenant uses this one.
+//! let rag = pipeline.scoped(Scope::single_tenant());
+//! rag.ingest("docs", &document).await?;
+//!
+//! let results = rag.query("docs", "systems language").await?;
+//! assert_eq!(results[0].chunk.document_id, "intro");
+//! assert_eq!(results[0].chunk.source_uri.as_deref(), Some("https://example.com/rust"));
+//! # Ok(())
+//! # }
+//! ```
 
 pub mod chunking;
 pub mod config;
 pub mod document;
 pub mod embedding;
 pub mod error;
+pub mod filter;
 pub mod inmemory;
 pub mod pipeline;
 pub mod reranker;
+pub mod scope;
+pub mod subject;
 pub mod tool;
 pub mod vectorstore;
 
@@ -43,6 +98,8 @@ pub mod agent_retrieval;
 pub mod gemini;
 #[cfg(feature = "lancedb")]
 pub mod lancedb;
+#[cfg(feature = "onnx")]
+pub mod onnx;
 #[cfg(feature = "openai")]
 pub mod openai;
 #[cfg(feature = "pgvector")]
@@ -61,16 +118,21 @@ pub use config::{RagConfig, RagConfigBuilder};
 pub use document::{Chunk, Document, SearchResult};
 pub use embedding::EmbeddingProvider;
 pub use error::{RagError, Result};
+pub use filter::{Field, Filter};
 pub use inmemory::InMemoryVectorStore;
-pub use pipeline::{RagPipeline, RagPipelineBuilder};
+pub use pipeline::{QueryOptions, RagPipeline, RagPipelineBuilder, ScopedRag};
 pub use reranker::{NoOpReranker, Reranker};
+pub use scope::Scope;
+pub use subject::{RagSubjectData, SUBJECT_METADATA_KEY, SubjectPartition};
 pub use tool::RagTool;
-pub use vectorstore::VectorStore;
+pub use vectorstore::{CollectionSpec, VectorQuery, VectorStore};
 
 #[cfg(feature = "gemini")]
 pub use gemini::GeminiEmbeddingProvider;
 #[cfg(feature = "lancedb")]
 pub use lancedb::LanceDBVectorStore;
+#[cfg(feature = "onnx")]
+pub use onnx::{OnnxEmbeddingConfig, OnnxEmbeddingProvider, OnnxPooling};
 #[cfg(feature = "openai")]
 pub use openai::OpenAIEmbeddingProvider;
 #[cfg(feature = "pgvector")]

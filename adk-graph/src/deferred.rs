@@ -43,12 +43,15 @@
 //! assert_eq!(merged, json!([{"result": 1}, {"result": 2}, {"result": 3}]));
 //! ```
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+use crate::error::{GraphError, Result};
 
 /// How to combine outputs from multiple upstream parallel paths.
 ///
@@ -142,20 +145,23 @@ pub struct DeferredNodeConfig {
     /// Strategy for combining upstream outputs.
     pub merge_strategy: MergeStrategy,
 
-    /// Maximum time to wait for all upstream paths to complete.
+    /// Maximum time to wait for the predecessors that can still run.
     ///
-    /// - `None`: Wait indefinitely for all upstream paths.
-    /// - `Some(duration)`: If the timeout expires and some paths have completed,
-    ///   proceed with partial results. If zero paths have completed, return
-    ///   `GraphError::FanInTimedOut`.
+    /// - `None`: Wait until every predecessor that can still run in this pass has
+    ///   arrived.
+    /// - `Some(duration)`: If the timeout expires and at least `min_predecessors`
+    ///   have arrived, proceed with partial results and ignore the late arrival of
+    ///   the others. Otherwise, return `GraphError::FanInTimedOut`.
     pub fan_in_timeout: Option<Duration>,
-    /// How many predecessors must have arrived for `fan_in_timeout` to release
-    /// the node with partial results.
+    /// How many predecessors must have arrived for the node to be released with
+    /// partial results.
     ///
     /// `None` means one, which is the behaviour this field replaced. Set it to
     /// the full predecessor count to require all of them even after a timeout, or
     /// to any value between for an n-of-m join: release once that many branches
-    /// have answered and abandon the rest.
+    /// have answered and abandon the rest. A node whose remaining predecessors can
+    /// no longer run, and that has fewer than this, fails with
+    /// `GraphError::FanInIncomplete`.
     pub min_predecessors: Option<usize>,
 }
 
@@ -363,6 +369,157 @@ impl FanInTracker {
     }
 }
 
+/// Checkpoint metadata key holding the arrivals of fan-in nodes still waiting.
+pub(crate) const FAN_IN_METADATA_KEY: &str = "adk.graph.fanIn";
+
+/// Layout version of [`FAN_IN_METADATA_KEY`].
+///
+/// A checkpoint without the key predates it and restores with no arrivals.
+const FAN_IN_SNAPSHOT_VERSION: u32 = 1;
+
+/// The fan-in arrivals a checkpoint carries, so a resumed run still releases a
+/// join whose earlier predecessors finished before the pause or crash.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FanInSnapshot {
+    version: u32,
+    nodes: BTreeMap<String, PendingFanIn>,
+    /// Predecessors whose next arrival a node ignores, because a `fan_in_timeout`
+    /// released it without them. Absent from checkpoints that predate it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    abandoned: BTreeMap<String, Vec<String>>,
+}
+
+/// What a checkpoint restores of the fan-in nodes still waiting.
+pub(crate) struct RestoredFanIn {
+    /// The waiting nodes' trackers.
+    pub(crate) trackers: HashMap<String, FanInTracker>,
+    /// When each waiting node started waiting.
+    pub(crate) started: HashMap<String, Instant>,
+    /// The predecessors each node ignores the next arrival of.
+    pub(crate) abandoned: HashMap<String, HashSet<String>>,
+}
+
+/// One deferred node's recorded arrivals.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PendingFanIn {
+    /// Arrivals in recording order, which is the merge order.
+    arrivals: Vec<FanInArrival>,
+    /// When the node started waiting, so `fan_in_timeout` spans the pause.
+    waiting_since: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FanInArrival {
+    source: String,
+    output: Value,
+}
+
+impl FanInSnapshot {
+    /// Captures every waiting tracker and abandoned predecessor, or `None` when
+    /// there is neither.
+    pub(crate) fn capture(
+        trackers: &HashMap<String, FanInTracker>,
+        started: &HashMap<String, Instant>,
+        abandoned: &HashMap<String, HashSet<String>>,
+    ) -> Option<Self> {
+        if trackers.is_empty() && abandoned.values().all(HashSet::is_empty) {
+            return None;
+        }
+        let now = chrono::Utc::now();
+        let nodes = trackers
+            .iter()
+            .map(|(node, tracker)| {
+                let waited = started
+                    .get(node)
+                    .and_then(|start| chrono::Duration::from_std(start.elapsed()).ok())
+                    .unwrap_or_default();
+                let arrivals = tracker
+                    .insertion_order
+                    .iter()
+                    .filter_map(|source| {
+                        tracker.received.get(source).map(|output| FanInArrival {
+                            source: source.clone(),
+                            output: output.clone(),
+                        })
+                    })
+                    .collect();
+                (node.clone(), PendingFanIn { arrivals, waiting_since: now - waited })
+            })
+            .collect();
+        let abandoned = abandoned
+            .iter()
+            .filter(|(_, sources)| !sources.is_empty())
+            .map(|(node, sources)| {
+                let mut sources: Vec<String> = sources.iter().cloned().collect();
+                sources.sort();
+                (node.clone(), sources)
+            })
+            .collect();
+        Some(Self { version: FAN_IN_SNAPSHOT_VERSION, nodes, abandoned })
+    }
+
+    /// Reads the snapshot from checkpoint metadata; `None` when the key is absent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GraphError::CheckpointError`] when the value is malformed or was
+    /// written in a newer layout than this release reads.
+    pub(crate) fn from_metadata(metadata: &HashMap<String, Value>) -> Result<Option<Self>> {
+        let Some(value) = metadata.get(FAN_IN_METADATA_KEY) else { return Ok(None) };
+        let snapshot: Self = serde_json::from_value(value.clone()).map_err(|e| {
+            GraphError::CheckpointError(format!(
+                "checkpoint metadata '{FAN_IN_METADATA_KEY}' is malformed: {e}"
+            ))
+        })?;
+        if snapshot.version != FAN_IN_SNAPSHOT_VERSION {
+            return Err(GraphError::CheckpointError(format!(
+                "checkpoint metadata '{FAN_IN_METADATA_KEY}' has layout version {}, but this \
+                 adk-graph release reads version {FAN_IN_SNAPSHOT_VERSION}; resume the thread \
+                 with the release that wrote it",
+                snapshot.version
+            )));
+        }
+        Ok(Some(snapshot))
+    }
+
+    /// Rebuilds the trackers, their wait start times, and the abandoned predecessors.
+    ///
+    /// `upstream` names each node's predecessors from the graph being resumed, so
+    /// the expected set is never read from the checkpoint.
+    pub(crate) fn restore(self, upstream: impl Fn(&str) -> Vec<String>) -> RestoredFanIn {
+        let now = chrono::Utc::now();
+        let mut trackers = HashMap::new();
+        let mut started = HashMap::new();
+        for (node, pending) in self.nodes {
+            let sources = upstream(&node);
+            let mut tracker = FanInTracker::new(sources.iter().map(String::as_str).collect());
+            for arrival in pending.arrivals {
+                tracker.record(&arrival.source, arrival.output);
+            }
+            let waited = (now - pending.waiting_since).to_std().unwrap_or_default();
+            started.insert(
+                node.clone(),
+                Instant::now().checked_sub(waited).unwrap_or_else(Instant::now),
+            );
+            trackers.insert(node, tracker);
+        }
+        let abandoned = self
+            .abandoned
+            .into_iter()
+            .map(|(node, sources)| (node, sources.into_iter().collect()))
+            .collect();
+        RestoredFanIn { trackers, started, abandoned }
+    }
+
+    /// Serializes the snapshot for checkpoint metadata.
+    pub(crate) fn to_value(&self) -> Value {
+        serde_json::to_value(self).unwrap_or(Value::Null)
+    }
+}
+
 impl fmt::Debug for FanInTracker {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("FanInTracker")
@@ -488,6 +645,56 @@ mod tests {
         let config = DeferredNodeConfig::default();
         assert!(matches!(config.merge_strategy, MergeStrategy::Collect));
         assert!(config.fan_in_timeout.is_none());
+    }
+
+    #[test]
+    fn fan_in_snapshot_round_trips_arrivals_in_order() {
+        let mut tracker = FanInTracker::new(vec!["a", "b", "c"]);
+        tracker.record("b", json!("from b"));
+        tracker.record("a", json!({"x": 1}));
+        let trackers = HashMap::from([("join".to_string(), tracker)]);
+        let started = HashMap::from([("join".to_string(), Instant::now())]);
+
+        let abandoned =
+            HashMap::from([("quorum".to_string(), HashSet::from(["slow".to_string()]))]);
+
+        let snapshot =
+            FanInSnapshot::capture(&trackers, &started, &abandoned).expect("a join is waiting");
+        let metadata = HashMap::from([(FAN_IN_METADATA_KEY.to_string(), snapshot.to_value())]);
+        let restored = FanInSnapshot::from_metadata(&metadata).unwrap().expect("key present");
+        let restored =
+            restored.restore(|_| vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+
+        let tracker = &restored.trackers["join"];
+        assert_eq!(tracker.completed_sources(), vec!["b", "a"]);
+        assert_eq!(tracker.merge(&MergeStrategy::Collect), json!(["from b", {"x": 1}]));
+        assert!(!tracker.is_ready());
+        assert!(restored.started.contains_key("join"));
+        assert_eq!(restored.abandoned, abandoned);
+    }
+
+    #[test]
+    fn a_snapshot_without_abandoned_predecessors_reads_as_before() {
+        let metadata =
+            HashMap::from([(FAN_IN_METADATA_KEY.to_string(), json!({"version": 1, "nodes": {}}))]);
+        let restored = FanInSnapshot::from_metadata(&metadata).unwrap().expect("key present");
+        assert!(restored.restore(|_| Vec::new()).abandoned.is_empty());
+    }
+
+    #[test]
+    fn a_checkpoint_without_fan_in_metadata_restores_nothing() {
+        assert_eq!(FanInSnapshot::from_metadata(&HashMap::new()).unwrap(), None);
+        assert_eq!(FanInSnapshot::capture(&HashMap::new(), &HashMap::new(), &HashMap::new()), None);
+    }
+
+    #[test]
+    fn a_newer_fan_in_layout_is_rejected() {
+        let metadata =
+            HashMap::from([(FAN_IN_METADATA_KEY.to_string(), json!({"version": 99, "nodes": {}}))]);
+        assert!(matches!(
+            FanInSnapshot::from_metadata(&metadata),
+            Err(GraphError::CheckpointError(_))
+        ));
     }
 
     #[test]

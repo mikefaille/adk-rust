@@ -11,10 +11,17 @@ documentation = "https://docs.rs/adk-realtime"
 keywords = ["adk", "ai", "realtime", "voice", "audio"]
 categories = ["api-bindings", "asynchronous"]
 readme = "README.md"
+homepage.workspace = true
+
+[package.metadata.docs.rs]
+# openai-webrtc builds the Opus C library with cmake and is left out.
+features = ["full", "heygen-avatar", "did-avatar", "integration"]
 
 [dependencies]
 # Core ADK dependencies
-adk-core.workspace = true
+# `rustls` makes `ensure_crypto_provider()` install aws-lc-rs before a connect builds TLS:
+# the `gemini` feature compiles in both rustls providers, so rustls cannot pick one.
+adk-core = { workspace = true, features = ["rustls"] }
 
 # Async runtime
 tokio = { workspace = true, features = ["sync", "net", "time", "rt", "macros"] }
@@ -63,6 +70,9 @@ adk-plugin = { workspace = true, optional = true }
 # Timestamp support for session/memory integration
 chrono = { workspace = true, optional = true }
 
+# Output guardrails (optional, behind "guardrails")
+adk-guardrail = { workspace = true, optional = true }
+
 # Vertex AI Live (optional)
 google-cloud-auth = { version = "1.4", optional = true, default-features = false, features = ["default-rustls-provider"] }
 
@@ -78,7 +88,7 @@ livekit-datatrack = { workspace = true, optional = true }
 str0m = { version = "0.17", optional = true }
 audiopus = { version = "0.3.0-rc.0", optional = true }
 reqwest = { workspace = true, optional = true }
-rustls = { version = "0.23.37", features = ["aws-lc-rs"] }
+rustls = { workspace = true }
 secrecy = "0.10.3"
 url = "2.5"
 parking_lot = "0.12.5"
@@ -87,6 +97,8 @@ tokio-stream.workspace = true
 futures-util = "0.3.32"
 
 [dev-dependencies]
+adk-runner = { path = "../adk-runner" }
+adk-session = { path = "../adk-session", features = ["sqlite"] }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "test-util"] }
 dotenvy = "0.15"
 proptest = "1.5"
@@ -171,6 +183,12 @@ record-payloads = []
 recovery-test-utils = []
 # Enable ADK services integration (sessions, memory, plugins)
 integration = ["dep:adk-session", "dep:adk-memory", "dep:adk-plugin", "dep:chrono"]
+# Output guardrails on the model's text and transcripts (`adk-guardrail`'s `GuardrailSet`),
+# as `LlmAgent` screens final text.
+guardrails = ["dep:adk-guardrail"]
+# `ScriptedRealtimeModel`: a provider-free test double that answers each client action from
+# a script, for tests of the runners, the integration layer and voice surfaces.
+scripted = []
 # Enable OpenAI Realtime API support
 openai = ["dep:async-openai", "dep:tokio-tungstenite", "dep:getrandom"]
 # Enable Gemini Live API support

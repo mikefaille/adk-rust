@@ -54,6 +54,21 @@
 //! This requires a runtime that can snapshot/resume. A runtime that cannot runs
 //! long-running tools inline and rejects confirmation pauses.
 //!
+//! A held call without a decision is not put to the run's
+//! [`ToolConfirmationHandler`](adk_core::ToolConfirmationHandler) again once it waits
+//! in the run's approval store, for example after the handler timed out: it resumes
+//! only on a decision recorded for it (spec 3.3 §7.3), checked under the arguments it
+//! was held with, after plugin and screen rewrites. A run that brings a new
+//! message while the call waits answers it in a turn of its own, which cannot
+//! suspend and keeps the waiting call's checkpoint in session state; a call in that
+//! turn that needs a decision is refused into the script and withdrawn
+//! ([`withdraw_held_call`](adk_core::withdraw_held_call)), since only one call waits
+//! at a time (§7.4). An identical call that turn decides answers the waiting call,
+//! whose checkpoint is then cleared. A run that resumes the call on its decision adds
+//! the message it brought to the transcript, and every checkpoint after it, so the next
+//! model request carries it — also when the resumed script finishes, or first stops at
+//! another call that needs a decision. A runtime that cannot pause leaves no call waiting.
+//!
 //! # Tool side effects
 //!
 //! Like [`LlmAgent`](crate::LlmAgent), tool-produced session changes are
@@ -79,9 +94,10 @@
 //! - **Model**: `generate_content_config` plus `temperature`/`top_p`/`top_k`/
 //!   `max_output_tokens` shorthands.
 //! - **Instructions** (assembled per invocation): `instruction` and
-//!   `instruction_provider`, `global_instruction` (+ provider), with
-//!   `{state.key}` template injection; the selected skill block, when a skills
-//!   index is configured (`skills` feature).
+//!   `instruction_provider`, `global_instruction` (+ provider), with session
+//!   state placeholders (`{key}`, `{key?}`, `{app:key}`, `{artifact.name}`) in
+//!   the static instructions; the selected skill block, when a skills index is
+//!   configured (`skills` feature).
 //! - **History**: `include_contents` controls how much session history seeds
 //!   the transcript.
 //! - **Tools**: static tools plus per-invocation `toolset`s; `tool_timeout`,

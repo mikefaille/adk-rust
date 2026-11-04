@@ -84,6 +84,11 @@ pub struct EventActions {
     /// Whether to escalate to a human operator.
     pub escalate: bool,
     /// Tool confirmation request awaiting human approval.
+    ///
+    /// A tool that sets it on its context's actions holds its own call for the request,
+    /// as an agent tool does when its delegate holds a call: the agent answers the call as
+    /// pending, ends the run on the request, and resumes the call once the request has a
+    /// decision.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_confirmation: Option<ToolConfirmationRequest>,
     /// Decision for a pending tool confirmation.
@@ -97,6 +102,66 @@ pub struct EventActions {
     /// following static edges.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route: Option<Vec<String>>,
+    /// Set on a user message that the runner screened with its agents' input guardrails
+    /// before saving it.
+    ///
+    /// A saved user message without it — saved by an earlier release, or appended to the
+    /// session directly — is screened again before any model sees it. See
+    /// [`Agent::screen_user_input`](crate::Agent::screen_user_input).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub input_screened: bool,
+    /// Set on a confirmation event: where each workflow agent the event passed through had
+    /// reached when the call was held, keyed by the workflow agent's name.
+    ///
+    /// A workflow agent whose last run stopped on a hold that is still held resumes at
+    /// this position instead of starting over. See
+    /// [`workflow_resume_positions`](crate::workflow_resume_positions).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub workflow_positions: HashMap<String, WorkflowPosition>,
+    /// Set on a user message that reached the run while it ran, through `Runner::steer`.
+    ///
+    /// The message is a user turn like any other in later history, but it is not the run's
+    /// own message: an agent never stands the run's message in for it, and compaction does
+    /// not count it as an invocation. See [`steering`](crate::steering).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steering: Option<crate::SteeringMarker>,
+    /// Sources a tool call retrieved and gave the model, recorded with
+    /// [`record_grounding_sources`](crate::record_grounding_sources).
+    ///
+    /// An agent counts a citation in its final answer only if it names one of the sources
+    /// its run recorded. See [`grounding`](crate::grounding).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grounding_sources: Vec<crate::GroundingSource>,
+}
+
+/// Where a workflow agent was when a call held for confirmation stopped it.
+///
+/// Recorded in [`EventActions::workflow_positions`] by `SequentialAgent`, `LoopAgent`,
+/// `ParallelAgent`, `ConditionalAgent` and `LlmConditionalAgent`.
+///
+/// # Example
+///
+/// ```rust
+/// use adk_core::WorkflowPosition;
+///
+/// let position = WorkflowPosition::new(1, "reviewer");
+/// assert_eq!(position.iteration, 1);
+/// assert_eq!(position.sub_agent, "reviewer");
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowPosition {
+    /// The loop iteration, counted from 0; always 0 for a workflow that does not loop.
+    #[serde(default)]
+    pub iteration: u32,
+    /// The sub-agent that held the call, or that contains the agent that did.
+    pub sub_agent: String,
+}
+
+impl WorkflowPosition {
+    /// Creates a position at `sub_agent` in loop iteration `iteration`.
+    pub fn new(iteration: u32, sub_agent: impl Into<String>) -> Self {
+        Self { iteration, sub_agent: sub_agent.into() }
+    }
 }
 
 /// A typed, borrowed view of a single tool call carried by an [`Event`].
@@ -361,6 +426,8 @@ impl Event {
 
     /// Returns whether the event is the final response of an agent.
     ///
+    /// Tool-start notifications and provider-native continuation pauses are not final.
+    ///
     /// An event is considered final if:
     /// - It has skip_summarization set, OR
     /// - It has long_running_tool_ids (indicating async operations), OR
@@ -370,6 +437,18 @@ impl Event {
     /// Note: When multiple agents participate in one invocation, there could be
     /// multiple events with is_final_response() as true, for each participating agent.
     pub fn is_final_response(&self) -> bool {
+        if self.provider_metadata.contains_key("adk_tool_started")
+            || self
+                .llm_response
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("continue_turn"))
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+        {
+            return false;
+        }
+
         // If skip_summarization is set or we have long-running tools, it's final
         if self.actions.skip_summarization || !self.long_running_tool_ids.is_empty() {
             return true;
@@ -556,6 +635,30 @@ mod tests {
         let event = Event::new("inv-123");
         // No content, no function calls -> final
         assert!(event.is_final_response());
+    }
+
+    #[test]
+    fn tool_start_is_not_final() {
+        let mut event = Event::new("inv-123");
+        event.provider_metadata.insert(
+            "adk_tool_started".into(),
+            serde_json::json!({"id": "call-1", "name": "search"}).to_string(),
+        );
+        assert!(!event.llm_response.partial);
+        assert!(!event.is_final_response());
+    }
+
+    #[test]
+    fn provider_continuation_is_not_final() {
+        for content in [None, Some(Content::new("model").with_text("Searching"))] {
+            let mut event = Event::new("inv-123");
+            event.llm_response.content = content;
+            event.llm_response.provider_metadata = Some(serde_json::json!({"continue_turn": true}));
+            assert!(!event.is_final_response());
+            event.llm_response.provider_metadata =
+                Some(serde_json::json!({"continue_turn": false}));
+            assert!(event.is_final_response());
+        }
     }
 
     #[test]

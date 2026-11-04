@@ -10,7 +10,7 @@ ACP.
 
 ```toml
 [dependencies]
-adk-acp = { version = "2.1.0", features = ["server"] }
+adk-acp = { version = "3.0.0", features = ["server"] }
 ```
 
 ## Build and serve an agent
@@ -32,9 +32,26 @@ let handle = AcpServer::run(config).await?;
 handle.wait().await?;
 ```
 
+`AcpServerHandle::shutdown()` stops new sessions and prompts at once. Prompts already
+running keep the connection open and send their answers for up to `shutdown_timeout`;
+those still running then are cancelled, and the connection closes once the answers
+already given are written. `wait()` returns when the server has stopped.
+
 The server uses the official SDK `Agent` builder and stdio transport. Protocol
 traffic is the only data written to stdout; configure tracing and diagnostics
 to use stderr.
+
+| `AcpServerConfigBuilder` option | Default |
+|---------------------------------|---------|
+| `agent`, `session_service` | Required; `build()` fails without them |
+| `agent_name` | `"adk-agent"`, reported in `initialize` with the `adk-acp` version |
+| `agent_description` | Empty; reported as the implementation title when set |
+| `user_id` | `"acp-client"`, the ADK user that owns every session |
+| `max_sessions` | 16; `build()` fails on 0 |
+| `shutdown_timeout` | 30 seconds; `build()` fails on 0. How long `AcpServerHandle::shutdown()` lets running prompts finish |
+| `session_controls` | None; see [Session modes](#session-modes-configuration-options-and-fork) |
+| `standing_permissions` | None; see [Always allow](#always-allow) |
+| `transport` | `TransportConfig::Stdio`, the only transport |
 
 ## Runtime mapping
 
@@ -156,15 +173,31 @@ stays dormant until an ADK plan primitive surfaces plan entries.
 
 ## Client-supplied MCP servers
 
-The client may include stdio MCP servers in `session/new` or `session/resume`.
-The server validates names, commands, arguments, and environment entries before
-starting a process. It then:
+The client may include stdio MCP servers in `session/new`, `session/load`,
+`session/resume`, or `session/fork`. Before starting a process the server
+rejects the request when:
+
+- more than 16 servers are attached;
+- a server is not stdio (HTTP and SSE are not advertised);
+- a name is empty or repeated, or an environment variable name is empty or
+  repeated within one server; or
+- a command is not an absolute path.
+
+It then:
 
 1. starts each child in the session workspace;
-2. applies a bounded startup handshake;
-3. wraps the connection as an ADK `McpToolset`;
-4. injects the toolset into that Runner invocation;
-5. cancels the MCP services on close, delete, failed startup, or server shutdown.
+2. bounds each startup handshake to 15 seconds;
+3. wraps the connection as an ADK `McpToolset` named `acp:{server name}`, so its
+   tools' origin is `mcp:acp:{server name}`;
+4. lists every server's tools and fails setup with `MalformedMessage` when two
+   servers publish the same tool name, naming both servers and the tool;
+5. injects the toolset into that Runner invocation;
+6. cancels the MCP services on close, delete, failed startup, or server shutdown.
+
+The tools of every attached server share the agent's namespace and are not
+prefixed, so a shared name would otherwise fail every prompt turn. A server
+whose tools cannot be listed at setup is left to the agent, which skips it for
+the turn.
 
 Invocation-scoped toolsets are currently resolved by `LlmAgent` and
 `CodeActAgent`. Optional HTTP and SSE MCP transports are not advertised by the
@@ -183,24 +216,119 @@ The server bridges ADK tool confirmations to native ACP permission requests.
 When the configured agent pauses on a `ToolConfirmationRequest` during a prompt
 turn — surfaced on `event.actions.tool_confirmation` when an agent awaits human
 approval of a tool call — the server sends a `session/request_permission`
-request describing the tool and its arguments, awaits the client's outcome, and
-resumes execution with the mapped decision. An approval maps to allow, and a
-denial or a cancellation both map to deny, so a cancelled request never executes
-the tool. Each outcome is correlated to the exact call by its function-call
-identifier and fed back to the runner through
-`RunConfig::tool_confirmation_decisions`.
+request titled `Run tool '{name}'` with the tool's arguments, offering
+**Allow once** (`acp-allow-once`) and **Deny** (`acp-reject-once`), awaits the
+client's outcome, and resumes execution with the mapped decision.
+`acp-allow-once` maps to allow; any other selection, and a cancellation, map to
+deny, so a cancelled request never executes the tool.
+
+Each outcome is recorded under the call's function-call identifier in
+`RunConfig::tool_confirmation_decisions` and bound, through
+`RunConfig::tool_confirmation_fingerprints`, to the call's fingerprint: the
+acting agent, the tool's origin, the tool name, and the arguments. A reused call
+ID on another agent's call, or on a tool another MCP server publishes, is
+therefore not authorized. A confirmation without a call ID fails the prompt,
+and one prompt resolves at most 64 rounds of confirmations. The resumed run
+carries an empty user turn, and an `LlmAgent` dispatches the held call again
+under its original ID before its next model call, so the decision applies
+whether or not the model would issue the call again. A call the model issues
+again under a new ID is a new call and produces a new permission request.
 
 The nested `session/request_permission` is issued from the task that already
 handles the outer `session/prompt`, spawned through `ConnectionTo::spawn`, so it
 does not block the connection's dispatch loop and the outer prompt response
-still completes. An earlier concern that the official Rust SDK loses the outer
-prompt response after a nested bidirectional request does not reproduce with
-this pause/resume flow; it is covered by the in-memory interoperability tests.
+still completes. The in-memory interoperability tests cover this flow.
+
+### Always allow
+
+With `AcpServerConfigBuilder::standing_permissions`, an editor's answer can
+outlive the call (spec 3.3 §10 A1). Before each permission request the server
+asks the `StandingPermissions` implementation for an offer; a call it may
+remember also gets two remembered options, worded with what they cover:
+
+| Option id | Kind | Label | Effect |
+|-----------|------|-------|--------|
+| `acp-allow-once` | `allow_once` | Allow once | Runs this call |
+| `acp-allow-always` | `allow_always` | Always allow for this command (bash: cargo test …, every session) — runs project scripts, so it allows whatever they do | Runs this call and remembers an allow rule |
+| `acp-reject-once` | `reject_once` | Deny | Refuses this call |
+| `acp-reject-always` | `reject_always` | Always deny for this command (bash: cargo test …, every session) | Refuses this call and remembers a deny rule |
+
+A call the implementation may never remember is offered **Allow once** and
+**Deny** only, and an "always" answer to a request that did not offer one is a
+denial. When the rule cannot be stored, the answer applies to this call only
+and the failure is logged.
+
+Before each permission request the server also asks
+`StandingPermissions::standing_decision` (default: none) whether its policy
+already decides the call. A model turn can hold several calls; when the person
+answers "Always allow" for the first, a later call of the same turn that the new
+rule covers is decided by the rule and not asked about, so the person is never
+shown a question whose answer the rule would override. An "always" answer that
+differs from an answer the person gave an earlier call of the same turn — "Deny"
+for `cargo test -p a`, then "Always allow" for `cargo test -p b` — is remembered
+once that turn's calls have run, so `cargo test -p a` stays denied; until then
+the turn's later calls are asked about. `HarnessAgent` answers it
+by re-checking the call as its terminal prompt does: a rule answers only the
+harness's own approval, so a call another policy layer also holds, or one the
+harness holds without a waiver, is still asked about.
+
+`adk-harness` implements `StandingPermissions` for `HarnessAgent` under its
+`acp-server` feature: the answer becomes the narrowest standing rule the
+harness suggests for the call (a command's two-token prefix, a site, or the
+tool from its exact publisher), bound to the tool's declaration and the
+session's person, and recorded as `harness.rule.created` with surface `acp`.
+For a file write it is the folder rule, "for this folder (file writes: within
+src/, this session)": every file write in the folder by `write_file`,
+`edit_file` or an `apply_patch` that only adds or updates files, each bound to
+its declaration ([Always allow for this folder](../harness/modes-and-approvals.md#always-allow-for-this-folder));
+a delete or a move is never offered "always". The option says where the rule applies ("every session" for a rule over
+the person's sessions) and, as at the terminal prompt, "Always allow" warns that a
+rule over commands that run project scripts (`cargo test`, `npm test`, `make`)
+allows whatever those scripts do (`StandingOffer::allow_warning`). Calls no standing rule may cover — a payment, leaving plan mode, a
+memory write, a desktop action, a protected edit, an unsandboxed retry, a chained
+shell command — are never offered "always", and neither is any call of a harness
+built with `require_authenticated_identity`, whose standing rules apply only to
+authenticated runs and so never to ACP runs. The next identical call is allowed
+by the harness's policy without a permission request; a call the rule does not
+cover, such as `cargo publish` after "Always allow" on `cargo test`, is still
+asked about.
+
+```toml
+[dependencies]
+adk-acp = { version = "3.0.0", features = ["server"] }
+adk-harness = { version = "3.0.0", features = ["acp-server"] }
+```
+
+```rust,ignore
+use adk_acp::server::{AcpServer, AcpServerConfigBuilder};
+use adk_harness::HarnessAgent;
+use adk_session::InMemorySessionService;
+use std::sync::Arc;
+
+let harness = Arc::new(
+    HarnessAgent::builder("harness")
+        .model(model)
+        .workspace(adk_devtools::Workspace::new(".").allow_bash(true))
+        .build()?,
+);
+let config = AcpServerConfigBuilder::new()
+    .agent(harness.clone())
+    .session_service(Arc::new(InMemorySessionService::new()))
+    .agent_name("harness")
+    .standing_permissions(harness)
+    .build()?;
+AcpServer::run(config).await?.wait().await?;
+```
+
+A standing rule answers only the harness's own approval: a call another policy
+layer or the agent's confirmation policy holds is still asked about.
 
 Server-owned tool authorization, read-only tools, RBAC, guardrails, and workflow
 interrupts remain available where approval must happen entirely inside the
-ADK-Rust process. The client-side permission path for external ACP agents is
-also fully implemented.
+ADK-Rust process. Each prompt runs on a `Runner` the server builds with
+only the decisions above: `AcpServerConfigBuilder` takes no `ToolPolicy` or run
+budget, so in-process controls belong on the agent — tool confirmation,
+callbacks, guardrails, and `adk-auth` wrappers.
 
 ## Deploy safely
 

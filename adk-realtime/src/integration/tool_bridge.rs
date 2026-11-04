@@ -21,7 +21,10 @@ use super::context::ToolContextFactory;
 /// with the `RealtimeRunner`.
 ///
 /// This adapter bridges the ADK tool interface to the realtime runner's
-/// tool execution interface, handling context creation and error serialization.
+/// tool execution interface, handling context creation and error serialization. A tool error
+/// is answered with [`tool_error_response`](adk_core::tool_error_response), which names the
+/// error's component, category, and code and keeps its message out unless
+/// [`with_exposed_error_messages`](Self::with_exposed_error_messages) is set.
 ///
 /// # Example
 ///
@@ -35,6 +38,7 @@ use super::context::ToolContextFactory;
 pub struct ToolBridgeAdapter {
     tool: Arc<dyn Tool>,
     context_factory: Arc<dyn ToolContextFactory>,
+    expose_error_messages: bool,
 }
 
 impl ToolBridgeAdapter {
@@ -45,7 +49,14 @@ impl ToolBridgeAdapter {
     /// * `tool` - The ADK tool to bridge.
     /// * `context_factory` - Factory for creating per-invocation `ToolContext` instances.
     pub fn new(tool: Arc<dyn Tool>, context_factory: Arc<dyn ToolContextFactory>) -> Self {
-        Self { tool, context_factory }
+        Self { tool, context_factory, expose_error_messages: false }
+    }
+
+    /// Sends the full message of the tool's errors to the model, which by default sees only
+    /// their component, category, and code.
+    pub fn with_exposed_error_messages(mut self, expose: bool) -> Self {
+        self.expose_error_messages = expose;
+        self
     }
 
     /// Extract a [`ToolDefinition`] from an ADK [`Tool`] for registering with the
@@ -70,6 +81,7 @@ impl ToolBridgeAdapter {
             description: Some(tool.description().to_string()),
             parameters: tool.parameters_schema(),
             behavior: None,
+            effect: tool.effect(),
         }
     }
 }
@@ -77,10 +89,24 @@ impl ToolBridgeAdapter {
 #[async_trait]
 impl ToolHandler for ToolBridgeAdapter {
     async fn execute(&self, call: &ToolCall) -> Result<Value> {
-        let ctx: Arc<dyn ToolContext> = self.context_factory.create_context(&call.call_id);
-        match self.tool.execute(ctx, call.arguments.clone()).await {
+        self.execute_cancellable(call, tokio_util::sync::CancellationToken::new()).await
+    }
+
+    async fn execute_cancellable(
+        &self,
+        call: &ToolCall,
+        token: tokio_util::sync::CancellationToken,
+    ) -> Result<Value> {
+        // The fence token reaches the tool as its context cancellation, so
+        // a tool polling `is_cancelled` observes a provider withdrawal.
+        let ctx: Arc<dyn ToolContext> =
+            self.context_factory.create_context_with_cancellation(&call.call_id, Some(token));
+        let execution = self.tool.execute(ctx.clone(), call.arguments.clone());
+        match adk_core::ModelCallScope::within_tool(ctx.as_ref(), execution).await {
             Ok(value) => Ok(value),
-            Err(e) => Ok(serde_json::json!({ "error": e.to_string() })),
+            Err(e) => {
+                Ok(adk_core::tool_error_response(self.tool.name(), &e, self.expose_error_messages))
+            }
         }
     }
 }

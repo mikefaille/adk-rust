@@ -25,6 +25,7 @@
 
 use std::sync::Arc;
 
+use adk_core::ToolEffect;
 use adk_memory::InMemoryMemoryService;
 use adk_realtime::config::{RealtimeConfig, ToolDefinition};
 use adk_realtime::events::ServerEvent;
@@ -70,6 +71,7 @@ async fn main() -> anyhow::Result<()> {
         name: "get_weather".into(),
         description: Some("Get current weather for a city".into()),
         behavior: None,
+        effect: ToolEffect::ReadOnly,
         parameters: Some(json!({
             "type": "object",
             "properties": {
@@ -83,6 +85,7 @@ async fn main() -> anyhow::Result<()> {
         name: "calculate".into(),
         description: Some("Evaluate a math expression".into()),
         behavior: None,
+        effect: ToolEffect::ReadOnly,
         parameters: Some(json!({
             "type": "object",
             "properties": {
@@ -96,6 +99,7 @@ async fn main() -> anyhow::Result<()> {
         name: "get_time".into(),
         description: Some("Get current time in a timezone".into()),
         behavior: None,
+        effect: ToolEffect::ReadOnly,
         parameters: Some(json!({
             "type": "object",
             "properties": {

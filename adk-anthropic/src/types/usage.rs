@@ -1,14 +1,32 @@
 use std::ops::Add;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::Value;
 
 use crate::types::ServerToolUsage;
 
 /// Usage information for API calls.
 ///
 /// Anthropic's API bills and rate-limits by token counts, as tokens represent the
-/// underlying cost to their systems.
-#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq)]
+/// underlying cost to their systems. A count the API reports as `null`, or leaves out,
+/// reads as zero (`None` for the optional counts) instead of failing the response.
+///
+/// # Example
+///
+/// ```
+/// use adk_anthropic::Usage;
+///
+/// let usage: Usage = serde_json::from_value(serde_json::json!({
+///     "input_tokens": null,
+///     "output_tokens": 4,
+///     "service_tier": "standard"
+/// }))
+/// .unwrap();
+/// assert_eq!((usage.input_tokens, usage.output_tokens), (0, 4));
+/// assert_eq!(usage.raw.as_deref().unwrap()["service_tier"], "standard");
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(try_from = "Value")]
 pub struct Usage {
     /// The number of input tokens used to create the cache entry.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -28,9 +46,73 @@ pub struct Usage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub server_tool_use: Option<ServerToolUsage>,
 
-    /// Tokens written to the 1-hour cache tier.
+    /// Tokens written to 1-hour cache entries; part of `cache_creation_input_tokens`.
+    ///
+    /// Read from the API's `cache_creation.ephemeral_1h_input_tokens`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_creation_input_tokens_1h: Option<i32>,
+
+    /// The `usage` object exactly as the API sent it, including fields this type does not
+    /// model, such as `service_tier` or the `cache_creation` breakdown.
+    ///
+    /// `None` for a value built in code or summed with [`Add`]. For a streamed message it is
+    /// the `message_start` usage with each `message_delta` usage field applied over it. Boxed
+    /// so that every [`Message`](crate::Message) stays small.
+    #[serde(skip)]
+    pub raw: Option<Box<Value>>,
+}
+
+/// Deserializes a count the API may report as `null`, reading `null` as zero.
+pub(crate) fn nullable_count<'de, D>(deserializer: D) -> Result<i32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<i32>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+/// Wire shape of `usage`, which reports 1-hour writes in a nested breakdown.
+#[derive(Deserialize)]
+struct UsageWire {
+    #[serde(default)]
+    cache_creation_input_tokens: Option<i32>,
+    #[serde(default)]
+    cache_read_input_tokens: Option<i32>,
+    #[serde(default, deserialize_with = "nullable_count")]
+    input_tokens: i32,
+    #[serde(default, deserialize_with = "nullable_count")]
+    output_tokens: i32,
+    #[serde(default)]
+    server_tool_use: Option<ServerToolUsage>,
+    #[serde(default)]
+    cache_creation_input_tokens_1h: Option<i32>,
+    #[serde(default)]
+    cache_creation: Option<CacheCreationWire>,
+}
+
+#[derive(Deserialize)]
+struct CacheCreationWire {
+    #[serde(default)]
+    ephemeral_1h_input_tokens: Option<i32>,
+}
+
+impl TryFrom<Value> for Usage {
+    type Error = serde_json::Error;
+
+    fn try_from(raw: Value) -> Result<Self, Self::Error> {
+        let wire = UsageWire::deserialize(&raw)?;
+        Ok(Self {
+            cache_creation_input_tokens: wire.cache_creation_input_tokens,
+            cache_read_input_tokens: wire.cache_read_input_tokens,
+            input_tokens: wire.input_tokens,
+            output_tokens: wire.output_tokens,
+            server_tool_use: wire.server_tool_use,
+            cache_creation_input_tokens_1h: wire
+                .cache_creation
+                .and_then(|breakdown| breakdown.ephemeral_1h_input_tokens)
+                .or(wire.cache_creation_input_tokens_1h),
+            raw: Some(Box::new(raw)),
+        })
+    }
 }
 
 impl Usage {
@@ -43,6 +125,7 @@ impl Usage {
             output_tokens,
             server_tool_use: None,
             cache_creation_input_tokens_1h: None,
+            raw: None,
         }
     }
 
@@ -101,6 +184,8 @@ impl Add for Usage {
                 self.cache_creation_input_tokens_1h,
                 rhs.cache_creation_input_tokens_1h,
             ),
+            // A sum is not something the API sent.
+            raw: None,
         }
     }
 }
@@ -237,5 +322,63 @@ mod tests {
         assert_eq!(result.cache_creation_input_tokens, Some(30));
         assert_eq!(result.cache_read_input_tokens, Some(45));
         assert_eq!(result.server_tool_use, Some(ServerToolUsage::new(8)));
+    }
+
+    #[test]
+    fn one_hour_writes_are_read_from_cache_creation_breakdown() {
+        let raw = json!({
+            "input_tokens": 12,
+            "output_tokens": 4,
+            "cache_creation_input_tokens": 1900,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 1900}
+        });
+        let usage: Usage = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(
+            usage,
+            Usage {
+                raw: Some(Box::new(raw)),
+                ..Usage::new(12, 4)
+                    .with_cache_creation_input_tokens(1900)
+                    .with_cache_read_input_tokens(0)
+                    .with_cache_creation_input_tokens_1h(1900)
+            }
+        );
+    }
+
+    #[test]
+    fn null_and_missing_counts_read_as_zero_and_keep_the_raw_object() {
+        let raw = json!({
+            "input_tokens": null,
+            "cache_creation_input_tokens": null,
+            "cache_read_input_tokens": null,
+            "server_tool_use": {"web_search_requests": null, "web_fetch_requests": 2},
+            "service_tier": "standard",
+            "inference_geo": "us"
+        });
+        let usage: Usage = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(
+            usage,
+            Usage {
+                raw: Some(Box::new(raw)),
+                ..Usage::new(0, 0)
+                    .with_server_tool_use(ServerToolUsage::new(0).with_web_fetch_requests(2))
+            }
+        );
+    }
+
+    #[test]
+    fn serializing_keeps_the_typed_shape() {
+        let usage: Usage =
+            serde_json::from_value(json!({"input_tokens": 3, "output_tokens": 1, "extra": 9}))
+                .unwrap();
+        assert_eq!(to_value(&usage).unwrap(), json!({"input_tokens": 3, "output_tokens": 1}));
+    }
+
+    #[test]
+    fn a_sum_has_no_raw_object() {
+        let usage: Usage =
+            serde_json::from_value(json!({"input_tokens": 3, "output_tokens": 1})).unwrap();
+        assert_eq!((usage.clone() + usage).raw, None);
     }
 }

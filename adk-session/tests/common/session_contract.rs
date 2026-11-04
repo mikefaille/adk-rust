@@ -1,7 +1,9 @@
+use adk_core::ErrorCategory;
+use adk_core::identity::MAX_ID_LEN;
 use adk_session::{
     CreateRequest, DeleteRequest, Event, GetRequest, KEY_PREFIX_TEMP, ListRequest, SessionService,
 };
-use chrono::{Duration, Utc};
+use chrono::{Duration, SubsecRound, Utc};
 use serde_json::json;
 use std::collections::HashMap;
 
@@ -14,6 +16,99 @@ pub async fn assert_session_contract(
     assert_session_contract_with_users(service, app_name, other_app_name, "user1", "user2").await;
 }
 
+/// Checks that every method rejects an invalid app name, user ID, or session ID (empty, over
+/// [`MAX_ID_LEN`] bytes, or containing NUL) with `session.invalid_identifier`
+/// (`InvalidInput`).
+///
+/// The contract names only identifiers no call can store, so it runs against a live backend
+/// without leaving data behind, and against an unreachable one: a backend that validates
+/// before its first network call returns `session.invalid_identifier`, one that does not
+/// returns the connection error instead.
+pub async fn assert_identifier_validation_contract(service: &dyn SessionService) {
+    let too_long = "x".repeat(MAX_ID_LEN + 1);
+    let mut accepted = Vec::new();
+    let mut check = |operation: &str, outcome: adk_core::Result<()>| match outcome {
+        Err(error)
+            if error.category == ErrorCategory::InvalidInput
+                && error.code == "session.invalid_identifier" => {}
+        other => accepted.push(format!("{operation}: {other:?}")),
+    };
+
+    let create = |app: &str, user: &str, session: Option<&str>| CreateRequest {
+        app_name: app.to_string(),
+        user_id: user.to_string(),
+        session_id: session.map(str::to_string),
+        state: HashMap::new(),
+    };
+    for (operation, request) in [
+        ("create with an empty app_name", create("", "user", Some("session"))),
+        ("create with a NUL in user_id", create("app", "us\0er", Some("session"))),
+        ("create with an oversized session_id", create("app", "user", Some(too_long.as_str()))),
+        ("create with an empty session_id", create("app", "user", Some(""))),
+        ("create with an empty user_id and no session_id", create("app", "", None)),
+        ("create with an oversized app_name and no session_id", create(&too_long, "user", None)),
+    ] {
+        check(operation, service.create(request).await.map(|_| ()));
+    }
+
+    let get = |app: &str, user: &str, session: &str| GetRequest {
+        app_name: app.to_string(),
+        user_id: user.to_string(),
+        session_id: session.to_string(),
+        num_recent_events: None,
+        after: None,
+    };
+    for (operation, request) in [
+        ("get with an empty app_name", get("", "user", "session")),
+        ("get with a NUL in session_id", get("app", "user", "sess\0ion")),
+    ] {
+        check(operation, service.get(request).await.map(|_| ()));
+    }
+
+    let list = |app: &str, user: &str| ListRequest {
+        app_name: app.to_string(),
+        user_id: user.to_string(),
+        limit: None,
+        offset: None,
+    };
+    for (operation, request) in [
+        ("list with an empty user_id", list("app", "")),
+        ("list with a NUL in app_name", list("a\0pp", "user")),
+    ] {
+        check(operation, service.list(request).await.map(|_| ()));
+    }
+
+    let delete = |app: &str, user: &str, session: &str| DeleteRequest {
+        app_name: app.to_string(),
+        user_id: user.to_string(),
+        session_id: session.to_string(),
+    };
+    for (operation, request) in [
+        ("delete with an empty app_name", delete("", "user", "session")),
+        ("delete with an oversized user_id", delete("app", &too_long, "session")),
+        ("delete with a NUL in session_id", delete("app", "user", "sess\0ion")),
+    ] {
+        check(operation, service.delete(request).await);
+    }
+
+    for (operation, app, user) in [
+        ("delete_all_sessions with an empty app_name", "", "user"),
+        ("delete_all_sessions with a NUL in user_id", "app", "us\0er"),
+    ] {
+        check(operation, service.delete_all_sessions(app, user).await);
+    }
+
+    for (operation, session) in [
+        ("append_event with an empty session_id", ""),
+        ("append_event with a NUL in session_id", "sess\0ion"),
+        ("append_event with an oversized session_id", too_long.as_str()),
+    ] {
+        check(operation, service.append_event(session, Event::new("inv-invalid")).await);
+    }
+
+    assert!(accepted.is_empty(), "invalid identifiers were not rejected:\n{}", accepted.join("\n"));
+}
+
 pub async fn assert_session_contract_with_users(
     service: &dyn SessionService,
     app_name: &str,
@@ -21,6 +116,8 @@ pub async fn assert_session_contract_with_users(
     user_1: &str,
     user_2: &str,
 ) {
+    assert_identifier_validation_contract(service).await;
+
     let missing = service
         .get(GetRequest {
             app_name: app_name.to_string(),
@@ -47,6 +144,7 @@ pub async fn assert_session_contract_with_users(
         .err()
         .expect("an invalid session identity must return an error");
     assert_eq!(invalid.category, adk_core::ErrorCategory::InvalidInput);
+    assert_eq!(invalid.code, "session.invalid_identifier");
 
     let mut initial_state = HashMap::new();
     initial_state.insert("app:locale".to_string(), json!("en-US"));
@@ -86,7 +184,8 @@ pub async fn assert_session_contract_with_users(
     assert_eq!(fetched.state().get("session_key"), Some(json!("seed")));
     assert_eq!(fetched.state().get("temp:create"), None);
 
-    let t1 = Utc::now();
+    // Microseconds: the finest precision every backend stores (PostgreSQL TIMESTAMPTZ).
+    let t1 = Utc::now().trunc_subsecs(6);
     let t2 = t1 + Duration::seconds(1);
 
     let mut event_1 = Event::new("inv-1");
@@ -101,6 +200,8 @@ pub async fn assert_session_contract_with_users(
     event_2.author = "agent".to_string();
     event_2.timestamp = t2;
     event_2.actions.state_delta.insert("result".to_string(), json!("ok-2"));
+    // The runner's screening marker decides whether a saved message is screened again.
+    event_2.actions.input_screened = true;
 
     service.append_event(&session_id, event_2).await.expect("append second event should succeed");
 
@@ -116,6 +217,8 @@ pub async fn assert_session_contract_with_users(
         .expect("get after append should succeed");
 
     assert_eq!(with_events.events().len(), 2);
+    assert!(!with_events.events().at(0).expect("event 0").actions.input_screened);
+    assert!(with_events.events().at(1).expect("event 1").actions.input_screened);
     assert_eq!(with_events.state().get("result"), Some(json!("ok-2")));
     assert_eq!(with_events.state().get("temp:event"), None);
 

@@ -22,7 +22,8 @@
 
 use crate::service::{
     ArtifactService, DeleteRequest, ListRequest, ListResponse, LoadRequest, LoadResponse,
-    SaveRequest, SaveResponse, VersionsRequest, VersionsResponse,
+    SaveRequest, SaveResponse, UserArtifact, VersionsRequest, VersionsResponse, artifact_not_found,
+    check_session_id, invalid_file_name, invalid_identifier, version_exists,
 };
 use adk_core::{AdkError, ErrorComponent, Part, Result};
 use adk_gcp::{GcpErrorCodes, GcpErrorContext, GcpHttpClient};
@@ -38,6 +39,9 @@ use std::time::Duration;
 const DEFAULT_ENDPOINT: &str = "https://storage.googleapis.com";
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// How many versions taken by concurrent saves one save steps past before it gives up.
+const MAX_SAVE_ATTEMPTS: usize = 64;
 
 // Error identity stamped by the shared adk-gcp plumbing. Only the
 // credential-path slots (unauthorized, credentials_unavailable, timeout) and
@@ -63,6 +67,9 @@ fn gcp_error_context() -> GcpErrorContext {
     GcpErrorContext::new(ErrorComponent::Artifact, GCS_ERROR_CODES, "gcs").with_provider("gcs")
 }
 
+/// The blob-name segment `user:` artifacts are stored under instead of a session id.
+const USER_NAMESPACE_SEGMENT: &str = "user";
+
 // GCS object metadata keys shared with adk-python's GcsArtifactService.
 const GCS_DISPLAY_NAME_METADATA_KEY: &str = "adkDisplayName";
 const GCS_IS_TEXT_METADATA_KEY: &str = "adkIsText";
@@ -81,6 +88,12 @@ const GCS_FILE_MIME_TYPE_METADATA_KEY: &str = "adkFileMimeType";
 /// Auto-assigned versions start at `0` and increment by one, matching
 /// adk-python. This differs from [`InMemoryArtifactService`](crate::InMemoryArtifactService),
 /// which starts at `1`.
+///
+/// Every upload carries the `ifGenerationMatch=0` precondition, so GCS creates the
+/// object only when no version of that number exists. A save that loses the race to a
+/// concurrent save moves on to the next version; a save naming an explicit version that
+/// exists fails with [`Conflict`](adk_core::ErrorCategory::Conflict). The session id
+/// `user` names the user-namespace segment and is rejected.
 ///
 /// # `app_name` consistency
 ///
@@ -140,6 +153,9 @@ struct ObjectResource {
     content_type: Option<String>,
     #[serde(default)]
     metadata: Option<HashMap<String, String>>,
+    /// The object's size in bytes, which the JSON API sends as a decimal string.
+    #[serde(default)]
+    size: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -270,11 +286,11 @@ impl GcsArtifactService {
     ) -> Result<String> {
         validate_path_segment(app_name, "app_name")?;
         validate_path_segment(user_id, "user_id")?;
+        validate_session_id(session_id)?;
         validate_file_name(file_name)?;
         if file_has_user_namespace(file_name) {
             return Ok(format!("{app_name}/{user_id}/user/{file_name}"));
         }
-        validate_path_segment(session_id, "session_id")?;
         Ok(format!("{app_name}/{user_id}/{session_id}/{file_name}"))
     }
 
@@ -387,13 +403,16 @@ impl GcsArtifactService {
         Ok(bytes.to_vec())
     }
 
-    async fn upload_object(
+    /// Uploads `blob_name` only if it does not exist yet (`ifGenerationMatch=0`).
+    ///
+    /// Returns `false` when the object already exists.
+    async fn create_object(
         &self,
         blob_name: &str,
         content_type: Option<&str>,
         metadata: &HashMap<String, String>,
         data: &[u8],
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let mut resource = json!({ "name": blob_name });
         if let Some(content_type) = content_type {
             resource["contentType"] = Value::String(content_type.to_string());
@@ -407,7 +426,7 @@ impl GcsArtifactService {
             .apply_auth(
                 self.http_client
                     .post(self.upload_url())
-                    .query(&[("uploadType", "multipart")])
+                    .query(&[("uploadType", "multipart"), ("ifGenerationMatch", "0")])
                     .header(
                         reqwest::header::CONTENT_TYPE,
                         format!("multipart/related; boundary={boundary}"),
@@ -419,11 +438,42 @@ impl GcsArtifactService {
             Self::internal_error(format!("gcs upload request failed: {}", error.without_url()))
         })?;
         let status = response.status();
+        if status == StatusCode::PRECONDITION_FAILED {
+            return Ok(false);
+        }
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
             return Err(Self::http_error(status, "upload object", &body));
         }
-        Ok(())
+        Ok(true)
+    }
+
+    /// Every version object of a user, with its session (`None` for the `user:`
+    /// namespace), artifact name, and version, ordered by session, name, and version.
+    async fn user_objects(
+        &self,
+        app_name: &str,
+        user_id: &str,
+    ) -> Result<Vec<(ObjectResource, Option<String>, String, i64)>> {
+        validate_path_segment(app_name, "app_name")?;
+        validate_path_segment(user_id, "user_id")?;
+        let prefix = format!("{app_name}/{user_id}/");
+        let mut found = Vec::new();
+        for object in self.list_objects(&prefix).await? {
+            // `{scope}/{filename}/{version}`, where the filename may contain '/'.
+            let Some((scope, rest)) =
+                object.name.strip_prefix(prefix.as_str()).and_then(|rest| rest.split_once('/'))
+            else {
+                continue;
+            };
+            let Some((file_name, version)) = rest.rsplit_once('/') else { continue };
+            let Ok(version) = version.parse::<i64>() else { continue };
+            let session_id = (scope != USER_NAMESPACE_SEGMENT).then(|| scope.to_string());
+            let file_name = file_name.to_string();
+            found.push((object, session_id, file_name, version));
+        }
+        found.sort_by(|a, b| (&a.1, &a.2, a.3).cmp(&(&b.1, &b.2, b.3)));
+        Ok(found)
     }
 
     async fn delete_object(&self, blob_name: &str) -> Result<()> {
@@ -447,11 +497,19 @@ fn file_has_user_namespace(file_name: &str) -> bool {
     file_name.starts_with("user:")
 }
 
+fn validate_session_id(session_id: &str) -> Result<()> {
+    validate_path_segment(session_id, "session_id")?;
+    check_session_id(session_id).map_err(|error| error.with_provider("gcs"))
+}
+
 fn validate_path_segment(segment: &str, field: &str) -> Result<()> {
     if segment.is_empty() || segment.contains('/') || segment == "." || segment == ".." {
-        return Err(GcsArtifactService::invalid_input(format!(
-            "invalid {field} '{segment}': must be a non-empty path segment without '/'"
-        )));
+        return Err(invalid_identifier(
+            field,
+            segment,
+            "must be a non-empty path segment without '/' that is not '.' or '..'",
+        )
+        .with_provider("gcs"));
     }
     Ok(())
 }
@@ -467,9 +525,11 @@ fn validate_file_name(file_name: &str) -> Result<()> {
             .split('/')
             .all(|component| !component.is_empty() && component != "." && component != "..");
     if !valid {
-        return Err(GcsArtifactService::invalid_input(format!(
-            "invalid artifact file name '{file_name}': empty components, traversal patterns, and backslashes are not allowed"
-        )));
+        return Err(invalid_file_name(
+            file_name,
+            "empty components, traversal patterns, and backslashes are not allowed",
+        )
+        .with_provider("gcs"));
     }
     Ok(())
 }
@@ -649,7 +709,8 @@ fn reconstruct_part(object: &ObjectResource, data: Option<Vec<u8>>) -> Result<Pa
 impl ArtifactService for GcsArtifactService {
     #[tracing::instrument(skip_all, fields(artifact.file_name = %req.file_name))]
     async fn save(&self, req: SaveRequest) -> Result<SaveResponse> {
-        let version = match req.version {
+        let plan = plan_upload(&req.part)?;
+        let mut version = match req.version {
             Some(version) => version,
             // First auto-assigned version is 0, matching adk-python.
             None => self
@@ -658,13 +719,45 @@ impl ArtifactService for GcsArtifactService {
                 .last()
                 .map_or(0, |latest| latest + 1),
         };
-        let blob_name =
-            Self::blob_name(&req.app_name, &req.user_id, &req.session_id, &req.file_name, version)?;
-        let plan = plan_upload(&req.part)?;
-        self.upload_object(&blob_name, plan.content_type.as_deref(), &plan.metadata, &plan.data)
-            .await?;
-        tracing::debug!(gcs.blob_name = blob_name, artifact.version = version, "artifact saved");
-        Ok(SaveResponse { version })
+        for _ in 0..MAX_SAVE_ATTEMPTS {
+            let blob_name = Self::blob_name(
+                &req.app_name,
+                &req.user_id,
+                &req.session_id,
+                &req.file_name,
+                version,
+            )?;
+            if self
+                .create_object(&blob_name, plan.content_type.as_deref(), &plan.metadata, &plan.data)
+                .await?
+            {
+                tracing::debug!(
+                    gcs.blob_name = blob_name,
+                    artifact.version = version,
+                    "artifact saved"
+                );
+                return Ok(SaveResponse { version });
+            }
+            if req.version.is_some() {
+                return Err(version_exists(&req.file_name, version).with_provider("gcs"));
+            }
+            tracing::debug!(
+                gcs.blob_name = blob_name,
+                artifact.version = version,
+                "version taken by a concurrent save; trying the next"
+            );
+            version += 1;
+        }
+        Err(AdkError::new(
+            ErrorComponent::Artifact,
+            adk_core::ErrorCategory::Conflict,
+            "artifact.save_contended",
+            format!(
+                "artifact '{}' gained {MAX_SAVE_ATTEMPTS} versions while this save ran; retry the save",
+                req.file_name
+            ),
+        )
+        .with_provider("gcs"))
     }
 
     #[tracing::instrument(skip_all, fields(artifact.file_name = %req.file_name))]
@@ -675,14 +768,14 @@ impl ArtifactService for GcsArtifactService {
                 .list_versions(&req.app_name, &req.user_id, &req.session_id, &req.file_name)
                 .await?
                 .last()
-                .ok_or_else(|| Self::not_found_error("artifact not found"))?,
+                .ok_or_else(|| artifact_not_found(&req.file_name, None).with_provider("gcs"))?,
         };
         let blob_name =
             Self::blob_name(&req.app_name, &req.user_id, &req.session_id, &req.file_name, version)?;
         let object = self
             .get_object(&blob_name)
             .await?
-            .ok_or_else(|| Self::not_found_error("artifact not found"))?;
+            .ok_or_else(|| artifact_not_found(&req.file_name, req.version).with_provider("gcs"))?;
         let is_uri_reference = object.metadata.as_ref().is_some_and(|metadata| {
             metadata.contains_key(GCS_FILE_URI_METADATA_KEY) || metadata.contains_key("file_uri")
         });
@@ -714,10 +807,39 @@ impl ArtifactService for GcsArtifactService {
     }
 
     #[tracing::instrument(skip_all)]
+    async fn list_user(&self, app_name: &str, user_id: &str) -> Result<Vec<UserArtifact>> {
+        let mut artifacts = Vec::new();
+        for (object, session_id, file_name, version) in self.user_objects(app_name, user_id).await?
+        {
+            let metadata = object.metadata.unwrap_or_default();
+            artifacts.push(UserArtifact {
+                session_id,
+                file_name,
+                version,
+                mime_type: metadata
+                    .get(GCS_FILE_MIME_TYPE_METADATA_KEY)
+                    .cloned()
+                    .or(object.content_type),
+                size: object.size.and_then(|size| size.parse().ok()).unwrap_or(0),
+            });
+        }
+        Ok(artifacts)
+    }
+
+    #[tracing::instrument(skip_all)]
+    async fn delete_user(&self, app_name: &str, user_id: &str) -> Result<u64> {
+        let objects = self.user_objects(app_name, user_id).await?;
+        for (object, ..) in &objects {
+            self.delete_object(&object.name).await?;
+        }
+        Ok(objects.len() as u64)
+    }
+
+    #[tracing::instrument(skip_all)]
     async fn list(&self, req: ListRequest) -> Result<ListResponse> {
         validate_path_segment(&req.app_name, "app_name")?;
         validate_path_segment(&req.user_id, "user_id")?;
-        validate_path_segment(&req.session_id, "session_id")?;
+        validate_session_id(&req.session_id)?;
         let mut file_names = BTreeSet::new();
         let session_prefix = format!("{}/{}/{}/", req.app_name, req.user_id, req.session_id);
         let user_prefix = format!("{}/{}/user/", req.app_name, req.user_id);
@@ -742,7 +864,7 @@ impl ArtifactService for GcsArtifactService {
             .list_versions(&req.app_name, &req.user_id, &req.session_id, &req.file_name)
             .await?;
         if versions.is_empty() {
-            return Err(Self::not_found_error("artifact not found"));
+            return Err(artifact_not_found(&req.file_name, None).with_provider("gcs"));
         }
         Ok(VersionsResponse { versions })
     }

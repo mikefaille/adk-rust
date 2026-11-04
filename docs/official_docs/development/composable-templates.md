@@ -38,7 +38,7 @@ documentation and automation.
 
 ## Built-in templates
 
-The built-in registry currently contains 13 templates.
+The built-in registry contains 13 composable templates.
 
 | Template | What it creates | Choose it when |
 |---|---|---|
@@ -51,10 +51,13 @@ The built-in registry currently contains 13 templates.
 | `parallel` | Concurrent specialists with aggregated results | Independent work can run at the same time |
 | `loop` | Repeated execution until a condition is met | A reviewer, repair, or refinement cycle needs a bounded loop |
 | `conditional` | Decision-based routing between agents | Different requests need different specialists or paths |
-| `graph` | A branching workflow with checkpoints | Work must resume, branch, join, or survive process failure |
-| `realtime` | Bidirectional audio and video handling | The product needs a live voice or multimodal conversation |
+| `graph` | A `GraphAgent` with an agent node and a checkpointer that carries the conversation between turns | Work must resume, branch, join, or survive process failure |
+| `realtime` | A Gemini Live session: typed text in, a spoken answer and its transcript out (`--provider gemini` only) | The product needs a live voice conversation |
 | `custom` | A manual implementation of the `Agent` trait | The execution contract cannot be expressed by a built-in agent |
 | `agent-engine` | A Gemini Enterprise Agent Engine BYOC container with `Dockerfile` and `deploy/terraform/` | The agent deploys to Agent Runtime as a prebuilt container |
+
+`cargo adk templates` also lists `managed-agents`, an Anthropic Managed Agents session with SSE
+streaming. A separate generator creates it, and `--addon` flags do not apply to it.
 
 Choose the execution shape first. Add sessions, MCP, telemetry, or other
 product capabilities afterward instead of using them to decide the workflow.
@@ -151,6 +154,15 @@ provider = "openai"
 features = ["minimal", "tools"]
 imports = ["use std::sync::Arc;"]
 ```
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `name` | required | The `--template` name |
+| `description` | `Custom agent template` | The template's description |
+| `provider` | `gemini` | Default `--provider` |
+| `features` | `["minimal"]` | `adk-rust` features |
+| `imports` | `["use std::sync::Arc;"]` | `use` lines added to `src/main.rs` |
+| `agent_construction` | empty | Rust code that builds the agent; empty generates the basic LLM agent |
 
 ## Verify the generated project
 

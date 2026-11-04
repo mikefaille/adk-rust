@@ -10,19 +10,21 @@
 #![cfg_attr(feature = "mcp-sampling", allow(deprecated))]
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use futures::FutureExt;
 // `ClientInfo` is deprecated upstream (SEP-2577, use `ClientConfig`); the
 // migration is deferred, so the import stays allowed like the bridge below.
 #[allow(deprecated)]
 use rmcp::model::{
-    ClientInfo, ElicitRequestParams, ElicitResult, ElicitationAction, ElicitationCapability,
-    ElicitationSchema, FormElicitationCapability, InputRequest, InputRequests, InputResponses,
-    UrlElicitationCapability,
+    ElicitRequest, ElicitRequestParams, ElicitResult, ElicitationAction, ElicitationCapability,
+    ElicitationSchema, FormElicitationCapability, InitializeRequestParams, InputRequest,
+    InputRequests, InputResponses, UrlElicitationCapability,
 };
 use rmcp::service::{NotificationContext, RequestContext, RoleClient};
 use serde_json::Value;
 
+use super::parked::{ParkedCallKind, ParkedMcpCall};
 use super::resource_notifications::{
     ResourceNotificationHandler, dispatch_resource_list_changed, dispatch_resource_updated,
 };
@@ -121,6 +123,211 @@ impl ElicitationHandler for AutoDeclineElicitationHandler {
     }
 }
 
+/// The run and tool call in flight when a server asked (spec 3.1 §10 T1).
+///
+/// A toolset registers one per in-flight tool call, and the connection's
+/// [`AdkClientHandler`] answers an elicitation inside it, so a handler reads the scope
+/// with [`ElicitationScope::current`] and can show the request as a prompt of that
+/// session or park it as an approval of that run.
+///
+/// # Example
+///
+/// ```rust
+/// use adk_tool::mcp::ElicitationScope;
+///
+/// let scope = ElicitationScope::new("app", "alice", "s1");
+/// assert_eq!(scope.session_id, "s1");
+/// assert!(ElicitationScope::current().is_none());
+/// ```
+#[derive(Clone, Debug, Default)]
+pub struct ElicitationScope {
+    /// The application of the session.
+    pub app_name: String,
+    /// The user of the session.
+    pub user_id: String,
+    /// The session the tool call belongs to.
+    pub session_id: String,
+    /// The invocation of the tool call.
+    pub invocation_id: String,
+    /// The agent that made the tool call.
+    pub agent_name: String,
+    /// The function call id, when the call has one.
+    pub function_call_id: Option<String>,
+    /// The durable run id, when the run is durable.
+    pub run_id: Option<String>,
+    /// The acting agent and the subject it acts for.
+    pub acting: Option<adk_core::ActingContext>,
+    /// The run's audit trail, when it records one.
+    pub audit: Option<adk_core::audit_log::AuditTrail>,
+}
+
+tokio::task_local! {
+    static CURRENT_ELICITATION_SCOPE: ElicitationScope;
+}
+
+impl ElicitationScope {
+    /// A scope of `session_id` of `user_id` in `app_name`, with no call details.
+    pub fn new(
+        app_name: impl Into<String>,
+        user_id: impl Into<String>,
+        session_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            app_name: app_name.into(),
+            user_id: user_id.into(),
+            session_id: session_id.into(),
+            ..Self::default()
+        }
+    }
+
+    /// The scope of the tool call `ctx` executes.
+    pub fn for_call(ctx: &dyn adk_core::ToolContext) -> Self {
+        let call_id = ctx.function_call_id();
+        Self {
+            app_name: ctx.app_name().to_string(),
+            user_id: ctx.user_id().to_string(),
+            session_id: ctx.session_id().to_string(),
+            invocation_id: ctx.invocation_id().to_string(),
+            agent_name: ctx.agent_name().to_string(),
+            function_call_id: (!call_id.is_empty()).then(|| call_id.to_string()),
+            run_id: ctx.run_config().and_then(|config| config.durable_run_id.clone()),
+            acting: Some(ctx.acting_context()),
+            audit: ctx.run_config().and_then(|config| config.audit.clone()),
+        }
+    }
+
+    /// Whether both scopes name the same session and call.
+    pub fn same_as(&self, other: &Self) -> bool {
+        self.app_name == other.app_name
+            && self.user_id == other.user_id
+            && self.session_id == other.session_id
+            && self.invocation_id == other.invocation_id
+            && self.function_call_id == other.function_call_id
+    }
+
+    /// The scope the elicitation being answered belongs to, if any.
+    pub fn current() -> Option<Self> {
+        CURRENT_ELICITATION_SCOPE.try_with(Clone::clone).ok()
+    }
+
+    /// Runs `future` with this scope as [`current`](Self::current).
+    pub async fn within<F: Future>(self, future: F) -> F::Output {
+        CURRENT_ELICITATION_SCOPE.scope(self, future).await
+    }
+}
+
+/// The scopes a connection's elicitations resolve against, mirroring `SamplingScopes`
+/// (`mcp-sampling`; spec 3.1 §10 T1).
+///
+/// A toolset [`enter`](Self::enter)s the scope of each tool call it makes; a request that
+/// arrives while none is in flight resolves to the [fallback](Self::set_fallback).
+///
+/// # Example
+///
+/// ```rust
+/// use std::sync::Arc;
+/// use adk_tool::mcp::{ElicitationScope, ElicitationScopes};
+///
+/// let scopes = Arc::new(ElicitationScopes::default());
+/// assert!(scopes.resolve().is_none());
+/// let guard = scopes.enter(ElicitationScope::new("app", "alice", "s1"));
+/// assert_eq!(scopes.resolve().map(|scope| scope.session_id), Some("s1".to_string()));
+/// drop(guard);
+/// assert!(scopes.resolve().is_none());
+/// ```
+#[derive(Debug, Default)]
+pub struct ElicitationScopes {
+    active: std::sync::Mutex<Vec<(u64, ElicitationScope)>>,
+    fallback: std::sync::Mutex<Option<ElicitationScope>>,
+    next_id: AtomicU64,
+    /// Calls awaiting their `tools/call` response, which a legacy `elicitation/create`
+    /// belongs to (spec 3.2 §10 T2).
+    calls: std::sync::Mutex<Vec<(u64, ParkedMcpCall)>>,
+}
+
+impl ElicitationScopes {
+    /// Sets the scope used when no registered call is in flight.
+    pub fn set_fallback(&self, scope: Option<ElicitationScope>) {
+        *self.fallback.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = scope;
+    }
+
+    /// The scope used when no registered call is in flight.
+    pub fn fallback(&self) -> Option<ElicitationScope> {
+        self.fallback.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
+    }
+
+    /// Registers `scope` until the returned guard is dropped.
+    pub fn enter(self: &Arc<Self>, scope: ElicitationScope) -> ElicitationScopeGuard {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        self.active.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push((id, scope));
+        ElicitationScopeGuard { scopes: Arc::clone(self), id }
+    }
+
+    /// The scope an elicitation arriving now belongs to.
+    pub fn resolve(&self) -> Option<ElicitationScope> {
+        let active = self.active.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some((_, latest)) = active.last() {
+            if active.iter().any(|(_, scope)| !scope.same_as(latest)) {
+                tracing::debug!(
+                    in_flight = active.len(),
+                    "tool calls from several runs are in flight; the elicitation is attributed to the latest"
+                );
+            }
+            return Some(latest.clone());
+        }
+        drop(active);
+        self.fallback()
+    }
+}
+
+impl ElicitationScopes {
+    /// Registers `call` as awaiting its response until the returned guard is dropped.
+    pub(crate) fn enter_call(self: &Arc<Self>, call: ParkedMcpCall) -> InFlightCall {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        self.calls.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push((id, call));
+        InFlightCall { scopes: Arc::clone(self), id }
+    }
+
+    /// The call a legacy elicitation arriving now belongs to: the latest one registered.
+    fn resolve_call(&self) -> Option<ParkedMcpCall> {
+        let calls = self.calls.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        calls.last().map(|(_, call)| call.clone())
+    }
+}
+
+/// Unregisters a call registered with [`ElicitationScopes::enter_call`] when dropped.
+pub(crate) struct InFlightCall {
+    scopes: Arc<ElicitationScopes>,
+    id: u64,
+}
+
+impl Drop for InFlightCall {
+    fn drop(&mut self) {
+        self.scopes
+            .calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retain(|(id, _)| *id != self.id);
+    }
+}
+
+/// Unregisters an [`ElicitationScope`] when dropped.
+#[derive(Debug)]
+pub struct ElicitationScopeGuard {
+    scopes: Arc<ElicitationScopes>,
+    id: u64,
+}
+
+impl Drop for ElicitationScopeGuard {
+    fn drop(&mut self) {
+        self.scopes
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retain(|(id, _)| *id != self.id);
+    }
+}
+
 /// Internal bridge between ADK's [`ElicitationHandler`] and rmcp's `ClientHandler`.
 ///
 /// Wraps an `Arc<dyn ElicitationHandler>` and implements rmcp's `ClientHandler` trait,
@@ -133,8 +340,19 @@ pub struct AdkClientHandler {
     handler: Arc<dyn ElicitationHandler>,
     resource_notification_handler: Option<Arc<dyn ResourceNotificationHandler>>,
     tasks: bool,
+    /// Declares the MCP Apps extension (spec 3.3 §6.1 `genui-apps`).
+    #[cfg(feature = "mcp-apps")]
+    apps: bool,
+    /// `notifications/tools/list_changed` received on this connection; a
+    /// toolset compares it against its cached `tools/list` result.
+    tool_list_changes: Arc<AtomicU64>,
+    /// Scopes elicitations resolve against; a toolset swaps in its own on connect.
+    elicitation_scopes: Arc<std::sync::RwLock<Arc<ElicitationScopes>>>,
     #[cfg(feature = "mcp-sampling")]
     sampling_handler: Option<Arc<dyn crate::sampling::SamplingHandler>>,
+    /// Scopes sampling requests count against; a toolset swaps in its own on connect.
+    #[cfg(feature = "mcp-sampling")]
+    sampling_scopes: Arc<std::sync::RwLock<Arc<crate::sampling::SamplingScopes>>>,
 }
 
 impl AdkClientHandler {
@@ -144,9 +362,46 @@ impl AdkClientHandler {
             handler,
             resource_notification_handler: None,
             tasks: false,
+            #[cfg(feature = "mcp-apps")]
+            apps: false,
+            tool_list_changes: Arc::new(AtomicU64::new(0)),
+            elicitation_scopes: Arc::default(),
             #[cfg(feature = "mcp-sampling")]
             sampling_handler: None,
+            #[cfg(feature = "mcp-sampling")]
+            sampling_scopes: Arc::default(),
         }
+    }
+
+    /// Attributes elicitations that arrive outside any run's tool call to `scope`.
+    ///
+    /// Requests that arrive while a run's [`McpToolset`](crate::McpToolset) tool call is
+    /// in flight belong to that call instead (spec 3.1 §10 T1).
+    pub fn with_elicitation_scope(self, scope: ElicitationScope) -> Self {
+        self.elicitation_scopes().set_fallback(Some(scope));
+        self
+    }
+
+    pub(crate) fn elicitation_scopes(&self) -> Arc<ElicitationScopes> {
+        Arc::clone(&self.elicitation_scopes.read().unwrap_or_else(|poisoned| poisoned.into_inner()))
+    }
+
+    /// Makes this connection's elicitations resolve against `scopes`, keeping this
+    /// handler's fallback scope when `scopes` has none.
+    pub(crate) fn share_elicitation_scopes(&self, scopes: Arc<ElicitationScopes>) {
+        let mut current =
+            self.elicitation_scopes.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if Arc::ptr_eq(&current, &scopes) {
+            return;
+        }
+        if scopes.fallback().is_none() {
+            scopes.set_fallback(current.fallback());
+        }
+        *current = scopes;
+    }
+
+    pub(crate) fn tool_list_changes(&self) -> u64 {
+        self.tool_list_changes.load(Ordering::Acquire)
     }
 
     /// Declare the SEP-2663 tasks extension during the handshake.
@@ -160,38 +415,83 @@ impl AdkClientHandler {
         self
     }
 
+    /// Declares the MCP Apps extension, [`MCP_APPS_EXTENSION_ID`](super::MCP_APPS_EXTENSION_ID)
+    /// with the MIME type [`MCP_APP_MIME_TYPE`](super::MCP_APP_MIME_TYPE), during the handshake
+    /// (spec 3.3 §6.1 `genui-apps`), so a server may give its tools apps a host shows.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_tool::mcp::{AdkClientHandler, AutoDeclineElicitationHandler, MCP_APPS_EXTENSION_ID};
+    /// use rmcp::handler::client::ClientHandler;
+    /// use std::sync::Arc;
+    ///
+    /// let handler = AdkClientHandler::new(Arc::new(AutoDeclineElicitationHandler)).with_apps();
+    /// let extensions = handler.get_info().capabilities.extensions.unwrap();
+    /// assert_eq!(
+    ///     extensions[MCP_APPS_EXTENSION_ID]["mimeTypes"],
+    ///     serde_json::json!(["text/html;profile=mcp-app"])
+    /// );
+    /// ```
+    #[cfg(feature = "mcp-apps")]
+    pub fn with_apps(mut self) -> Self {
+        self.apps = true;
+        self
+    }
+
     async fn handle_elicitation(&self, request: ElicitRequestParams) -> ElicitResult {
-        let result = match &request {
-            ElicitRequestParams::FormElicitationParams {
-                message, requested_schema, meta, ..
-            } => {
-                let metadata_value = meta.as_ref().and_then(|m| serde_json::to_value(m).ok());
-                std::panic::AssertUnwindSafe(self.handler.handle_form_elicitation(
+        // The handler answers inside the scope of the tool call in flight, so it knows
+        // which run and session asked (spec 3.1 §10 T1).
+        let scope = self.elicitation_scopes().resolve();
+        let handled = async {
+            match &request {
+                ElicitRequestParams::FormElicitationParams {
                     message,
                     requested_schema,
-                    metadata_value.as_ref(),
-                ))
-                .catch_unwind()
-                .await
-            }
-            ElicitRequestParams::UrlElicitationParams {
-                message,
-                url,
-                elicitation_id,
-                meta,
-                ..
-            } => {
-                let metadata_value = meta.as_ref().and_then(|m| serde_json::to_value(m).ok());
-                std::panic::AssertUnwindSafe(self.handler.handle_url_elicitation(
+                    meta,
+                    ..
+                } => {
+                    let metadata_value = meta.as_ref().and_then(|m| serde_json::to_value(m).ok());
+                    Some(
+                        self.handler
+                            .handle_form_elicitation(
+                                message,
+                                requested_schema,
+                                metadata_value.as_ref(),
+                            )
+                            .await,
+                    )
+                }
+                ElicitRequestParams::UrlElicitationParams {
                     message,
                     url,
                     elicitation_id,
-                    metadata_value.as_ref(),
-                ))
-                .catch_unwind()
-                .await
+                    meta,
+                    ..
+                } => {
+                    let metadata_value = meta.as_ref().and_then(|m| serde_json::to_value(m).ok());
+                    Some(
+                        self.handler
+                            .handle_url_elicitation(
+                                message,
+                                url,
+                                elicitation_id,
+                                metadata_value.as_ref(),
+                            )
+                            .await,
+                    )
+                }
+                _ => None,
             }
-            _ => return ElicitResult::new(ElicitationAction::Decline),
+        };
+        let handled = match scope {
+            Some(scope) => futures::future::Either::Left(scope.within(handled)),
+            None => futures::future::Either::Right(handled),
+        };
+        let result = match std::panic::AssertUnwindSafe(handled).catch_unwind().await {
+            Ok(Some(result)) => Ok(result),
+            Ok(None) => return ElicitResult::new(ElicitationAction::Decline),
+            Err(panic) => Err(panic),
         };
 
         match result {
@@ -255,14 +555,45 @@ impl AdkClientHandler {
         self.sampling_handler = Some(handler);
         self
     }
+
+    /// Meters sampling requests that arrive outside any run's tool call against `scope`.
+    ///
+    /// Requests that arrive while a run's [`McpToolset`](crate::McpToolset) tool call is
+    /// in flight count against that run instead. See
+    /// [sampling metering](crate::sampling#metering).
+    #[cfg(feature = "mcp-sampling")]
+    pub fn with_sampling_scope(self, scope: adk_core::ModelCallScope) -> Self {
+        self.sampling_scopes().set_fallback(Some(scope));
+        self
+    }
+
+    #[cfg(feature = "mcp-sampling")]
+    pub(crate) fn sampling_scopes(&self) -> Arc<crate::sampling::SamplingScopes> {
+        Arc::clone(&self.sampling_scopes.read().unwrap_or_else(|poisoned| poisoned.into_inner()))
+    }
+
+    /// Makes this connection's sampling requests resolve against `scopes`, keeping this
+    /// handler's fallback scope when `scopes` has none.
+    #[cfg(feature = "mcp-sampling")]
+    pub(crate) fn share_sampling_scopes(&self, scopes: Arc<crate::sampling::SamplingScopes>) {
+        let mut current =
+            self.sampling_scopes.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if Arc::ptr_eq(&current, &scopes) {
+            return;
+        }
+        if scopes.fallback().is_none() {
+            scopes.set_fallback(current.fallback());
+        }
+        *current = scopes;
+    }
 }
 
 // The trait still speaks the deprecated `ClientInfo`; allowed until the
 // deferred `ClientConfig` migration, per the import above.
 #[allow(deprecated)]
 impl rmcp::handler::client::ClientHandler for AdkClientHandler {
-    fn get_info(&self) -> ClientInfo {
-        let mut info = ClientInfo::default();
+    fn get_info(&self) -> InitializeRequestParams {
+        let mut info = InitializeRequestParams::default();
         let elicitation = ElicitationCapability::new()
             .with_form(FormElicitationCapability::new())
             .with_url(UrlElicitationCapability::new());
@@ -295,6 +626,15 @@ impl rmcp::handler::client::ClientHandler for AdkClientHandler {
                 .extensions
                 .get_or_insert_with(rmcp::model::ExtensionCapabilities::new)
                 .insert(rmcp::model::TASKS_EXTENSION_ID.to_string(), Default::default());
+        }
+        #[cfg(feature = "mcp-apps")]
+        if self.apps {
+            let mut apps = rmcp::model::JsonObject::new();
+            apps.insert("mimeTypes".to_string(), serde_json::json!([super::MCP_APP_MIME_TYPE]));
+            info.capabilities
+                .extensions
+                .get_or_insert_with(rmcp::model::ExtensionCapabilities::new)
+                .insert(super::MCP_APPS_EXTENSION_ID.to_string(), apps);
         }
 
         info
@@ -352,10 +692,18 @@ impl rmcp::handler::client::ClientHandler for AdkClientHandler {
             temperature: params.temperature.map(|t| t as f64),
         };
 
-        match std::panic::AssertUnwindSafe(sampling_handler.handle_create_message(request))
-            .catch_unwind()
-            .await
-        {
+        // The request counts against the run whose tool call is in flight, if any, and the
+        // handler learns that call's scope as an elicitation handler does (spec 3.1 §10 T1).
+        let handled = sampling_handler.handle_create_message(request);
+        let handled = match self.sampling_scopes().resolve() {
+            Some(scope) => futures::future::Either::Left(scope.within(handled)),
+            None => futures::future::Either::Right(handled),
+        };
+        let handled = match self.elicitation_scopes().resolve() {
+            Some(scope) => futures::future::Either::Left(scope.within(handled)),
+            None => futures::future::Either::Right(handled),
+        };
+        match std::panic::AssertUnwindSafe(handled).catch_unwind().await {
             Ok(Ok(response)) => {
                 // Convert our SamplingResponse → rmcp CreateMessageResult
                 let text = match &response.content {
@@ -367,7 +715,9 @@ impl rmcp::handler::client::ClientHandler for AdkClientHandler {
                     .with_stop_reason(response.stop_reason))
             }
             Ok(Err(e)) => {
-                tracing::warn!(error = %e, "sampling handler returned error");
+                // A model error can echo the sampled prompt, so only its content-free part
+                // is logged.
+                tracing::warn!(error = %e.diagnostics(), "sampling handler returned error");
                 Err(rmcp::ErrorData::new(
                     rmcp::model::ErrorCode::INTERNAL_ERROR,
                     format!("sampling handler error: {e}"),
@@ -388,9 +738,28 @@ impl rmcp::handler::client::ClientHandler for AdkClientHandler {
     async fn create_elicitation(
         &self,
         request: ElicitRequestParams,
-        _context: RequestContext<RoleClient>,
+        context: RequestContext<RoleClient>,
     ) -> Result<ElicitResult, rmcp::ErrorData> {
-        Ok(self.handle_elicitation(request).await)
+        // A server before 2026-07-28 asks while one of the toolset's calls awaits its
+        // response; the handler sees that call's parked form (spec 3.2 §10 T2).
+        let legacy = ParkedMcpCall::current()
+            .is_none()
+            .then(|| self.elicitation_scopes().resolve_call())
+            .flatten()
+            .map(|call| {
+                let rounds = call.input_rounds;
+                let question = InputRequest::Elicitation(ElicitRequest::new(request.clone()));
+                call.waiting(
+                    ParkedCallKind::Legacy,
+                    None,
+                    [(context.id.to_string(), question)].into(),
+                    rounds,
+                )
+            });
+        Ok(match legacy {
+            Some(call) => call.within(self.handle_elicitation(request)).await,
+            None => self.handle_elicitation(request).await,
+        })
     }
 
     async fn on_resource_updated(
@@ -403,6 +772,10 @@ impl rmcp::handler::client::ClientHandler for AdkClientHandler {
 
     async fn on_resource_list_changed(&self, _context: NotificationContext<RoleClient>) {
         dispatch_resource_list_changed(&self.resource_notification_handler).await;
+    }
+
+    async fn on_tool_list_changed(&self, _context: NotificationContext<RoleClient>) {
+        self.tool_list_changes.fetch_add(1, Ordering::AcqRel);
     }
 }
 

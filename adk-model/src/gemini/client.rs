@@ -114,10 +114,72 @@ pub struct GeminiModel {
     /// Faithful-to-API options for the Interactions transport.
     #[cfg(feature = "gemini-interactions")]
     interaction_options: InteractionOptions,
+    /// Server-side RAG grounding declaration attached to every request.
+    /// Vertex AI backend only; see [`GeminiModel::with_vertex_rag_store`].
+    #[cfg(feature = "gemini-vertex")]
+    vertex_rag_store: Option<adk_gemini::VertexRagStore>,
+    /// Whether the wrapped client targets the Vertex AI backend (as opposed
+    /// to AI Studio). Set by the `new_google_cloud*` constructors.
+    #[cfg(feature = "gemini-vertex")]
+    vertex_backend: bool,
 }
 
-/// Convert a Gemini client error to a structured `AdkError` with proper category and retry hints.
-fn gemini_error_to_adk(e: &adk_gemini::ClientError) -> adk_core::AdkError {
+/// Built-in tool uses observed across the responses of one Gemini call.
+///
+/// Search is counted per distinct `webSearchQueries` entry, Maps once per grounded
+/// response and code execution per `executableCode` part.
+#[derive(Debug, Default)]
+struct GeminiBuiltinToolUses {
+    search_queries: std::collections::BTreeSet<String>,
+    maps_grounded: bool,
+    code_executions: u32,
+}
+
+impl GeminiBuiltinToolUses {
+    fn observe(&mut self, response: &adk_gemini::GenerationResponse) {
+        let Some(candidate) = response.candidates.first() else {
+            return;
+        };
+        if let Some(grounding) = &candidate.grounding_metadata {
+            self.search_queries.extend(grounding.web_search_queries.iter().flatten().cloned());
+            self.maps_grounded |=
+                grounding.grounding_chunks.iter().flatten().any(|chunk| chunk.maps.is_some());
+        }
+        let executions = candidate
+            .content
+            .parts
+            .iter()
+            .flatten()
+            .filter(|part| matches!(part, adk_gemini::Part::ExecutableCode { .. }))
+            .count();
+        self.code_executions =
+            self.code_executions.saturating_add(u32::try_from(executions).unwrap_or(u32::MAX));
+    }
+
+    fn uses(&self) -> Vec<adk_core::BuiltinToolUse> {
+        let searches = u32::try_from(self.search_queries.len()).unwrap_or(u32::MAX);
+        [
+            ("code_execution", self.code_executions),
+            ("google_maps", u32::from(self.maps_grounded)),
+            ("google_search", searches),
+        ]
+        .into_iter()
+        .filter(|(_, count)| *count > 0)
+        .map(|(kind, count)| adk_core::BuiltinToolUse::new(kind, count))
+        .collect()
+    }
+}
+
+/// Converts a Gemini client error into an [`adk_core::AdkError`] for both the AI Studio
+/// and Vertex AI backends.
+///
+/// The category comes from the HTTP status the transport reported, or, without one,
+/// from the RPC status code or the typed transport failure; error text never decides
+/// it. 500, 502, 503 and other 5xx statuses are `Unavailable` and 504 is `Timeout`, so
+/// all are retried; 403 is `Forbidden`. The provider's own code is kept in
+/// `details.metadata["provider_error_code"]`: the first `ErrorInfo.reason`, then the
+/// error object's string `code`, then its `status`.
+pub(crate) fn gemini_error_to_adk(e: &adk_gemini::ClientError) -> adk_core::AdkError {
     fn format_error_chain(e: &dyn std::error::Error) -> String {
         let mut msg = e.to_string();
         let mut source = e.source();
@@ -129,42 +191,191 @@ fn gemini_error_to_adk(e: &adk_gemini::ClientError) -> adk_core::AdkError {
         msg
     }
 
+    // A response body can echo the request, so the message quotes a bounded excerpt.
     let message = format_error_chain(e);
+    let message = adk_core::upstream_excerpt(&message);
 
-    // Extract status code from BadResponse variant via Display output
-    // BadResponse format: "bad response from server; code {code}; description: ..."
-    let (category, code, status_code) = if message.contains("code 429")
-        || message.contains("RESOURCE_EXHAUSTED")
-        || message.contains("rate limit")
-    {
-        (ErrorCategory::RateLimited, "model.gemini.rate_limited", Some(429u16))
-    } else if message.contains("code 503") || message.contains("UNAVAILABLE") {
-        (ErrorCategory::Unavailable, "model.gemini.unavailable", Some(503))
-    } else if message.contains("code 529") || message.contains("OVERLOADED") {
-        (ErrorCategory::Unavailable, "model.gemini.overloaded", Some(529))
-    } else if message.contains("code 408")
-        || message.contains("DEADLINE_EXCEEDED")
-        || message.contains("TIMEOUT")
-    {
-        (ErrorCategory::Timeout, "model.gemini.timeout", Some(408))
-    } else if message.contains("code 401") || message.contains("Invalid API key") {
-        (ErrorCategory::Unauthorized, "model.gemini.unauthorized", Some(401))
-    } else if message.contains("code 400") {
-        (ErrorCategory::InvalidInput, "model.gemini.bad_request", Some(400))
-    } else if message.contains("code 404") {
-        (ErrorCategory::NotFound, "model.gemini.not_found", Some(404))
-    } else if message.contains("invalid generation config") {
-        (ErrorCategory::InvalidInput, "model.gemini.invalid_config", None)
-    } else {
-        (ErrorCategory::Internal, "model.gemini.internal", None)
+    // Response text can mention a different status; only the transport may
+    // establish an upstream HTTP status.
+    let status_code = match e {
+        adk_gemini::ClientError::BadResponse { code, .. } => Some(*code),
+        #[cfg(feature = "gemini-vertex")]
+        adk_gemini::ClientError::GoogleCloudRequest { source } => source.http_status_code(),
+        _ => None,
+    };
+    // An error object inside a successful response reports its own status; the
+    // transport status stays unset.
+    let reported_status = match e {
+        adk_gemini::ClientError::ErrorInResponse { code, .. } => *code,
+        _ => None,
+    };
+    let (category, code) = match status_code.or(reported_status) {
+        Some(401) => (ErrorCategory::Unauthorized, "model.gemini.unauthorized"),
+        Some(403) => (ErrorCategory::Forbidden, "model.gemini.forbidden"),
+        Some(404) => (ErrorCategory::NotFound, "model.gemini.not_found"),
+        Some(408 | 504) => (ErrorCategory::Timeout, "model.gemini.timeout"),
+        Some(429) => (ErrorCategory::RateLimited, "model.gemini.rate_limited"),
+        Some(529) => (ErrorCategory::Unavailable, "model.gemini.overloaded"),
+        Some(400..=499) => (ErrorCategory::InvalidInput, "model.gemini.bad_request"),
+        Some(500..=599) => (ErrorCategory::Unavailable, "model.gemini.unavailable"),
+        _ => error_without_status(e),
     };
 
     let mut err = adk_core::AdkError::new(ErrorComponent::Model, category, code, message)
         .with_provider("gemini");
-    if let Some(sc) = status_code {
-        err = err.with_upstream_status(sc);
+    if let Some(status_code) = status_code {
+        err = err.with_upstream_status(status_code);
     }
-    err
+    // One rule for every backend: the first `ErrorInfo.reason`, then the error
+    // object's string `code`, then its `status`.
+    let provider_code = match e {
+        adk_gemini::ClientError::BadResponse { description: Some(body), .. }
+        | adk_gemini::ClientError::ErrorInResponse { description: body, .. } => {
+            crate::error_metadata::code_from_body(body)
+        }
+        #[cfg(feature = "gemini-vertex")]
+        adk_gemini::ClientError::GoogleCloudRequest { source } => {
+            let status = source.status();
+            let reason = status.into_iter().flat_map(|status| &status.details).find_map(|detail| {
+                let detail = serde_json::to_value(detail).ok()?;
+                if !detail["@type"].as_str().is_some_and(crate::error_metadata::is_error_info) {
+                    return None;
+                }
+                detail["reason"].as_str().filter(|reason| !reason.is_empty()).map(str::to_owned)
+            });
+            reason
+                .or_else(|| {
+                    let body = std::str::from_utf8(source.http_payload()?).ok()?;
+                    crate::error_metadata::code_from_body(body)
+                })
+                .or_else(|| {
+                    status
+                        .map(|status| status.code.name())
+                        .filter(|name| *name != "OK")
+                        .map(str::to_owned)
+                })
+        }
+        _ => None,
+    };
+    let err = crate::error_metadata::with_code(err, provider_code.as_deref());
+    let header = match e {
+        adk_gemini::ClientError::BadResponse { retry_after: Some(header), .. } => {
+            crate::retry::parse_retry_after(header)
+        }
+        _ => None,
+    };
+    crate::retry::with_retry_after(err, header.or_else(|| retry_info_delay(e)))
+}
+
+/// The delay a `google.rpc.RetryInfo` detail of the error asks for: the Gemini API reports
+/// the wait a quota needs there (`"retryDelay": "37s"`), not in a `Retry-After` header.
+fn retry_info_delay(error: &adk_gemini::ClientError) -> Option<std::time::Duration> {
+    let details: Vec<serde_json::Value> = match error {
+        adk_gemini::ClientError::BadResponse { description: Some(body), .. }
+        | adk_gemini::ClientError::ErrorInResponse { description: body, .. } => {
+            if body.len() > crate::error_metadata::MAX_BODY_LEN {
+                return None;
+            }
+            let body: serde_json::Value = serde_json::from_str(body).ok()?;
+            let error =
+                body.get("error").or_else(|| body.get(0).and_then(|item| item.get("error")))?;
+            error.get("details")?.as_array()?.clone()
+        }
+        #[cfg(feature = "gemini-vertex")]
+        adk_gemini::ClientError::GoogleCloudRequest { source } => source
+            .status()?
+            .details
+            .iter()
+            .filter_map(|detail| serde_json::to_value(detail).ok())
+            .collect(),
+        _ => return None,
+    };
+    details
+        .iter()
+        .filter(|detail| {
+            detail["@type"].as_str().is_some_and(|kind| kind.ends_with("google.rpc.RetryInfo"))
+        })
+        .find_map(|detail| parse_rpc_duration(detail["retryDelay"].as_str()?))
+}
+
+/// Parses a protobuf `Duration` in its JSON form (`"12s"`, `"1.5s"`), rounded up to whole
+/// milliseconds so a retry never starts early. Negative or malformed values are `None`.
+fn parse_rpc_duration(value: &str) -> Option<std::time::Duration> {
+    let value = value.strip_suffix('s')?;
+    let (seconds, fraction) = value.split_once('.').unwrap_or((value, ""));
+    let digits = |text: &str| text.bytes().all(|byte| byte.is_ascii_digit());
+    if seconds.is_empty() || !digits(seconds) || fraction.len() > 9 || !digits(fraction) {
+        return None;
+    }
+    let nanos: u32 = format!("{fraction:0<9}").parse().ok()?;
+    let delay = std::time::Duration::new(seconds.parse().ok()?, nanos);
+    let millis = u64::try_from(delay.as_nanos().div_ceil(1_000_000)).ok()?;
+    Some(std::time::Duration::from_millis(millis))
+}
+
+/// Whether a google-cloud-gax error without a status is a failed connection or
+/// transport. gax's `is_connect`/`is_transport` are hidden and outside its semver
+/// guarantee, so this reads the prefixes its `Display` writes for those kinds.
+#[cfg(feature = "gemini-vertex")]
+fn is_gax_connection_failure(message: &str) -> bool {
+    message.starts_with("cannot connect to endpoint")
+        || message.starts_with("the transport reports an error")
+}
+
+/// Classify failures with no HTTP response without inventing an upstream status.
+fn error_without_status(error: &adk_gemini::ClientError) -> (ErrorCategory, &'static str) {
+    if let Some(error) = error.request_error() {
+        let category = crate::http_timeouts::transport_category(error);
+        let code = if category == ErrorCategory::Timeout {
+            "model.gemini.timeout"
+        } else {
+            "model.gemini.unavailable"
+        };
+        return (category, code);
+    }
+    match error {
+        adk_gemini::ClientError::InvalidGenerationConfig { .. } => {
+            (ErrorCategory::InvalidInput, "model.gemini.invalid_config")
+        }
+        adk_gemini::ClientError::Validation { .. } => {
+            (ErrorCategory::InvalidInput, "model.gemini.bad_request")
+        }
+        adk_gemini::ClientError::InvalidApiKey { .. } => {
+            (ErrorCategory::Unauthorized, "model.gemini.unauthorized")
+        }
+        #[cfg(feature = "gemini-vertex")]
+        adk_gemini::ClientError::GoogleCloudRequest { source } if source.is_timeout() => {
+            (ErrorCategory::Timeout, "model.gemini.timeout")
+        }
+        #[cfg(feature = "gemini-vertex")]
+        adk_gemini::ClientError::GoogleCloudRequest { source } => {
+            if let Some(status) = source.status() {
+                category_for_rpc_status(status.code.name())
+            } else if is_gax_connection_failure(&source.to_string()) {
+                (ErrorCategory::Unavailable, "model.gemini.unavailable")
+            } else {
+                (ErrorCategory::Internal, "model.gemini.internal")
+            }
+        }
+        adk_gemini::ClientError::ErrorInResponse { status: Some(status), .. } => {
+            category_for_rpc_status(status)
+        }
+        _ => (ErrorCategory::Internal, "model.gemini.internal"),
+    }
+}
+
+/// Classifies a Google RPC status name such as `UNAVAILABLE`.
+fn category_for_rpc_status(name: &str) -> (ErrorCategory, &'static str) {
+    match name {
+        "RESOURCE_EXHAUSTED" => (ErrorCategory::RateLimited, "model.gemini.rate_limited"),
+        "UNAVAILABLE" => (ErrorCategory::Unavailable, "model.gemini.unavailable"),
+        "DEADLINE_EXCEEDED" => (ErrorCategory::Timeout, "model.gemini.timeout"),
+        "UNAUTHENTICATED" => (ErrorCategory::Unauthorized, "model.gemini.unauthorized"),
+        "PERMISSION_DENIED" => (ErrorCategory::Forbidden, "model.gemini.forbidden"),
+        "NOT_FOUND" => (ErrorCategory::NotFound, "model.gemini.not_found"),
+        "INVALID_ARGUMENT" => (ErrorCategory::InvalidInput, "model.gemini.bad_request"),
+        _ => (ErrorCategory::Internal, "model.gemini.internal"),
+    }
 }
 
 /// Maps a terminal [`InteractionStatus`](adk_gemini::interactions::InteractionStatus)
@@ -275,11 +486,86 @@ fn vertex_target_from_env() -> Result<(String, String)> {
 }
 
 impl GeminiModel {
+    /// The thinking configuration of one request (spec 3.1 §7.23, §10 C4): the request's
+    /// `effort` becomes the `thinking_level` for this call on Gemini 3 and later, or on any
+    /// model configured with a level, replacing a configured token budget; elsewhere it is
+    /// logged and ignored.
+    fn request_thinking_config(&self, req: &LlmRequest) -> Option<adk_gemini::ThinkingConfig> {
+        let configured = self.thinking_config.clone();
+        let Some(level) = req.config.as_ref().and_then(|config| config.effort) else {
+            return configured;
+        };
+        let configured_level =
+            configured.as_ref().is_some_and(|config| config.thinking_level.is_some());
+        let generation = self.model_name.find("gemini-").and_then(|start| {
+            let version = &self.model_name[start + "gemini-".len()..];
+            let end = version.find(|c: char| !c.is_ascii_digit()).unwrap_or(version.len());
+            version[..end].parse::<u32>().ok()
+        });
+        if !configured_level && generation.is_none_or(|major| major < 3) {
+            tracing::debug!(
+                model.name = %self.model_name,
+                effort = %level,
+                "model takes no thinking level; the request's effort is ignored"
+            );
+            return configured;
+        }
+        let mut config = configured.unwrap_or_default();
+        config.thinking_budget = None;
+        config.thinking_level = Some(level.into());
+        Some(config)
+    }
+
     fn gemini_part_thought_signature(value: &serde_json::Value) -> Option<String> {
         value.get("thoughtSignature").and_then(serde_json::Value::as_str).map(str::to_string)
     }
 
+    /// The Gemini part a stored server-tool payload replays as: a `toolCall`, `toolResponse`,
+    /// `executableCode` or `codeExecutionResult` part, or the code-execution shape the Vertex
+    /// AI session service restores (`vertexExecutableCode`, `vertexCodeExecutionResult`), with
+    /// its thought signature. `None` for any other payload.
+    fn native_server_part(payload: &serde_json::Value) -> Option<adk_gemini::Part> {
+        let thought_signature = Self::gemini_part_thought_signature(payload);
+        if let Some(executable_code) = payload.get("vertexExecutableCode") {
+            return Some(adk_gemini::Part::ExecutableCode {
+                executable_code: executable_code.clone(),
+                thought_signature,
+            });
+        }
+        if let Some(code_execution_result) = payload.get("vertexCodeExecutionResult") {
+            return Some(adk_gemini::Part::CodeExecutionResult {
+                code_execution_result: code_execution_result.clone(),
+                thought_signature,
+            });
+        }
+        match serde_json::from_value::<adk_gemini::Part>(payload.clone()).ok()? {
+            part @ (adk_gemini::Part::ToolCall { .. }
+            | adk_gemini::Part::ToolResponse { .. }
+            | adk_gemini::Part::ExecutableCode { .. }
+            | adk_gemini::Part::CodeExecutionResult { .. }) => Some(part),
+            adk_gemini::Part::Text { .. }
+            | adk_gemini::Part::InlineData { .. }
+            | adk_gemini::Part::FileData { .. }
+            | adk_gemini::Part::FunctionCall { .. }
+            | adk_gemini::Part::FunctionResponse { .. } => None,
+        }
+    }
+
     fn validate_request_contract(&self, req: &LlmRequest) -> Result<()> {
+        // Server-side RAG grounding is a Vertex AI capability; reject it on
+        // the AI Studio backend before any network IO (mirrors the request-
+        // time gating the Vertex backend applies to Studio-only fields).
+        #[cfg(feature = "gemini-vertex")]
+        if self.vertex_rag_store.is_some() && !self.vertex_backend {
+            return Err(adk_core::AdkError::new(
+                ErrorComponent::Model,
+                ErrorCategory::Unsupported,
+                "model.gemini.rag_store_requires_vertex",
+                "Vertex RAG store grounding requires the Vertex AI backend. Construct the model with new_google_cloud/new_google_cloud_adc (or set GOOGLE_GENAI_USE_VERTEXAI with GOOGLE_CLOUD_PROJECT/GOOGLE_CLOUD_LOCATION) instead of an AI Studio API key.",
+            )
+            .with_provider("gemini"));
+        }
+
         let model = self.model_name.strip_prefix("models/").unwrap_or(&self.model_name);
         if !matches!(model, "gemini-3.6-flash" | "gemini-3.7-flash") {
             return Ok(());
@@ -317,7 +603,7 @@ impl GeminiModel {
     ///
     /// Centralizing struct construction here keeps the cfg-gated Interactions
     /// fields out of every public constructor's `Self { .. }` literal.
-    fn from_client(client: Gemini, model_name: String) -> Self {
+    pub(crate) fn from_client(client: Gemini, model_name: String) -> Self {
         Self {
             client,
             model_name,
@@ -329,6 +615,10 @@ impl GeminiModel {
             interaction_target: None,
             #[cfg(feature = "gemini-interactions")]
             interaction_options: InteractionOptions::default(),
+            #[cfg(feature = "gemini-vertex")]
+            vertex_rag_store: None,
+            #[cfg(feature = "gemini-vertex")]
+            vertex_backend: false,
         }
     }
 
@@ -339,6 +629,79 @@ impl GeminiModel {
         let client = Gemini::with_model(api_key.into(), model_name.clone())
             .map_err(|e| adk_core::AdkError::model(e.to_string()))?;
 
+        Ok(Self::from_client(client, model_name))
+    }
+
+    /// Create an API-key model using an explicit REST base URL.
+    ///
+    /// The base URL includes the API version and ends with a slash. No environment
+    /// variable is read.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `base_url` is not a valid URL or the client cannot be built.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use adk_model::GeminiModel;
+    ///
+    /// let model = GeminiModel::new_with_base_url(
+    ///     "api-key",
+    ///     "gemini-3.7-flash",
+    ///     "https://gateway.example.com/v1beta/",
+    /// )?;
+    /// # Ok::<(), adk_core::AdkError>(())
+    /// ```
+    pub fn new_with_base_url(
+        api_key: impl Into<String>,
+        model: impl Into<String>,
+        base_url: impl AsRef<str>,
+    ) -> Result<Self> {
+        let model_name = model.into();
+        let base_url = base_url
+            .as_ref()
+            .parse()
+            .map_err(|_| adk_core::AdkError::model("Invalid Gemini base URL"))?;
+        let client = Gemini::with_model_and_base_url(api_key.into(), model_name.clone(), base_url)
+            .map_err(|e| adk_core::AdkError::model(e.to_string()))?;
+        Ok(Self::from_client(client, model_name))
+    }
+
+    /// Create an API-key model with explicit connect and byte-idle timeouts.
+    ///
+    /// Existing constructors keep the standalone SDK's defaults. This constructor
+    /// uses the same SDK builder and adds no response-level or total-request timer.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use adk_model::{GeminiModel, HttpTimeouts};
+    /// use std::time::Duration;
+    ///
+    /// let model = GeminiModel::new_with_base_url_and_timeouts(
+    ///     "api-key", "gemini-3.7-flash", "https://gateway.example.com/v1beta/",
+    ///     HttpTimeouts::new(Duration::from_secs(30), Duration::from_secs(300)),
+    /// )?;
+    /// # Ok::<(), adk_core::AdkError>(())
+    /// ```
+    pub fn new_with_base_url_and_timeouts(
+        api_key: impl Into<String>,
+        model: impl Into<String>,
+        base_url: impl AsRef<str>,
+        timeouts: crate::HttpTimeouts,
+    ) -> Result<Self> {
+        let model_name = model.into();
+        let base_url = base_url
+            .as_ref()
+            .parse()
+            .map_err(|_| adk_core::AdkError::model("Invalid Gemini base URL"))?;
+        let client = adk_gemini::GeminiBuilder::new(api_key.into())
+            .with_model(model_name.clone())
+            .with_base_url(base_url)
+            .with_http_client(timeouts.apply(reqwest::Client::builder()))
+            .build()
+            .map_err(|error| gemini_error_to_adk(&error))?;
         Ok(Self::from_client(client, model_name))
     }
 
@@ -361,7 +724,53 @@ impl GeminiModel {
         )
         .map_err(|e| adk_core::AdkError::model(e.to_string()))?;
 
-        Ok(Self::from_client(client, model_name))
+        let mut model = Self::from_client(client, model_name);
+        model.vertex_backend = true;
+        Ok(model)
+    }
+
+    /// Use an explicit Vertex endpoint and either a supplied key or execution-host ADC.
+    ///
+    /// Requires `gemini-vertex` feature.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Application Default Credentials are requested
+    /// (`api_key` is `None`) but unavailable, or when the client cannot be built.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use adk_model::GeminiModel;
+    ///
+    /// let model = GeminiModel::new_google_cloud_endpoint(
+    ///     None,
+    ///     "my-project",
+    ///     "us-central1",
+    ///     "gemini-3.7-flash",
+    ///     "https://us-central1-aiplatform.googleapis.com",
+    /// )?;
+    /// # Ok::<(), adk_core::AdkError>(())
+    /// ```
+    #[cfg(feature = "gemini-vertex")]
+    pub fn new_google_cloud_endpoint(
+        api_key: Option<&str>,
+        project: &str,
+        location: &str,
+        model_name: &str,
+        endpoint: &str,
+    ) -> Result<Self> {
+        let mut builder = adk_gemini::GeminiBuilder::new(api_key.unwrap_or_default())
+            .with_model(model_name.to_owned())
+            .with_google_cloud(project, location)
+            .with_google_cloud_endpoint(endpoint);
+        if api_key.is_none() {
+            builder = builder.with_google_cloud_adc().map_err(|e| gemini_error_to_adk(&e))?;
+        }
+        let client = builder.build().map_err(|e| gemini_error_to_adk(&e))?;
+        let mut model = Self::from_client(client, model_name.to_owned());
+        model.vertex_backend = true;
+        Ok(model)
     }
 
     /// Create a Gemini model via Vertex AI with service account JSON.
@@ -383,7 +792,9 @@ impl GeminiModel {
         )
         .map_err(|e| adk_core::AdkError::model(e.to_string()))?;
 
-        Ok(Self::from_client(client, model_name))
+        let mut model = Self::from_client(client, model_name);
+        model.vertex_backend = true;
+        Ok(model)
     }
 
     /// Create a Gemini model via Vertex AI with Application Default Credentials.
@@ -403,7 +814,9 @@ impl GeminiModel {
         )
         .map_err(|e| adk_core::AdkError::model(e.to_string()))?;
 
-        Ok(Self::from_client(client, model_name))
+        let mut model = Self::from_client(client, model_name);
+        model.vertex_backend = true;
+        Ok(model)
     }
 
     /// Create a Gemini model via Vertex AI with Workload Identity Federation.
@@ -425,7 +838,9 @@ impl GeminiModel {
         )
         .map_err(|e| adk_core::AdkError::model(e.to_string()))?;
 
-        Ok(Self::from_client(client, model_name))
+        let mut model = Self::from_client(client, model_name);
+        model.vertex_backend = true;
+        Ok(model)
     }
 
     /// Create a Gemini model from environment variables.
@@ -459,7 +874,7 @@ impl GeminiModel {
     ///
     /// # #[tokio::main]
     /// # async fn main() -> adk_core::Result<()> {
-    /// let model = GeminiModel::from_env("gemini-2.5-flash")?;
+    /// let model = GeminiModel::from_env("gemini-3.7-flash")?;
     /// # Ok(())
     /// # }
     /// ```
@@ -531,7 +946,7 @@ impl GeminiModel {
     ///     );
     ///
     /// // Gemini 2.5 — budget-based thinking
-    /// let model = GeminiModel::new(api_key, "gemini-2.5-flash")?
+    /// let model = GeminiModel::new(api_key, "gemini-3.7-flash")?
     ///     .with_thinking_config(
     ///         ThinkingConfig::new().with_thinking_budget(2048)
     ///     );
@@ -550,6 +965,42 @@ impl GeminiModel {
     /// Returns the current thinking configuration, if set.
     pub fn thinking_config(&self) -> Option<&adk_gemini::ThinkingConfig> {
         self.thinking_config.as_ref()
+    }
+
+    /// Ground every request in a Vertex AI RAG store (server-side retrieval).
+    ///
+    /// Declares a `retrieval` tool on each outgoing `generateContent` request
+    /// so Vertex AI retrieves grounding context from the referenced RAG
+    /// corpora before generating. Requires a Vertex AI backend — requests on
+    /// an AI Studio model fail with the structured error
+    /// `model.gemini.rag_store_requires_vertex` before any network IO.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use adk_gemini::VertexRagStore;
+    /// use adk_model::gemini::GeminiModel;
+    ///
+    /// # fn main() -> adk_core::Result<()> {
+    /// let store = VertexRagStore::corpus("projects/p/locations/us-central1/ragCorpora/123")
+    ///     .with_top_k(5);
+    /// let model =
+    ///     GeminiModel::new_google_cloud("api-key", "p", "us-central1", "gemini-3.7-flash")?
+    ///         .with_vertex_rag_store(store);
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(feature = "gemini-vertex")]
+    #[must_use]
+    pub fn with_vertex_rag_store(mut self, store: adk_gemini::VertexRagStore) -> Self {
+        self.vertex_rag_store = Some(store);
+        self
+    }
+
+    /// Returns the configured Vertex RAG store, if set.
+    #[cfg(feature = "gemini-vertex")]
+    pub fn vertex_rag_store(&self) -> Option<&adk_gemini::VertexRagStore> {
+        self.vertex_rag_store.as_ref()
     }
 
     /// Enable (or disable) the Interactions API transport.
@@ -572,7 +1023,7 @@ impl GeminiModel {
     /// # Example
     ///
     /// ```rust,ignore
-    /// let model = GeminiModel::new(api_key, "gemini-2.5-flash")?
+    /// let model = GeminiModel::new(api_key, "gemini-3.7-flash")?
     ///     .use_interactions_api(true)?;
     /// ```
     #[cfg(feature = "gemini-interactions")]
@@ -713,34 +1164,6 @@ impl GeminiModel {
             }
         }
 
-        // Add grounding metadata as text if present (required for Google Search grounding compliance)
-        if let Some(grounding) = resp.candidates.first().and_then(|c| c.grounding_metadata.as_ref())
-        {
-            if let Some(queries) = &grounding.web_search_queries
-                && !queries.is_empty()
-            {
-                let search_info = format!("\n\n🔍 **Searched:** {}", queries.join(", "));
-                converted_parts.push(Part::Text { text: search_info });
-            }
-            if let Some(chunks) = &grounding.grounding_chunks {
-                let sources: Vec<String> = chunks
-                    .iter()
-                    .filter_map(|c| {
-                        c.web.as_ref().and_then(|w| match (&w.title, &w.uri) {
-                            (Some(title), Some(uri)) => Some(format!("[{}]({})", title, uri)),
-                            (Some(title), None) => Some(title.clone()),
-                            (None, Some(uri)) => Some(uri.to_string()),
-                            (None, None) => None,
-                        })
-                    })
-                    .collect();
-                if !sources.is_empty() {
-                    let sources_info = format!("\n📚 **Sources:** {}", sources.join(" | "));
-                    converted_parts.push(Part::Text { text: sources_info });
-                }
-            }
-        }
-
         let content = if converted_parts.is_empty() {
             None
         } else {
@@ -748,23 +1171,69 @@ impl GeminiModel {
         };
         let tool_call_turn = content.as_ref().is_some_and(Content::has_function_calls);
 
-        let usage_metadata = resp.usage_metadata.as_ref().map(|u| UsageMetadata {
-            prompt_token_count: u.prompt_token_count.unwrap_or(0),
-            candidates_token_count: u.candidates_token_count.unwrap_or(0),
-            total_token_count: u.total_token_count.unwrap_or(0),
-            thinking_token_count: u.thoughts_token_count,
-            cache_read_input_token_count: u.cached_content_token_count,
-            ..Default::default()
+        let usage_metadata = resp.usage_metadata.as_ref().map(|u| {
+            let prompt = u.prompt_token_count.unwrap_or(0);
+            // Gemini's candidate count excludes the separately reported thoughts.
+            let candidates = u
+                .candidates_token_count
+                .unwrap_or(0)
+                .saturating_add(u.thoughts_token_count.unwrap_or(0));
+            UsageMetadata {
+                prompt_token_count: prompt,
+                candidates_token_count: candidates,
+                // An unreported total is at least the parts that were reported.
+                total_token_count: u
+                    .total_token_count
+                    .unwrap_or_else(|| prompt.saturating_add(candidates)),
+                thinking_token_count: u.thoughts_token_count,
+                cache_read_input_token_count: u.cached_content_token_count,
+                // As received, so fields such as `toolUsePromptTokenCount` survive.
+                provider_usage: u.raw.clone().or_else(|| serde_json::to_value(u).ok()),
+                builtin_tool_uses: {
+                    let mut uses = GeminiBuiltinToolUses::default();
+                    uses.observe(resp);
+                    uses.uses()
+                },
+                ..Default::default()
+            }
         });
 
         let finish_reason =
             resp.candidates.first().and_then(|c| c.finish_reason.as_ref()).map(|fr| match fr {
                 adk_gemini::FinishReason::Stop => FinishReason::Stop,
                 adk_gemini::FinishReason::MaxTokens => FinishReason::MaxTokens,
-                adk_gemini::FinishReason::Safety => FinishReason::Safety,
+                adk_gemini::FinishReason::Safety
+                | adk_gemini::FinishReason::Blocklist
+                | adk_gemini::FinishReason::ProhibitedContent
+                | adk_gemini::FinishReason::Spii
+                | adk_gemini::FinishReason::ImageSafety
+                | adk_gemini::FinishReason::ModelArmor => FinishReason::Safety,
                 adk_gemini::FinishReason::Recitation => FinishReason::Recitation,
-                _ => FinishReason::Other,
+                adk_gemini::FinishReason::FinishReasonUnspecified
+                | adk_gemini::FinishReason::Language
+                | adk_gemini::FinishReason::Other
+                | adk_gemini::FinishReason::MalformedFunctionCall
+                | adk_gemini::FinishReason::UnexpectedToolCall
+                | adk_gemini::FinishReason::TooManyToolCalls => FinishReason::Other,
             });
+        // A blocked prompt has no candidates: it ends the turn as a safety stop, and
+        // `error_code` marks it as a failure rather than an empty answer.
+        let block_reason = resp
+            .prompt_feedback
+            .as_ref()
+            .and_then(|feedback| feedback.block_reason.as_ref())
+            .and_then(|reason| match reason {
+                adk_gemini::BlockReason::BlockReasonUnspecified => None,
+                adk_gemini::BlockReason::Safety => Some("SAFETY"),
+                adk_gemini::BlockReason::Other => Some("OTHER"),
+                adk_gemini::BlockReason::Blocklist => Some("BLOCKLIST"),
+                adk_gemini::BlockReason::ProhibitedContent => Some("PROHIBITED_CONTENT"),
+                adk_gemini::BlockReason::ModelArmor => Some("MODEL_ARMOR"),
+                adk_gemini::BlockReason::Jailbreak => Some("JAILBREAK"),
+                adk_gemini::BlockReason::ImageSafety => Some("IMAGE_SAFETY"),
+            });
+        let finish_reason =
+            if block_reason.is_some() { Some(FinishReason::Safety) } else { finish_reason };
 
         let citation_metadata =
             resp.candidates.first().and_then(|c| c.citation_metadata.as_ref()).map(|meta| {
@@ -785,12 +1254,23 @@ impl GeminiModel {
             });
 
         // Serialize grounding metadata into provider_metadata so consumers
-        // can access structured grounding data (search queries, sources, supports).
-        let provider_metadata = resp
+        // can display search queries and sources without changing the answer.
+        let mut provider_metadata = resp
             .candidates
             .first()
             .and_then(|c| c.grounding_metadata.as_ref())
             .and_then(|g| serde_json::to_value(g).ok());
+        // Requested through `GenerateContentConfig::top_logprobs`; kept as Gemini sent them.
+        if let Some(logprobs) = resp
+            .candidates
+            .first()
+            .and_then(|c| c.logprobs_result.as_ref())
+            .and_then(|result| serde_json::to_value(result).ok())
+            && let serde_json::Value::Object(metadata) =
+                provider_metadata.get_or_insert_with(|| serde_json::json!({}))
+        {
+            metadata.insert("logprobs".to_string(), logprobs);
+        }
 
         Ok(LlmResponse {
             content,
@@ -800,10 +1280,13 @@ impl GeminiModel {
             partial: false,
             turn_complete: !tool_call_turn,
             interrupted: false,
-            error_code: None,
-            error_message: None,
+            error_code: block_reason.map(str::to_owned),
+            error_message: block_reason
+                .map(|reason| format!("Gemini blocked the prompt (blockReason {reason})")),
             provider_metadata,
             interaction_id: None,
+            model: resp.model_version.clone().filter(|version| !version.is_empty()),
+            provider: None,
         })
     }
 
@@ -919,19 +1402,45 @@ impl GeminiModel {
         Ok((gemini_tools, tool_config))
     }
 
+    /// Splits one streamed Gemini response into the chunks the stream yields.
+    ///
+    /// A response without `finishReason` is a partial chunk. Its function calls go to
+    /// `deferred_calls` and reach the stream once, ahead of the final chunk's own parts:
+    /// the agent repeats every partial chunk's content in the terminal event it persists,
+    /// so a call yielded mid-stream would appear twice to anything counting calls over
+    /// events (spec 3.1 §7.13).
     fn stream_chunks_from_response(
         mut response: LlmResponse,
         saw_partial_chunk: bool,
+        deferred_calls: &mut Vec<Part>,
     ) -> (Vec<LlmResponse>, bool) {
         let is_final = response.finish_reason.is_some();
 
         if !is_final {
             response.partial = true;
             response.turn_complete = false;
+            if let Some(content) = response.content.as_mut() {
+                let (calls, rest): (Vec<Part>, Vec<Part>) = std::mem::take(&mut content.parts)
+                    .into_iter()
+                    .partition(|part| matches!(part, Part::FunctionCall { .. }));
+                deferred_calls.extend(calls);
+                content.parts = rest;
+            }
+            if response.content.as_ref().is_some_and(|content| content.parts.is_empty()) {
+                response.content = None;
+            }
             return (vec![response], true);
         }
 
         response.partial = false;
+        if !deferred_calls.is_empty() {
+            let content = response
+                .content
+                .get_or_insert_with(|| Content { role: "model".to_string(), parts: Vec::new() });
+            let mut parts = std::mem::take(deferred_calls);
+            parts.append(&mut content.parts);
+            content.parts = parts;
+        }
         response.turn_complete =
             response.content.as_ref().is_none_or(|content| !content.has_function_calls());
 
@@ -951,6 +1460,8 @@ impl GeminiModel {
             error_message: None,
             provider_metadata: None,
             interaction_id: None,
+            model: None,
+            provider: None,
         };
 
         (vec![synthetic_partial, response], true)
@@ -962,6 +1473,7 @@ impl GeminiModel {
         stream: bool,
     ) -> Result<LlmResponseStream> {
         let mut builder = self.client.generate_content();
+        let thinking_config = self.request_thinking_config(&req);
 
         // Build a map of function_name → thought_signature from FunctionCall parts
         // in model content. Gemini 3.x requires thought_signature on FunctionResponse
@@ -982,7 +1494,9 @@ impl GeminiModel {
         // Add contents using proper builder methods
         for content in &req.contents {
             match content.role.as_str() {
-                "user" => {
+                // System contents stay leading user turns: a `system_instruction` would
+                // conflict with the context cache, which already carries one.
+                "user" | "system" => {
                     // For user messages, build gemini Content with potentially multiple parts
                     let mut gemini_parts = Vec::new();
                     for part in &content.parts {
@@ -992,13 +1506,6 @@ impl GeminiModel {
                                     text: text.clone(),
                                     thought: None,
                                     thought_signature: None,
-                                });
-                            }
-                            Part::Thinking { thinking, signature } => {
-                                gemini_parts.push(adk_gemini::Part::Text {
-                                    text: thinking.clone(),
-                                    thought: Some(true),
-                                    thought_signature: signature.clone(),
                                 });
                             }
                             Part::InlineData { data, mime_type, .. } => {
@@ -1061,47 +1568,17 @@ impl GeminiModel {
                                     thought_signature: thought_signature.clone(),
                                 });
                             }
-                            Part::ServerToolCall { server_tool_call } => {
-                                if let Ok(native_part) = serde_json::from_value::<adk_gemini::Part>(
-                                    server_tool_call.clone(),
-                                ) {
-                                    match native_part {
-                                        adk_gemini::Part::ToolCall { .. }
-                                        | adk_gemini::Part::ExecutableCode { .. } => {
-                                            gemini_parts.push(native_part);
-                                            continue;
-                                        }
-                                        _ => {}
-                                    }
-                                }
-
-                                gemini_parts.push(adk_gemini::Part::ToolCall {
-                                    tool_call: server_tool_call.clone(),
-                                    thought_signature: Self::gemini_part_thought_signature(
-                                        server_tool_call,
+                            // Only a payload that is a Gemini part replays: another
+                            // provider's payload (Anthropic's preserved message holds its
+                            // thinking) never reaches Gemini.
+                            Part::ServerToolCall { server_tool_call: payload }
+                            | Part::ServerToolResponse { server_tool_response: payload } => {
+                                match Self::native_server_part(payload) {
+                                    Some(native_part) => gemini_parts.push(native_part),
+                                    None => tracing::debug!(
+                                        "server tool payload is not a gemini part; left out"
                                     ),
-                                });
-                            }
-                            Part::ServerToolResponse { server_tool_response } => {
-                                if let Ok(native_part) = serde_json::from_value::<adk_gemini::Part>(
-                                    server_tool_response.clone(),
-                                ) {
-                                    match native_part {
-                                        adk_gemini::Part::ToolResponse { .. }
-                                        | adk_gemini::Part::CodeExecutionResult { .. } => {
-                                            gemini_parts.push(native_part);
-                                            continue;
-                                        }
-                                        _ => {}
-                                    }
                                 }
-
-                                gemini_parts.push(adk_gemini::Part::ToolResponse {
-                                    tool_response: server_tool_response.clone(),
-                                    thought_signature: Self::gemini_part_thought_signature(
-                                        server_tool_response,
-                                    ),
-                                });
                             }
                             _ => {}
                         }
@@ -1185,13 +1662,26 @@ impl GeminiModel {
                 top_p: config.top_p,
                 top_k: config.top_k,
                 max_output_tokens: config.max_output_tokens,
-                response_schema: config.response_schema,
+                stop_sequences: (!config.stop_sequences.is_empty())
+                    .then_some(config.stop_sequences),
+                seed: config.seed,
+                presence_penalty: config.presence_penalty,
+                frequency_penalty: config.frequency_penalty,
+                response_logprobs: config.top_logprobs.map(|_| true),
+                logprobs: config.top_logprobs.map(i32::from),
+                // The response schema takes the same OpenAPI subset as tool parameters:
+                // Gemini rejects `additionalProperties` and the other JSON Schema
+                // keywords there with HTTP 400.
+                response_schema: config
+                    .response_schema
+                    .map(|schema| self.schema_adapter().normalize_schema(schema)),
+                response_modalities: config.response_modalities,
                 response_mime_type: if has_schema {
                     Some("application/json".to_string())
                 } else {
                     None
                 },
-                thinking_config: self.thinking_config.clone(),
+                thinking_config: thinking_config.clone(),
                 ..Default::default()
             };
             builder = builder.with_generation_config(gen_config);
@@ -1201,11 +1691,11 @@ impl GeminiModel {
                 let handle = self.client.get_cached_content(name);
                 builder = builder.with_cached_content(&handle);
             }
-        } else if self.thinking_config.is_some() {
+        } else if thinking_config.is_some() {
             // No generation config from the request, but we have a default
             // thinking config — apply it in an otherwise-default gen config.
             let gen_config = adk_gemini::GenerationConfig {
-                thinking_config: self.thinking_config.clone(),
+                thinking_config: thinking_config.clone(),
                 ..Default::default()
             };
             builder = builder.with_generation_config(gen_config);
@@ -1228,48 +1718,95 @@ impl GeminiModel {
             }
         }
 
+        // Declare server-side RAG grounding; the Vertex backend injects it
+        // as a `retrieval` tool at send time (validate_request_contract has
+        // already rejected the Studio backend at this point).
+        #[cfg(feature = "gemini-vertex")]
+        if let Some(store) = &self.vertex_rag_store {
+            builder = builder.with_vertex_rag_store(store.clone());
+        }
+
         if stream {
             adk_telemetry::debug!("Executing streaming request");
             let response_stream = builder.execute_stream().await.map_err(|e| {
-                adk_telemetry::error!(error = %e, "Model request failed");
-                gemini_error_to_adk(&e)
+                let error = gemini_error_to_adk(&e);
+                adk_telemetry::error!(error = %error.diagnostics(), "model request failed");
+                error
             })?;
 
             let mapped_stream = async_stream::stream! {
                 let mut stream = response_stream;
                 let mut saw_partial_chunk = false;
+                // Function calls from partial chunks, yielded once on the final chunk.
+                let mut deferred_calls: Vec<Part> = Vec::new();
+                // Only a chunk with `finishReason` (or a prompt block) ends a Gemini turn.
+                let mut finished = false;
+                // Gemini reports usage cumulatively per chunk; built-in tool uses follow suit.
+                let mut builtin_uses = GeminiBuiltinToolUses::default();
                 while let Some(result) = stream.try_next().await.transpose() {
                     match result {
                         Ok(resp) => {
+                            builtin_uses.observe(&resp);
                             match Self::convert_response(&resp) {
-                                Ok(llm_resp) => {
+                                Ok(mut llm_resp) => {
+                                    if let Some(usage) = llm_resp.usage_metadata.as_mut() {
+                                        usage.builtin_tool_uses = builtin_uses.uses();
+                                    }
+                                    finished |= llm_resp.finish_reason.is_some();
                                     let (chunks, next_saw_partial) =
-                                        Self::stream_chunks_from_response(llm_resp, saw_partial_chunk);
+                                        Self::stream_chunks_from_response(
+                                            llm_resp,
+                                            saw_partial_chunk,
+                                            &mut deferred_calls,
+                                        );
                                     saw_partial_chunk = next_saw_partial;
                                     for chunk in chunks {
                                         yield Ok(chunk);
                                     }
                                 }
                                 Err(e) => {
-                                    adk_telemetry::error!(error = %e, "Failed to convert response");
+                                    adk_telemetry::error!(error = %e.diagnostics(), "failed to convert response");
                                     yield Err(e);
+                                    return;
                                 }
                             }
                         }
                         Err(e) => {
-                            adk_telemetry::error!(error = %e, "Stream error");
-                            yield Err(gemini_error_to_adk(&e));
+                            if finished && matches!(&e,
+                                adk_gemini::ClientError::PerformRequestNew { .. }
+                                | adk_gemini::ClientError::PerformRequest { .. }
+                                | adk_gemini::ClientError::BadPart { .. }
+                                | adk_gemini::ClientError::Deserialize { .. }
+                                | adk_gemini::ClientError::DecodeResponse { .. }
+                                | adk_gemini::ClientError::Io { .. }
+                            ) {
+                                return;
+                            }
+                            let error = gemini_error_to_adk(&e);
+                            adk_telemetry::error!(error = %error.diagnostics(), "stream error");
+                            yield Err(error);
+                            return;
                         }
                     }
                 }
+                if !finished {
+                    yield Err(adk_core::AdkError::new(
+                        ErrorComponent::Model,
+                        ErrorCategory::Unavailable,
+                        "model.gemini.unfinished_stream",
+                        "Gemini stream ended before any chunk carried a finish reason",
+                    )
+                    .with_provider("gemini"));
+                }
             };
 
-            Ok(Box::pin(mapped_stream))
+            Ok(crate::usage_tracking::with_terminal_usage(Box::pin(mapped_stream)))
         } else {
             adk_telemetry::debug!("Executing blocking request");
             let response = builder.execute().await.map_err(|e| {
-                adk_telemetry::error!(error = %e, "Model request failed");
-                gemini_error_to_adk(&e)
+                let error = gemini_error_to_adk(&e);
+                adk_telemetry::error!(error = %error.diagnostics(), "model request failed");
+                error
             })?;
 
             let llm_response = Self::convert_response(&response)?;
@@ -1374,7 +1911,7 @@ impl GeminiModel {
 
         // Resolve the thinking level (Gemini 3 level-based reasoning). Budget-only
         // configs (Gemini 2.5) carry no level, so this stays `None` for them.
-        let thinking_level = self.thinking_config.as_ref().and_then(|c| c.thinking_level);
+        let thinking_level = self.request_thinking_config(&req).and_then(|c| c.thinking_level);
 
         let stateful = self.interaction_options.stateful;
         let store = self.interaction_options.store;
@@ -1511,7 +2048,9 @@ impl GeminiModel {
     /// `execute_with_retry` (which wraps this in `generate_content`) can retry
     /// transient setup failures. Errors that occur *after* the stream starts
     /// are yielded into the stream and not retried, mirroring the
-    /// generateContent streaming path.
+    /// generateContent streaming path. The stream fails when it ends before
+    /// `interaction.completed`, and when the interaction reaches `failed` or
+    /// `budget_exceeded`.
     ///
     /// The stale-continuation fallback used by the non-streaming path is not
     /// applied here: a `NotFound` on stream setup surfaces as a normal error
@@ -1531,7 +2070,7 @@ impl GeminiModel {
             .with_provider("gemini")
         })?;
 
-        let thinking_level = self.thinking_config.as_ref().and_then(|c| c.thinking_level);
+        let thinking_level = self.request_thinking_config(&req).and_then(|c| c.thinking_level);
         let stateful = self.interaction_options.stateful;
         let store = self.interaction_options.store;
 
@@ -1550,21 +2089,58 @@ impl GeminiModel {
             .map_err(|e| gemini_error_to_adk(&e))?;
 
         let mapped = async_stream::stream! {
+            use adk_gemini::interactions::{InteractionSseEvent, InteractionStatus};
+
             let mut sse_stream = sse_stream;
             let mut acc = SseAccumulator::new();
             while let Some(result) = sse_stream.try_next().await.transpose() {
                 match result {
                     Ok(event) => {
-                        if let Some(chunk) = sse_event_to_chunk(event, &mut acc) {
-                            yield chunk;
+                        // A terminal failure status fails the turn, whether it arrives on
+                        // `interaction.completed` or as a status update.
+                        let (status, completed) = match &event {
+                            InteractionSseEvent::InteractionCompleted { interaction, .. } => {
+                                (Some(interaction.status), true)
+                            }
+                            InteractionSseEvent::InteractionStatusUpdate {
+                                status:
+                                    status @ (InteractionStatus::Failed
+                                    | InteractionStatus::BudgetExceeded),
+                                ..
+                            } => (Some(*status), false),
+                            _ => (None, false),
+                        };
+                        if let Some(Err(error)) = status.map(interaction_status_to_result) {
+                            yield Err(error);
+                            return;
+                        }
+                        match sse_event_to_chunk(event, &mut acc) {
+                            Some(Err(error)) => {
+                                yield Err(error);
+                                return;
+                            }
+                            Some(Ok(chunk)) => yield Ok(chunk),
+                            None => {}
+                        }
+                        if completed {
+                            return;
                         }
                     }
                     Err(e) => {
-                        adk_telemetry::error!(error = %e, "Interaction stream error");
-                        yield Err(gemini_error_to_adk(&e));
+                        let error = gemini_error_to_adk(&e);
+                        adk_telemetry::error!(error = %error.diagnostics(), "interaction stream error");
+                        yield Err(error);
+                        return;
                     }
                 }
             }
+            yield Err(adk_core::AdkError::new(
+                ErrorComponent::Model,
+                ErrorCategory::Unavailable,
+                "model.gemini.interactions.unfinished_stream",
+                "Gemini interaction stream ended before interaction.completed",
+            )
+            .with_provider("gemini"));
         };
 
         Ok(Box::pin(mapped))
@@ -1573,6 +2149,16 @@ impl GeminiModel {
 
 #[async_trait]
 impl Llm for GeminiModel {
+    // The request's `maxOutputTokens`, thinking included, or the model's output limit.
+    fn max_cost_micro_usd(&self, request: &adk_core::LlmRequest) -> Option<u64> {
+        crate::pricing::PricingCatalog::standard().max_cost_micro_usd(
+            Some("gemini"),
+            self.name(),
+            request,
+            crate::pricing::request_output_cap(request),
+        )
+    }
+
     fn name(&self) -> &str {
         &self.model_name
     }
@@ -1586,6 +2172,20 @@ impl Llm for GeminiModel {
     #[cfg(feature = "gemini-interactions")]
     fn uses_interactions_api(&self) -> bool {
         self.transport == GeminiTransport::Interactions
+    }
+
+    // generateContent serves `google_search` beside function tools on both backends, with
+    // no domain allowlist; the Interactions transport refuses that mix (spec 3.1 §7.20).
+    fn native_web_search(&self) -> Option<adk_core::NativeWebSearch> {
+        #[cfg(feature = "gemini-interactions")]
+        if self.transport == GeminiTransport::Interactions {
+            return None;
+        }
+        Some(adk_core::NativeWebSearch::new(
+            "gemini",
+            adk_core::NativeWebSearchTool::GoogleSearch,
+            false,
+        ))
     }
 
     // Named distinctly from the agent layer's `call_llm` span (which carries
@@ -1602,7 +2202,16 @@ impl Llm for GeminiModel {
             request.tools_count = %req.tools.len()
         )
     )]
-    async fn generate_content(&self, req: LlmRequest, stream: bool) -> Result<LlmResponseStream> {
+    async fn generate_content(
+        &self,
+        mut req: LlmRequest,
+        stream: bool,
+    ) -> Result<LlmResponseStream> {
+        // Native items reach this provider only from the turns its own origin marks.
+        adk_core::history::retain_replayable(
+            &mut req.contents,
+            &adk_core::history::ProviderOrigin::new("gemini", &self.model_name),
+        );
         adk_telemetry::info!("Generating content");
         self.validate_request_contract(&req)?;
         let usage_span = adk_telemetry::llm_generate_span("gemini", &self.model_name, stream);
@@ -1630,7 +2239,12 @@ impl Llm for GeminiModel {
                         self.generate_interactions_stream(req.clone())
                     })
                     .await?;
-                return Ok(crate::usage_tracking::with_usage_tracking(mapped, usage_span));
+                return Ok(crate::usage_tracking::with_priced_usage_tracking(
+                    mapped,
+                    usage_span,
+                    "gemini",
+                    &self.model_name,
+                ));
             }
             let response = execute_with_retry(&self.retry_config, is_retryable_model_error, || {
                 self.generate_interactions_once(req.clone())
@@ -1639,14 +2253,24 @@ impl Llm for GeminiModel {
             let single = async_stream::stream! {
                 yield Ok(response);
             };
-            return Ok(crate::usage_tracking::with_usage_tracking(Box::pin(single), usage_span));
+            return Ok(crate::usage_tracking::with_priced_usage_tracking(
+                Box::pin(single),
+                usage_span,
+                "gemini",
+                &self.model_name,
+            ));
         }
 
         let result = execute_with_retry(&self.retry_config, is_retryable_model_error, || {
             self.generate_content_internal(req.clone(), stream)
         })
         .await?;
-        Ok(crate::usage_tracking::with_usage_tracking(result, usage_span))
+        Ok(crate::usage_tracking::with_priced_usage_tracking(
+            result,
+            usage_span,
+            "gemini",
+            &self.model_name,
+        ))
     }
 }
 
@@ -1892,6 +2516,179 @@ mod tests {
     };
 
     #[test]
+    fn response_status_ignores_misleading_text() {
+        for (status, category, code) in [
+            (400, ErrorCategory::InvalidInput, "model.gemini.bad_request"),
+            (401, ErrorCategory::Unauthorized, "model.gemini.unauthorized"),
+            (403, ErrorCategory::Forbidden, "model.gemini.forbidden"),
+            (404, ErrorCategory::NotFound, "model.gemini.not_found"),
+            (408, ErrorCategory::Timeout, "model.gemini.timeout"),
+            (429, ErrorCategory::RateLimited, "model.gemini.rate_limited"),
+            (500, ErrorCategory::Unavailable, "model.gemini.unavailable"),
+            (504, ErrorCategory::Timeout, "model.gemini.timeout"),
+            (529, ErrorCategory::Unavailable, "model.gemini.overloaded"),
+        ] {
+            let error = gemini_error_to_adk(&adk_gemini::ClientError::BadResponse {
+                retry_after: None,
+                code: status,
+                description: Some(
+                    serde_json::json!({"error": {
+                        "code": "unsupported_capability",
+                        "message": "code 400; code 401; code 429; rate limit; UNAVAILABLE; TIMEOUT"
+                    }})
+                    .to_string(),
+                ),
+            });
+            assert_eq!(error.category, category);
+            assert_eq!(error.code, code);
+            assert_eq!(error.details.upstream_status_code, Some(status));
+            assert_eq!(error.details.metadata["provider_error_code"], "unsupported_capability");
+        }
+    }
+
+    #[test]
+    fn provider_codes_require_bounded_json_fields() {
+        for (body, expected) in [
+            (
+                serde_json::json!({"error":{"code":"unsupported_capability"}}).to_string(),
+                Some("unsupported_capability"),
+            ),
+            (
+                serde_json::json!({"error":{"code":400,"status":"INVALID_ARGUMENT"}})
+                    .to_string(),
+                Some("INVALID_ARGUMENT"),
+            ),
+            (
+                serde_json::json!({"error":{"code":"", "status":"INVALID_ARGUMENT"}})
+                    .to_string(),
+                Some("INVALID_ARGUMENT"),
+            ),
+            ("unsupported_capability".to_string(), None),
+            (serde_json::json!({"error":{"code":"unsupported capability"}}).to_string(), None),
+            (serde_json::json!({"error":{"code":"x".repeat(129)}}).to_string(), None),
+            (
+                serde_json::json!({"error":{"code":"unsupported_capability", "message":"x".repeat(64 * 1024)}}).to_string(),
+                None,
+            ),
+        ] {
+            let error = gemini_error_to_adk(&adk_gemini::ClientError::BadResponse {
+                retry_after: None,
+                code: 400,
+                description: Some(body),
+            });
+            let actual = error
+                .details
+                .metadata
+                .get("provider_error_code")
+                .and_then(serde_json::Value::as_str);
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn studio_body_prefers_error_info_reason_over_status() {
+        let body = serde_json::json!({"error": {
+            "code": 429,
+            "message": "Resource has been exhausted",
+            "status": "RESOURCE_EXHAUSTED",
+            "details": [{
+                "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                "reason": "RATE_LIMIT_EXCEEDED",
+                "domain": "googleapis.com"
+            }]
+        }});
+        let error = gemini_error_to_adk(&adk_gemini::ClientError::BadResponse {
+            retry_after: None,
+            code: 429,
+            description: Some(body.to_string()),
+        });
+        assert_eq!(error.details.metadata["provider_error_code"], "RATE_LIMIT_EXCEEDED");
+
+        let without_reason = serde_json::json!({"error": {
+            "code": 429,
+            "status": "RESOURCE_EXHAUSTED"
+        }});
+        let error = gemini_error_to_adk(&adk_gemini::ClientError::BadResponse {
+            retry_after: None,
+            code: 429,
+            description: Some(without_reason.to_string()),
+        });
+        assert_eq!(error.details.metadata["provider_error_code"], "RESOURCE_EXHAUSTED");
+    }
+
+    fn quota_body(retry_delay: &str) -> String {
+        serde_json::json!({"error": {
+            "code": 429,
+            "message": "You exceeded your current quota.",
+            "status": "RESOURCE_EXHAUSTED",
+            "details": [
+                {"@type": "type.googleapis.com/google.rpc.QuotaFailure", "violations": []},
+                {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": retry_delay}
+            ]
+        }})
+        .to_string()
+    }
+
+    #[test]
+    fn retry_info_delay_is_the_retry_hint() {
+        for (delay, expected) in [
+            ("12s", Some(Duration::from_secs(12))),
+            ("1.5s", Some(Duration::from_millis(1500))),
+            ("0.000001s", Some(Duration::from_millis(1))),
+            ("0s", Some(Duration::ZERO)),
+            ("-1s", None),
+            ("12", None),
+            ("1.5.0s", None),
+            ("1.0000000001s", None),
+            ("s", None),
+            ("soon", None),
+        ] {
+            let error = gemini_error_to_adk(&adk_gemini::ClientError::BadResponse {
+                retry_after: None,
+                code: 429,
+                description: Some(quota_body(delay)),
+            });
+            assert_eq!(error.retry.retry_after(), expected, "{delay}");
+        }
+
+        // The header is the server's explicit answer; the body is the fallback.
+        let error = gemini_error_to_adk(&adk_gemini::ClientError::BadResponse {
+            retry_after: Some("3".into()),
+            code: 429,
+            description: Some(quota_body("40s")),
+        });
+        assert_eq!(error.retry.retry_after(), Some(Duration::from_secs(3)));
+
+        // An error object inside a successful response carries the same detail.
+        let error = gemini_error_to_adk(&adk_gemini::ClientError::ErrorInResponse {
+            code: Some(429),
+            status: Some("RESOURCE_EXHAUSTED".into()),
+            message: None,
+            description: quota_body("7s"),
+        });
+        assert_eq!(error.retry.retry_after(), Some(Duration::from_secs(7)));
+
+        // A non-retryable error carries no hint.
+        let error = gemini_error_to_adk(&adk_gemini::ClientError::BadResponse {
+            retry_after: None,
+            code: 400,
+            description: Some(quota_body("12s")),
+        });
+        assert_eq!(error.retry.retry_after(), None);
+    }
+
+    #[test]
+    fn local_config_error_has_no_upstream_status() {
+        let error = gemini_error_to_adk(&adk_gemini::ClientError::InvalidGenerationConfig {
+            message: "code 429; RESOURCE_EXHAUSTED".to_string(),
+        });
+        assert_eq!(error.category, ErrorCategory::InvalidInput);
+        assert_eq!(error.code, "model.gemini.invalid_config");
+        assert_eq!(error.details.upstream_status_code, None);
+        assert!(error.details.metadata.is_empty());
+    }
+
+    #[test]
     fn env_flag_truthy_accepts_one_and_case_insensitive_true() {
         for truthy in ["1", "true", "TRUE", "True", " true ", "tRuE"] {
             assert!(env_flag_truthy(truthy), "expected {truthy:?} to be truthy");
@@ -1926,9 +2723,12 @@ mod tests {
             error_message: None,
             provider_metadata: None,
             interaction_id: None,
+            model: None,
+            provider: None,
         };
 
-        let (chunks, saw_partial) = GeminiModel::stream_chunks_from_response(response, false);
+        let (chunks, saw_partial) =
+            GeminiModel::stream_chunks_from_response(response, false, &mut Vec::new());
         assert!(saw_partial);
         assert_eq!(chunks.len(), 2);
         assert!(chunks[0].partial);
@@ -1952,9 +2752,12 @@ mod tests {
             error_message: None,
             provider_metadata: None,
             interaction_id: None,
+            model: None,
+            provider: None,
         };
 
-        let (chunks, saw_partial) = GeminiModel::stream_chunks_from_response(response, true);
+        let (chunks, saw_partial) =
+            GeminiModel::stream_chunks_from_response(response, true, &mut Vec::new());
         assert!(saw_partial);
         assert_eq!(chunks.len(), 1);
         assert!(!chunks[0].partial);
@@ -1978,11 +2781,66 @@ mod tests {
             ..Default::default()
         };
 
-        let (chunks, _) = GeminiModel::stream_chunks_from_response(response, true);
+        let (chunks, _) = GeminiModel::stream_chunks_from_response(response, true, &mut Vec::new());
 
         assert_eq!(chunks.len(), 1);
         assert!(!chunks[0].partial);
         assert!(!chunks[0].turn_complete);
+    }
+
+    #[test]
+    fn stream_chunks_from_response_yields_a_partial_chunks_function_calls_on_the_final_chunk() {
+        let call = |id: &str| Part::FunctionCall {
+            name: "read_file".to_string(),
+            args: serde_json::json!({ "path": id }),
+            id: Some(id.to_string()),
+            thought_signature: Some(format!("sig-{id}")),
+        };
+        let partial = LlmResponse {
+            content: Some(Content {
+                role: "model".to_string(),
+                parts: vec![Part::Text { text: "Reading".to_string() }, call("a")],
+            }),
+            ..Default::default()
+        };
+        let last = LlmResponse {
+            content: Some(Content { role: "model".to_string(), parts: vec![call("b")] }),
+            finish_reason: Some(FinishReason::Stop),
+            ..Default::default()
+        };
+
+        let mut deferred = Vec::new();
+        let (first, saw_partial) =
+            GeminiModel::stream_chunks_from_response(partial, false, &mut deferred);
+        assert!(saw_partial);
+        assert_eq!(first.len(), 1);
+        assert!(first[0].partial);
+        assert_eq!(
+            serde_json::to_value(&first[0].content).unwrap(),
+            serde_json::to_value(Some(Content {
+                role: "model".to_string(),
+                parts: vec![Part::Text { text: "Reading".to_string() }],
+            }))
+            .unwrap(),
+            "the partial chunk keeps its text and loses its call"
+        );
+        assert_eq!(deferred.len(), 1);
+
+        let (chunks, _) =
+            GeminiModel::stream_chunks_from_response(last, saw_partial, &mut deferred);
+        assert!(deferred.is_empty());
+        assert_eq!(chunks.len(), 1);
+        assert!(!chunks[0].partial);
+        assert!(!chunks[0].turn_complete);
+        assert_eq!(
+            serde_json::to_value(&chunks[0].content).unwrap(),
+            serde_json::to_value(Some(Content {
+                role: "model".to_string(),
+                parts: vec![call("a"), call("b")],
+            }))
+            .unwrap(),
+            "the final chunk carries every call once, in stream order, with its signature"
+        );
     }
 
     #[tokio::test]
@@ -2077,6 +2935,8 @@ mod tests {
                 grounding_metadata: None,
                 finish_reason: Some(adk_gemini::FinishReason::Stop),
                 index: Some(0),
+                logprobs_result: None,
+                avg_logprobs: None,
             }],
             prompt_feedback: None,
             usage_metadata: None,
@@ -2114,6 +2974,8 @@ mod tests {
                 grounding_metadata: None,
                 finish_reason: Some(adk_gemini::FinishReason::Stop),
                 index: Some(0),
+                logprobs_result: None,
+                avg_logprobs: None,
             }],
             prompt_feedback: None,
             usage_metadata: None,
@@ -2156,6 +3018,8 @@ mod tests {
                 grounding_metadata: None,
                 finish_reason: Some(adk_gemini::FinishReason::Stop),
                 index: Some(0),
+                logprobs_result: None,
+                avg_logprobs: None,
             }],
             prompt_feedback: None,
             usage_metadata: None,
@@ -2348,14 +3212,14 @@ mod interactions_transport_tests {
 
     #[test]
     fn new_model_defaults_to_generate_content_transport() {
-        let model = GeminiModel::new("test-key", "gemini-2.5-flash")
+        let model = GeminiModel::new("test-key", "gemini-3.7-flash")
             .expect("constructing a Gemini model should not require network");
         assert_eq!(model.transport(), GeminiTransport::GenerateContent);
     }
 
     #[test]
     fn use_interactions_api_enables_transport_for_allowlisted_model() {
-        let model = GeminiModel::new("test-key", "gemini-2.5-flash")
+        let model = GeminiModel::new("test-key", "gemini-3.7-flash")
             .expect("construct model")
             .use_interactions_api(true)
             .expect("allowlisted model should enable the Interactions transport");
@@ -2363,7 +3227,7 @@ mod interactions_transport_tests {
         assert_eq!(model.transport(), GeminiTransport::Interactions);
         assert_eq!(
             model.interaction_target,
-            Some(InteractionTarget::Model("gemini-2.5-flash".to_string()))
+            Some(InteractionTarget::Model("gemini-3.7-flash".to_string()))
         );
     }
 
@@ -2383,7 +3247,7 @@ mod interactions_transport_tests {
 
     #[test]
     fn use_interactions_api_false_reverts_to_generate_content() {
-        let model = GeminiModel::new("test-key", "gemini-2.5-flash")
+        let model = GeminiModel::new("test-key", "gemini-3.7-flash")
             .expect("construct model")
             .use_interactions_api(true)
             .expect("enable interactions")
@@ -2402,7 +3266,7 @@ mod interactions_transport_tests {
             background: BackgroundMode::Always,
             poll_interval: std::time::Duration::from_millis(250),
         };
-        let model = GeminiModel::new("test-key", "gemini-2.5-flash")
+        let model = GeminiModel::new("test-key", "gemini-3.7-flash")
             .expect("construct model")
             .interaction_options(opts.clone());
 
@@ -2416,7 +3280,7 @@ mod interactions_transport_tests {
     #[test]
     fn resolve_background_honors_background_mode() {
         // Always → true regardless of target.
-        let always = GeminiModel::new("test-key", "gemini-2.5-flash")
+        let always = GeminiModel::new("test-key", "gemini-3.7-flash")
             .expect("construct model")
             .use_interactions_api(true)
             .expect("enable")
@@ -2427,7 +3291,7 @@ mod interactions_transport_tests {
         assert!(always.resolve_background());
 
         // Never → false regardless of target.
-        let never = GeminiModel::new("test-key", "gemini-2.5-flash")
+        let never = GeminiModel::new("test-key", "gemini-3.7-flash")
             .expect("construct model")
             .use_interactions_api(true)
             .expect("enable")
@@ -2438,7 +3302,7 @@ mod interactions_transport_tests {
         assert!(!never.resolve_background());
 
         // AgentTargetsOnly → false for a model target.
-        let model_target = GeminiModel::new("test-key", "gemini-2.5-flash")
+        let model_target = GeminiModel::new("test-key", "gemini-3.7-flash")
             .expect("construct model")
             .use_interactions_api(true)
             .expect("enable");
@@ -2506,7 +3370,7 @@ mod interactions_transport_tests {
 
         let interaction = Interaction {
             id: "v1_failed".to_string(),
-            model: Some("gemini-2.5-flash".to_string()),
+            model: Some("gemini-3.7-flash".to_string()),
             agent: None,
             status: InteractionStatus::Failed,
             steps: Vec::new(),
@@ -2548,5 +3412,159 @@ mod interactions_transport_tests {
             .validate_request_contract(&LlmRequest::new("gemini-3.7-flash", Vec::new()))
             .expect_err("token budgets must be rejected locally");
         assert_eq!(error.code, "model.gemini.thinking_budget_unsupported");
+    }
+}
+
+#[cfg(all(test, feature = "gemini-vertex"))]
+mod vertex_rag_tests {
+    use super::*;
+    use adk_gemini::VertexRagStore;
+
+    fn test_store() -> VertexRagStore {
+        VertexRagStore::corpus("projects/p/locations/us-central1/ragCorpora/123").with_top_k(5)
+    }
+
+    fn vertex_model() -> GeminiModel {
+        GeminiModel::new_google_cloud("test-key", "p", "us-central1", "gemini-3.7-flash")
+            .expect("construct vertex model")
+    }
+
+    // The Vertex constructor builds credential plumbing that requires a
+    // current Tokio runtime, so this test is async.
+    #[tokio::test]
+    async fn vertex_backend_accepts_and_stores_the_rag_store() {
+        let model = vertex_model().with_vertex_rag_store(test_store());
+
+        model
+            .validate_request_contract(&LlmRequest::new("gemini-3.7-flash", Vec::new()))
+            .expect("vertex backend must accept the rag store");
+
+        // The stored store is handed to adk-gemini's ContentBuilder per
+        // request; the exact wire-shape injection is asserted in adk-gemini's
+        // backend tests.
+        assert_eq!(model.vertex_rag_store(), Some(&test_store()));
+    }
+
+    #[test]
+    fn studio_backend_rejects_rag_store_before_network_io() {
+        let model = GeminiModel::new("test-key", "gemini-3.7-flash")
+            .expect("construct studio model")
+            .with_vertex_rag_store(test_store());
+
+        let error = model
+            .validate_request_contract(&LlmRequest::new("gemini-3.7-flash", Vec::new()))
+            .expect_err("studio backend must reject the rag store locally");
+        assert_eq!(error.code, "model.gemini.rag_store_requires_vertex");
+        assert_eq!(error.category, adk_core::ErrorCategory::Unsupported);
+        assert_eq!(error.details.provider.as_deref(), Some("gemini"));
+    }
+
+    #[test]
+    fn no_rag_store_means_no_gate() {
+        let model = GeminiModel::new("test-key", "gemini-3.7-flash").expect("construct model");
+        assert_eq!(model.vertex_rag_store(), None);
+        model
+            .validate_request_contract(&LlmRequest::new("gemini-3.7-flash", Vec::new()))
+            .expect("no store configured, nothing to reject");
+    }
+}
+
+#[cfg(all(test, feature = "gemini-vertex"))]
+mod vertex_transport_tests {
+    use super::*;
+    use google_cloud_gax::error::{
+        Error as GaxError,
+        rpc::{Code, Status, StatusDetails},
+    };
+
+    #[test]
+    fn service_status_and_reason_are_preserved() {
+        let detail: StatusDetails = serde_json::from_value(serde_json::json!({
+            "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+            "reason": "QUOTA_EXCEEDED"
+        }))
+        .expect("valid ErrorInfo detail");
+        let status = Status::default()
+            .set_code(Code::ResourceExhausted)
+            .set_message("code 400; invalid API key")
+            .set_details([detail]);
+        let error = adk_gemini::ClientError::GoogleCloudRequest {
+            source: GaxError::service_with_http_metadata(status, Some(429), None),
+        };
+
+        let mapped = gemini_error_to_adk(&error);
+        assert_eq!(mapped.category, ErrorCategory::RateLimited);
+        assert_eq!(mapped.code, "model.gemini.rate_limited");
+        assert_eq!(mapped.details.upstream_status_code, Some(429));
+        assert_eq!(mapped.details.metadata["provider_error_code"], "QUOTA_EXCEEDED");
+    }
+
+    #[test]
+    fn rpc_status_does_not_invent_http_status() {
+        let detail: StatusDetails = serde_json::from_value(serde_json::json!({
+            "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+            "reason": "RATE_LIMITED"
+        }))
+        .expect("valid ErrorInfo detail");
+        let status = Status::default()
+            .set_code(Code::ResourceExhausted)
+            .set_message("code 503; unavailable")
+            .set_details([detail]);
+        let error =
+            adk_gemini::ClientError::GoogleCloudRequest { source: GaxError::service(status) };
+
+        let mapped = gemini_error_to_adk(&error);
+        assert_eq!(mapped.category, ErrorCategory::RateLimited);
+        assert_eq!(mapped.code, "model.gemini.rate_limited");
+        assert_eq!(mapped.details.upstream_status_code, None);
+        assert_eq!(mapped.details.metadata["provider_error_code"], "RATE_LIMITED");
+    }
+
+    #[test]
+    fn retry_info_on_the_status_is_the_retry_hint() {
+        let detail: StatusDetails = serde_json::from_value(serde_json::json!({
+            "@type": "type.googleapis.com/google.rpc.RetryInfo",
+            "retryDelay": "2.5s"
+        }))
+        .expect("valid RetryInfo detail");
+        let status = Status::default()
+            .set_code(Code::ResourceExhausted)
+            .set_message("quota")
+            .set_details([detail]);
+        let error = adk_gemini::ClientError::GoogleCloudRequest {
+            source: GaxError::service_with_http_metadata(status, Some(429), None),
+        };
+        assert_eq!(
+            gemini_error_to_adk(&error).retry.retry_after(),
+            Some(std::time::Duration::from_millis(2500))
+        );
+    }
+
+    #[test]
+    fn rpc_status_name_is_the_fallback_code() {
+        let status = Status::default().set_code(Code::ResourceExhausted).set_message("quota");
+        let error =
+            adk_gemini::ClientError::GoogleCloudRequest { source: GaxError::service(status) };
+        assert_eq!(
+            gemini_error_to_adk(&error).details.metadata["provider_error_code"],
+            "RESOURCE_EXHAUSTED"
+        );
+    }
+
+    #[test]
+    fn vertex_transport_failures_are_retryable() {
+        let source = GaxError::connect(std::io::Error::other("dns failure"));
+        let mapped = gemini_error_to_adk(&adk_gemini::ClientError::GoogleCloudRequest { source });
+        assert_eq!(
+            (mapped.category, mapped.code, mapped.is_retryable()),
+            (ErrorCategory::Unavailable, "model.gemini.unavailable", true)
+        );
+
+        let error = adk_gemini::ClientError::GoogleCloudRequest {
+            source: GaxError::deser(std::io::Error::other(
+                "the transport reports an error: http2 error",
+            )),
+        };
+        assert_eq!(gemini_error_to_adk(&error).category, ErrorCategory::Internal);
     }
 }

@@ -3,15 +3,30 @@
 //! Provides [`QdrantVectorStore`] which implements [`VectorStore`] using
 //! the [qdrant-client](https://docs.rs/qdrant-client) crate over gRPC.
 //!
+//! Qdrant accepts only unsigned integers and UUIDs as point IDs, so each chunk is
+//! stored under the UUID v5 of its scope and chunk ID, and the chunk ID itself is kept in
+//! the point's `chunk_id` payload field, which search results read back. Upsert and delete
+//! derive the same point ID, so any chunk ID — `doc_0` from the built-in chunkers
+//! included — round-trips unchanged, and two scopes never share a point.
+//!
+//! The scope is kept in the `scope` payload field, which `create_collection` indexes as
+//! Qdrant's tenant field. Search, count, and purge filter on it inside Qdrant, so the scope
+//! applies before the nearest points are chosen. A [`Filter`](crate::Filter) compiles to a
+//! nested Qdrant filter joined to the scope's, over the payload keys `metadata.<key>`,
+//! `document_id`, `source_uri`, and `chunk_id`; `create_collection` adds a keyword index for
+//! each declared filterable key.
+//!
 //! # Example
 //!
 //! ```rust,ignore
 //! use adk_rag::qdrant::QdrantVectorStore;
+//! use adk_rag::{CollectionSpec, Scope, VectorQuery, VectorStore};
 //!
 //! let store = QdrantVectorStore::new("http://localhost:6334")?;
-//! store.create_collection("docs", 384).await?;
-//! store.upsert("docs", &chunks).await?;
-//! let results = store.search("docs", &query_embedding, 5).await?;
+//! let scope = Scope::single_tenant();
+//! store.create_collection("docs", &CollectionSpec::new(384)).await?;
+//! store.upsert("docs", &scope, &chunks).await?;
+//! let results = store.search("docs", &scope, &VectorQuery::new(&query_embedding, 5)).await?;
 //! ```
 
 use std::collections::HashMap;
@@ -20,20 +35,80 @@ use async_trait::async_trait;
 use qdrant_client::qdrant::point_id::PointIdOptions;
 use qdrant_client::qdrant::value::Kind;
 use qdrant_client::qdrant::{
-    CreateCollectionBuilder, DeletePointsBuilder, Distance, PointStruct, PointsIdsList,
-    SearchPointsBuilder, UpsertPointsBuilder, Value as QdrantValue, VectorParamsBuilder,
+    Condition, CountPointsBuilder, CreateCollectionBuilder, CreateFieldIndexCollectionBuilder,
+    DeletePointsBuilder, Distance, FieldType, Filter, KeywordIndexParamsBuilder, PointId,
+    PointStruct, PointsIdsList, SearchPointsBuilder, UpsertPointsBuilder, Value as QdrantValue,
+    VectorParamsBuilder,
 };
 use qdrant_client::{Payload, Qdrant};
 use tracing::debug;
+use uuid::Uuid;
 
 use crate::document::{Chunk, SearchResult};
 use crate::error::{RagError, Result};
-use crate::vectorstore::VectorStore;
+use crate::filter::{self, Filter as RagFilter};
+use crate::scope::Scope;
+use crate::vectorstore::{CollectionSpec, VectorQuery, VectorStore};
+
+/// Namespace of the UUID v5 point IDs: the v5 UUID of
+/// `https://github.com/zavora-ai/adk-rust/adk-rag/qdrant/chunk-id` in the URL namespace.
+/// Changing it orphans every stored point.
+const CHUNK_ID_NAMESPACE: Uuid = Uuid::from_u128(0xd821_7313_3204_50e2_a8d8_df0d_2973_2b60);
+
+/// Payload field holding the chunk ID a point ID was derived from.
+const CHUNK_ID_FIELD: &str = "chunk_id";
+
+/// Payload field holding the point's scope, indexed as the collection's tenant field.
+const SCOPE_FIELD: &str = "scope";
+
+/// Maps a scope and chunk ID to the point ID Qdrant stores the chunk under.
+fn point_id(scope: &Scope, chunk_id: &str) -> PointId {
+    Uuid::new_v5(&CHUNK_ID_NAMESPACE, scope.record_key(chunk_id).as_bytes()).to_string().into()
+}
+
+/// Selects a scope's points, or those of them `filter` matches.
+fn scope_filter(scope: &Scope, filter: Option<&RagFilter>) -> Result<Filter> {
+    let mut conditions = vec![Condition::matches(SCOPE_FIELD, scope.as_str().to_string())];
+    if let Some(filter) = filter {
+        filter.validate()?;
+        conditions.push(condition(filter));
+    }
+    Ok(Filter::must(conditions))
+}
+
+/// The payload key of a filter field.
+fn payload_key(field: &filter::Field) -> String {
+    match field {
+        filter::Field::Metadata(key) => format!("metadata.{key}"),
+        filter::Field::DocumentId => "document_id".to_string(),
+        filter::Field::SourceUri => "source_uri".to_string(),
+        filter::Field::ChunkId => CHUNK_ID_FIELD.to_string(),
+    }
+}
+
+/// Compiles a validated filter to a Qdrant condition.
+///
+/// A `match` on a missing payload key is false and `must_not` of it is true, so a point
+/// that lacks a field behaves as [`RagFilter::matches`] says.
+fn condition(filter: &RagFilter) -> Condition {
+    match filter {
+        RagFilter::Eq(field, value) => Condition::matches(payload_key(field), value.clone()),
+        RagFilter::In(field, values) => Condition::matches(payload_key(field), values.clone()),
+        RagFilter::Exists(field) => {
+            Filter::must_not([Condition::is_empty(payload_key(field))]).into()
+        }
+        RagFilter::And(filters) => Filter::must(filters.iter().map(condition)).into(),
+        RagFilter::Or(filters) => Filter::should(filters.iter().map(condition)).into(),
+        RagFilter::Not(filter) => Filter::must_not([condition(filter)]).into(),
+    }
+}
 
 /// A [`VectorStore`] backed by [Qdrant](https://qdrant.tech/).
 ///
 /// Wraps a [`qdrant_client::Qdrant`] client and maps collections to Qdrant
-/// collections with cosine distance. Chunk metadata is stored as Qdrant payload.
+/// collections with cosine distance. Chunk text, document ID, metadata, source URI,
+/// title, and scope are stored as Qdrant payload.
+/// Points are keyed by the UUID v5 of the scope and chunk ID; the payload keeps both.
 pub struct QdrantVectorStore {
     client: Qdrant,
 }
@@ -70,23 +145,45 @@ impl QdrantVectorStore {
 
 #[async_trait]
 impl VectorStore for QdrantVectorStore {
-    async fn create_collection(&self, name: &str, dimensions: usize) -> Result<()> {
+    async fn create_collection(&self, name: &str, spec: &CollectionSpec) -> Result<()> {
+        spec.validate()?;
+        let dimensions = spec.dimensions;
         let collections = self.client.list_collections().await.map_err(Self::map_err)?;
         let exists = collections.collections.iter().any(|c| c.name == name);
         if exists {
             debug!(collection = name, "qdrant collection already exists, skipping creation");
-            return Ok(());
+        } else {
+            self.client
+                .create_collection(
+                    CreateCollectionBuilder::new(name).vectors_config(VectorParamsBuilder::new(
+                        dimensions as u64,
+                        Distance::Cosine,
+                    )),
+                )
+                .await
+                .map_err(Self::map_err)?;
+            debug!(collection = name, dimensions, "created qdrant collection");
         }
 
+        // Idempotent, so a collection created by an earlier release gains the index too.
         self.client
-            .create_collection(
-                CreateCollectionBuilder::new(name)
-                    .vectors_config(VectorParamsBuilder::new(dimensions as u64, Distance::Cosine)),
+            .create_field_index(
+                CreateFieldIndexCollectionBuilder::new(name, SCOPE_FIELD, FieldType::Keyword)
+                    .field_index_params(KeywordIndexParamsBuilder::default().is_tenant(true))
+                    .wait(true),
             )
             .await
             .map_err(Self::map_err)?;
-
-        debug!(collection = name, dimensions, "created qdrant collection");
+        for key in &spec.filterable {
+            let field = payload_key(&filter::Field::metadata(key.clone()));
+            self.client
+                .create_field_index(
+                    CreateFieldIndexCollectionBuilder::new(name, field, FieldType::Keyword)
+                        .wait(true),
+                )
+                .await
+                .map_err(Self::map_err)?;
+        }
         Ok(())
     }
 
@@ -96,7 +193,7 @@ impl VectorStore for QdrantVectorStore {
         Ok(())
     }
 
-    async fn upsert(&self, collection: &str, chunks: &[Chunk]) -> Result<()> {
+    async fn upsert(&self, collection: &str, scope: &Scope, chunks: &[Chunk]) -> Result<()> {
         if chunks.is_empty() {
             return Ok(());
         }
@@ -105,12 +202,26 @@ impl VectorStore for QdrantVectorStore {
             .iter()
             .map(|chunk| {
                 let mut payload_map = serde_json::Map::new();
+                payload_map.insert(
+                    SCOPE_FIELD.to_string(),
+                    serde_json::Value::String(scope.as_str().to_string()),
+                );
+                payload_map.insert(
+                    CHUNK_ID_FIELD.to_string(),
+                    serde_json::Value::String(chunk.id.clone()),
+                );
                 payload_map
                     .insert("text".to_string(), serde_json::Value::String(chunk.text.clone()));
                 payload_map.insert(
                     "document_id".to_string(),
                     serde_json::Value::String(chunk.document_id.clone()),
                 );
+                for (field, value) in [("source_uri", &chunk.source_uri), ("title", &chunk.title)] {
+                    if let Some(value) = value {
+                        payload_map
+                            .insert(field.to_string(), serde_json::Value::String(value.clone()));
+                    }
+                }
                 let metadata_obj: serde_json::Map<String, serde_json::Value> = chunk
                     .metadata
                     .iter()
@@ -121,7 +232,7 @@ impl VectorStore for QdrantVectorStore {
                 let payload =
                     Payload::try_from(serde_json::Value::Object(payload_map)).unwrap_or_default();
 
-                PointStruct::new(chunk.id.clone(), chunk.embedding.clone(), payload)
+                PointStruct::new(point_id(scope, &chunk.id), chunk.embedding.clone(), payload)
             })
             .collect();
 
@@ -134,13 +245,12 @@ impl VectorStore for QdrantVectorStore {
         Ok(())
     }
 
-    async fn delete(&self, collection: &str, ids: &[&str]) -> Result<()> {
+    async fn delete(&self, collection: &str, scope: &Scope, ids: &[&str]) -> Result<()> {
         if ids.is_empty() {
             return Ok(());
         }
 
-        let point_ids: Vec<qdrant_client::qdrant::PointId> =
-            ids.iter().map(|id| (*id).into()).collect();
+        let point_ids: Vec<PointId> = ids.iter().map(|id| point_id(scope, id)).collect();
 
         self.client
             .delete_points(
@@ -158,13 +268,14 @@ impl VectorStore for QdrantVectorStore {
     async fn search(
         &self,
         collection: &str,
-        embedding: &[f32],
-        top_k: usize,
+        scope: &Scope,
+        query: &VectorQuery<'_>,
     ) -> Result<Vec<SearchResult>> {
         let response = self
             .client
             .search_points(
-                SearchPointsBuilder::new(collection, embedding.to_vec(), top_k as u64)
+                SearchPointsBuilder::new(collection, query.embedding.to_vec(), query.top_k as u64)
+                    .filter(scope_filter(scope, query.filter)?)
                     .with_payload(true),
             )
             .await
@@ -174,13 +285,18 @@ impl VectorStore for QdrantVectorStore {
             .result
             .into_iter()
             .map(|scored| {
+                // A point without the field predates derived point IDs; its point ID was the
+                // chunk ID.
                 let id = scored
-                    .id
-                    .as_ref()
-                    .and_then(|pid| match &pid.point_id_options {
-                        Some(PointIdOptions::Uuid(s)) => Some(s.clone()),
-                        Some(PointIdOptions::Num(n)) => Some(n.to_string()),
-                        None => None,
+                    .payload
+                    .get(CHUNK_ID_FIELD)
+                    .and_then(Self::extract_string)
+                    .or_else(|| {
+                        scored.id.as_ref().and_then(|pid| match &pid.point_id_options {
+                            Some(PointIdOptions::Uuid(s)) => Some(s.clone()),
+                            Some(PointIdOptions::Num(n)) => Some(n.to_string()),
+                            None => None,
+                        })
                     })
                     .unwrap_or_default();
 
@@ -209,13 +325,134 @@ impl VectorStore for QdrantVectorStore {
                     })
                     .unwrap_or_default();
 
-                SearchResult {
-                    chunk: Chunk { id, text, embedding: vec![], metadata, document_id },
-                    score: scored.score,
-                }
+                let mut chunk = Chunk::new(id, document_id, text);
+                chunk.metadata = metadata;
+                chunk.source_uri = scored.payload.get("source_uri").and_then(Self::extract_string);
+                chunk.title = scored.payload.get("title").and_then(Self::extract_string);
+                SearchResult { chunk, score: scored.score }
             })
             .collect();
 
         Ok(results)
+    }
+
+    async fn count(
+        &self,
+        collection: &str,
+        scope: &Scope,
+        filter: Option<&RagFilter>,
+    ) -> Result<u64> {
+        let selector = scope_filter(scope, filter)?;
+        let response = self
+            .client
+            .count(CountPointsBuilder::new(collection).filter(selector).exact(true))
+            .await
+            .map_err(Self::map_err)?;
+        Ok(response.result.map_or(0, |result| result.count))
+    }
+
+    async fn delete_where(
+        &self,
+        collection: &str,
+        scope: &Scope,
+        filter: &RagFilter,
+    ) -> Result<u64> {
+        let selector = scope_filter(scope, Some(filter))?;
+        // Qdrant's delete reports no count, so the count is taken first.
+        let count = self.count(collection, scope, Some(filter)).await?;
+        self.client
+            .delete_points(DeletePointsBuilder::new(collection).points(selector).wait(true))
+            .await
+            .map_err(Self::map_err)?;
+        debug!(collection, deleted = count, "deleted matching points from qdrant");
+        Ok(count)
+    }
+
+    async fn purge_scope(&self, collection: &str, scope: &Scope) -> Result<u64> {
+        // Qdrant's delete reports no count, so the count is taken first.
+        let count = self.count(collection, scope, None).await?;
+        self.client
+            .delete_points(
+                DeletePointsBuilder::new(collection).points(scope_filter(scope, None)?).wait(true),
+            )
+            .await
+            .map_err(Self::map_err)?;
+        debug!(collection, purged = count, "purged scope from qdrant");
+        Ok(count)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn uuid_of(point: PointId) -> Option<String> {
+        match point.point_id_options {
+            Some(PointIdOptions::Uuid(uuid)) => Some(uuid),
+            Some(PointIdOptions::Num(_)) | None => None,
+        }
+    }
+
+    #[test]
+    fn filters_compile_to_nested_qdrant_conditions() {
+        let filter = RagFilter::and([
+            RagFilter::eq(filter::Field::metadata("lang"), "en"),
+            !RagFilter::exists(filter::Field::SourceUri),
+            RagFilter::is_in(filter::Field::DocumentId, ["a", "b"]),
+        ]);
+        let scope = Scope::new("tenant").unwrap();
+        assert_eq!(
+            scope_filter(&scope, Some(&filter)).unwrap(),
+            Filter::must([
+                Condition::matches(SCOPE_FIELD, "tenant".to_string()),
+                Filter::must([
+                    Condition::matches("metadata.lang", "en".to_string()),
+                    Filter::must_not(
+                        [Filter::must_not([Condition::is_empty("source_uri")]).into()]
+                    )
+                    .into(),
+                    Condition::matches("document_id", vec!["a".to_string(), "b".to_string()]),
+                ])
+                .into(),
+            ])
+        );
+        assert!(scope_filter(&scope, Some(&RagFilter::or([]))).is_err());
+    }
+
+    #[test]
+    fn the_namespace_is_the_documented_v5_uuid() {
+        assert_eq!(
+            CHUNK_ID_NAMESPACE,
+            Uuid::new_v5(
+                &Uuid::NAMESPACE_URL,
+                b"https://github.com/zavora-ai/adk-rust/adk-rag/qdrant/chunk-id"
+            )
+        );
+    }
+
+    #[test]
+    fn point_ids_are_stable_uuid_v5_values_of_the_scope_and_chunk_id() {
+        let scope = Scope::single_tenant();
+        // Stored points are addressed by these values; a change orphans them.
+        assert_eq!(
+            [uuid_of(point_id(&scope, "doc_0")), uuid_of(point_id(&scope, "alpha")),],
+            [
+                Some(Uuid::new_v5(&CHUNK_ID_NAMESPACE, b"14::single-tenantdoc_0").to_string()),
+                Some(Uuid::new_v5(&CHUNK_ID_NAMESPACE, b"14::single-tenantalpha").to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn distinct_scope_and_chunk_id_pairs_get_distinct_point_ids() {
+        let uuid_shaped = "550e8400-e29b-41d4-a716-446655440000";
+        let ids = ["doc_0", "doc_1", "42", uuid_shaped, "550E8400-E29B-41D4-A716-446655440000"];
+        let scopes = [Scope::single_tenant(), Scope::new("a").unwrap(), Scope::new("a1").unwrap()];
+        let points: std::collections::BTreeSet<String> = scopes
+            .iter()
+            .flat_map(|scope| ids.iter().filter_map(move |id| uuid_of(point_id(scope, id))))
+            .collect();
+        assert_eq!(points.len(), ids.len() * scopes.len());
+        assert!(!points.contains(uuid_shaped), "a UUID-shaped chunk ID is mapped like any other");
     }
 }

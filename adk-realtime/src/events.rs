@@ -286,6 +286,13 @@ pub enum ServerEvent {
     },
 
     /// Session configuration was updated.
+    ///
+    /// Deprecated: providers in this crate report a created session with
+    /// [`SessionCreated`](Self::SessionCreated) and apply configuration
+    /// updates without a distinct public event. No provider implemented
+    /// here constructs this variant; it is kept only so existing matches
+    /// keep compiling.
+    #[deprecated = "no provider implemented here constructs SessionUpdated; session setup is reported with SessionCreated"]
     #[serde(rename = "session.updated")]
     SessionUpdated {
         /// Unique event ID.
@@ -398,9 +405,12 @@ pub enum ServerEvent {
     /// side effect may have to undo it. Ignoring this event means a request the
     /// caller withdrew can still take effect.
     ///
-    /// The runner surfaces this but does not itself abort work already
-    /// dispatched — whether an in-flight effect can be cancelled or must be
-    /// compensated is the application's decision, not the transport's.
+    /// The runner fences work already dispatched under these ids: a call
+    /// that has not started never executes, a read-only call in flight is
+    /// aborted, and a non-idempotent call cancelled after it started is
+    /// answered as outcome-unknown rather than as a success. Whether an
+    /// effect that already landed must be compensated remains the
+    /// application's decision.
     ///
     #[serde(rename = "tool_call.cancelled")]
     ToolCallCancelled {
@@ -656,6 +666,23 @@ pub enum ServerEvent {
         content_index: u32,
         /// Final complete transcript.
         transcript: String,
+    },
+
+    /// A tool call held for a confirmation decision.
+    ///
+    /// Emitted by `IntegratedRealtimeRunner`, never by a provider, when the governed path
+    /// holds a call (`ToolAuthorization::Pending`) or when a tool's delegate held a call of
+    /// its own (an `AgentTool` whose agent held a call surfaces it through the tool
+    /// context's actions). `call_id` is the provider's call; `request` carries the final
+    /// arguments, the acting agent and the tool's origin, and its fingerprint is the key a
+    /// decision is recorded under in the run's `ApprovalStore`. Once a decision exists,
+    /// `IntegratedRealtimeRunner::resume_held_calls` runs the call.
+    #[serde(rename = "tool.confirmation_requested")]
+    ToolConfirmationRequested {
+        /// The provider's call ID.
+        call_id: String,
+        /// The held request, with the call's final arguments.
+        request: adk_core::ToolConfirmationRequest,
     },
 
     /// Unknown event type (for forward compatibility).

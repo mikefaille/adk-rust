@@ -10,6 +10,20 @@
 //! - [`transcript`] — `TranscriptAggregator` collects deltas into complete turns
 //! - [`context`] — `RealtimeToolContext` implementation for tool execution
 //! - [`builder`] — `IntegratedRealtimeRunnerBuilder` for constructing the runner
+//!
+//! ## Held calls
+//!
+//! A tool call the governed path holds for a confirmation decision, or that a tool's
+//! delegate holds (an `AgentTool` whose agent held a call surfaces it through the tool
+//! context's actions), is answered to the model as a
+//! [`confirmation_pending_response`](adk_core::confirmation_pending_response), recorded in
+//! the session as an event authored by the runner's agent
+//! ([`agent_name`](IntegratedRealtimeRunnerBuilder::agent_name)) that carries the request,
+//! and surfaced to the caller as
+//! [`crate::events::ServerEvent::ToolConfirmationRequested`].
+//! Once a decision exists — in the run's `ApprovalStore`, as a `tool_approvals` entry, or
+//! through a confirmation handler — [`IntegratedRealtimeRunner::resume_held_calls`] runs
+//! each held call under its original call ID, as `LlmAgent` resumes its held calls.
 
 pub mod builder;
 pub mod context;
@@ -23,6 +37,9 @@ pub use tool_bridge::ToolBridgeAdapter;
 pub use transcript::TranscriptAggregator;
 
 use serde_json::Value;
+
+/// Longest rendering of a resumed call's result carried to the model as text.
+const RESUMED_RESULT_MAX_CHARS: usize = 2_000;
 
 // ─── Shared Data Types ───────────────────────────────────────────────────────
 
@@ -77,6 +94,17 @@ pub struct CompletedToolCall {
     pub result: Value,
 }
 
+/// A held call [`IntegratedRealtimeRunner::resume_held_calls`] ran.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResumedToolCall {
+    /// The provider's call ID the call was held under.
+    pub call_id: String,
+    /// The tool that ran.
+    pub name: String,
+    /// The result the model received.
+    pub result: Value,
+}
+
 /// Configuration options specific to the integration layer.
 ///
 /// Controls which ADK service interactions are performed automatically
@@ -114,16 +142,16 @@ impl Default for IntegrationConfig {
 
 use std::sync::Arc;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 
-use adk_core::Content;
+use adk_core::{Content, ToolContext as _};
 use adk_memory::MemoryService;
 use adk_plugin::EnhancedPluginManager;
 use adk_session::SessionService;
 use tokio::sync::RwLock;
 
 use crate::config::SessionUpdateConfig;
-use crate::error::Result;
+use crate::error::{RealtimeError, Result};
 use crate::events::ServerEvent;
 use crate::runner::RealtimeRunner;
 
@@ -135,6 +163,10 @@ use crate::runner::RealtimeRunner;
 /// - **Memory storage**: Turns are stored for future RAG retrieval.
 /// - **Plugin hooks**: Tool calls pass through `before_tool_call`/`after_tool_call` hooks.
 /// - **Transcript aggregation**: Streaming deltas are assembled into complete turns.
+/// - **Held calls**: a call the governed path or a tool's delegate holds is surfaced as a
+///   realtime event and resumed once decided ([`resume_held_calls`](Self::resume_held_calls)).
+/// - **Metering and guardrails**: every response is metered in the run's spend ledger, and
+///   completed turns pass the output guardrails (`guardrails` feature).
 ///
 /// Use [`IntegratedRealtimeRunnerBuilder`] to
 /// construct an instance.
@@ -151,6 +183,11 @@ use crate::runner::RealtimeRunner;
 ///     .build()?;
 /// ```
 pub struct IntegratedRealtimeRunner {
+    pub(crate) inner: Arc<Inner>,
+}
+
+/// The runner's state, shared with the tasks that dispatch tools concurrently.
+pub(crate) struct Inner {
     /// The underlying realtime runner handling transport and tool execution.
     pub(crate) runner: Arc<RealtimeRunner>,
     /// Optional session service for transcript persistence.
@@ -158,7 +195,6 @@ pub struct IntegratedRealtimeRunner {
     /// Optional memory service for RAG storage and retrieval.
     pub(crate) memory_service: Option<Arc<dyn MemoryService>>,
     /// Optional plugin manager for lifecycle hooks.
-    #[allow(dead_code)] // Used by task 6.5
     pub(crate) plugin_manager: Option<Arc<EnhancedPluginManager>>,
     /// Aggregator that assembles streaming deltas into complete turns.
     pub(crate) aggregator: RwLock<TranscriptAggregator>,
@@ -172,6 +208,71 @@ pub struct IntegratedRealtimeRunner {
     /// dropped the originals, which is why the active path could only reach the adapter — and
     /// the adapter applies no confirmation, callbacks, or plugins.
     pub(crate) adk_tools: HashMap<String, Arc<dyn adk_core::Tool>>,
+    /// The identity the server authenticated for the session; tool contexts report it
+    /// (spec 3.1 §7.17).
+    pub(crate) request_context: Option<adk_core::RequestContext>,
+    /// Runner-level events `next_event` returns before polling the provider again: a hold
+    /// a dispatch surfaced.
+    pub(crate) pending_events: std::sync::Mutex<VecDeque<ServerEvent>>,
+    /// Call IDs the current provider session issued, so a resumed call's result goes back
+    /// as a tool output when the provider still knows the call and as text otherwise.
+    pub(crate) connected_calls: std::sync::Mutex<HashSet<String>>,
+    /// Whether `next_event` dispatches tools on their own tasks.
+    pub(crate) concurrent_dispatch: bool,
+    /// Output guardrails on completed turns.
+    #[cfg(feature = "guardrails")]
+    pub(crate) output_guardrails: Option<adk_guardrail::GuardrailSet>,
+}
+
+/// What the governed path produced for one call.
+struct GovernedOutcome {
+    /// The result sent back to the provider.
+    result: Value,
+    /// The request for a call held for a confirmation decision.
+    held: Option<adk_core::ToolConfirmationRequest>,
+    /// The status of an answer the runner wrote in place of the tool's result.
+    status: Option<adk_core::ToolResultStatus>,
+    /// The error behind `status`, when there is one.
+    cause: Option<adk_core::AdkError>,
+    /// Whether the tool executed.
+    executed: bool,
+}
+
+impl GovernedOutcome {
+    /// An answer the runner writes, before anything ran.
+    fn answer(
+        result: Value,
+        status: adk_core::ToolResultStatus,
+        cause: Option<adk_core::AdkError>,
+    ) -> Self {
+        Self { result, held: None, status: Some(status), cause, executed: false }
+    }
+
+    /// Applies a result screen's verdict: a withheld result's status follows
+    /// [`ToolResultStatus::when_withheld`](adk_core::ToolResultStatus::when_withheld).
+    fn screened(&mut self, (result, withheld): (Value, bool)) {
+        self.result = result;
+        if withheld {
+            let status = adk_core::ToolResultStatus::when_withheld(self.status, self.executed);
+            if self.status != Some(status) {
+                self.status = Some(status);
+                self.cause = None;
+            }
+        }
+    }
+
+    /// The function response the session records for call `call_id` to `name`.
+    fn part(&self, name: &str, call_id: &str) -> adk_core::Part {
+        let mut part = adk_core::Part::FunctionResponse {
+            function_response: adk_core::FunctionResponseData::new(name, self.result.clone()),
+            id: Some(call_id.to_string()),
+            annotations: None,
+        };
+        if let Some(status) = self.status {
+            part.set_tool_result_status(status, self.cause.as_ref());
+        }
+        part
+    }
 }
 
 /// Renders the most recent `limit` turns as bounded `role: text` lines.
@@ -210,10 +311,41 @@ fn summarize_turns(turns: &[Content], limit: usize) -> Vec<String> {
         .collect()
 }
 
+/// Truncates `text` to `max` characters on a character boundary, marking the cut.
+fn bounded(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let cut: String = text.chars().take(max).collect();
+    format!("{cut}…")
+}
+
 impl IntegratedRealtimeRunner {
     /// Creates a new [`IntegratedRealtimeRunnerBuilder`].
     pub fn builder() -> builder::IntegratedRealtimeRunnerBuilder {
         builder::IntegratedRealtimeRunnerBuilder::new()
+    }
+
+    /// Wraps the runner's state, for the crate's tests.
+    #[cfg(test)]
+    pub(crate) fn from_inner(inner: Inner) -> Self {
+        Self { inner: Arc::new(inner) }
+    }
+
+    /// The session identity every service interaction is scoped to.
+    pub fn identity(&self) -> &SessionIdentity {
+        &self.inner.identity
+    }
+
+    /// The integration-layer configuration the runner persists and recalls with.
+    pub fn integration_config(&self) -> &IntegrationConfig {
+        &self.inner.config
+    }
+
+    /// The run config every tool call is governed under, when
+    /// [`tool_governance`](IntegratedRealtimeRunnerBuilder::tool_governance) was set.
+    pub fn governance(&self) -> Option<&adk_core::RunConfig> {
+        self.inner.runner.governance_config()
     }
 
     /// Connect to the realtime provider.
@@ -241,6 +373,7 @@ impl IntegratedRealtimeRunner {
     /// runner.connect().await?;
     /// ```
     pub async fn connect(&self) -> Result<()> {
+        let inner = &self.inner;
         // Context is collected first, then injected into the provider config as one block.
         // Previously the session was fetched into `_session` and dropped, and the memory
         // branch logged "injecting memory entries" next to a comment saying injection was a
@@ -249,11 +382,11 @@ impl IntegratedRealtimeRunner {
         let mut context_sections: Vec<String> = Vec::new();
 
         // 1. Prior conversation history.
-        if let Some(ref session_service) = self.session_service {
+        if let Some(ref session_service) = inner.session_service {
             let get_req = adk_session::GetRequest {
-                app_name: self.identity.app_name.clone(),
-                user_id: self.identity.user_id.clone(),
-                session_id: self.identity.session_id.clone(),
+                app_name: inner.identity.app_name.clone(),
+                user_id: inner.identity.user_id.clone(),
+                session_id: inner.identity.session_id.clone(),
                 num_recent_events: None,
                 after: None,
             };
@@ -265,9 +398,9 @@ impl IntegratedRealtimeRunner {
                         .into_iter()
                         .filter_map(|event| event.llm_response.content)
                         .collect();
-                    let carried = summarize_turns(&history, self.config.max_history_injection);
+                    let carried = summarize_turns(&history, inner.config.max_history_injection);
                     tracing::debug!(
-                        session_id = %self.identity.session_id,
+                        session_id = %inner.identity.session_id,
                         turns.available = history.len(),
                         turns.carried = carried.len(),
                         "loaded prior session history"
@@ -279,7 +412,7 @@ impl IntegratedRealtimeRunner {
                 }
                 Err(e) => {
                     tracing::warn!(
-                        session_id = %self.identity.session_id,
+                        session_id = %inner.identity.session_id,
                         error = %e,
                         "session load failed (non-fatal)"
                     );
@@ -288,15 +421,15 @@ impl IntegratedRealtimeRunner {
         }
 
         // 2. Recalled memory.
-        if self.config.inject_memory_context
-            && let Some(ref memory_service) = self.memory_service
+        if inner.config.inject_memory_context
+            && let Some(ref memory_service) = inner.memory_service
         {
             match memory_service
                 .search(adk_memory::SearchRequest {
                     query: "session context".to_string(),
-                    user_id: self.identity.user_id.clone(),
-                    app_name: self.identity.app_name.clone(),
-                    limit: Some(self.config.max_memory_injection),
+                    user_id: inner.identity.user_id.clone(),
+                    app_name: inner.identity.app_name.clone(),
+                    limit: Some(inner.config.max_memory_injection),
                     min_score: None,
                     project_id: None,
                 })
@@ -309,7 +442,7 @@ impl IntegratedRealtimeRunner {
                             .iter()
                             .map(|entry| entry.content.clone())
                             .collect::<Vec<Content>>(),
-                        self.config.max_memory_injection,
+                        inner.config.max_memory_injection,
                     );
                     tracing::debug!(
                         count = recalled.len(),
@@ -330,11 +463,14 @@ impl IntegratedRealtimeRunner {
         }
 
         if !context_sections.is_empty() {
-            self.runner.prepend_instruction_context(&context_sections.join("\n\n")).await;
+            inner.runner.prepend_instruction_context(&context_sections.join("\n\n")).await;
         }
 
+        // A new provider session knows none of the calls an earlier one issued.
+        inner.connected_calls.lock().unwrap_or_else(|e| e.into_inner()).clear();
+
         // 3. Connect the underlying runner — this is the only error that propagates
-        self.runner.connect().await
+        inner.runner.connect().await
     }
 
     /// Send audio to the realtime session.
@@ -347,12 +483,27 @@ impl IntegratedRealtimeRunner {
     /// runner.send_audio(base64_encoded_pcm).await?;
     /// ```
     pub async fn send_audio(&self, audio_base64: &str) -> Result<()> {
-        self.runner.send_audio(audio_base64).await
+        self.inner.runner.send_audio(audio_base64).await
+    }
+
+    /// Sends raw PCM audio to the realtime session, in the chunk's own format.
+    ///
+    /// Delegates to [`RealtimeRunner::send_audio_chunk`].
+    pub async fn send_audio_chunk(&self, audio: &crate::audio::AudioChunk) -> Result<()> {
+        self.inner.runner.send_audio_chunk(audio).await
+    }
+
+    /// Commits the audio sent so far as one user turn, for a session without server VAD.
+    ///
+    /// Delegates to [`RealtimeRunner::commit_audio`].
+    pub async fn commit_audio(&self) -> Result<()> {
+        self.inner.runner.commit_audio().await
     }
 
     /// Send text to the realtime session.
     ///
-    /// Delegates to the underlying [`RealtimeRunner`].
+    /// Delegates to the underlying [`RealtimeRunner`]. With `persist_transcripts`, the
+    /// text is also saved as a user event, so typed and spoken turns share one record.
     ///
     /// # Example
     ///
@@ -360,13 +511,19 @@ impl IntegratedRealtimeRunner {
     /// runner.send_text("Hello, how are you?").await?;
     /// ```
     pub async fn send_text(&self, text: &str) -> Result<()> {
-        self.runner.send_text(text).await
+        self.inner.runner.send_text(text).await?;
+        if self.inner.config.persist_transcripts && !text.trim().is_empty() {
+            self.inner
+                .persist_event(user_event(text), "typed text session persist failed (non-fatal)")
+                .await;
+        }
+        Ok(())
     }
 
     /// Send a base64-encoded video/image frame (e.g. `image/jpeg`) for
     /// multimodal input. Delegates to the underlying [`RealtimeRunner`].
     pub async fn send_video_frame(&self, mime_type: &str, data_base64: &str) -> Result<()> {
-        self.runner.send_video_frame(mime_type, data_base64).await
+        self.inner.runner.send_video_frame(mime_type, data_base64).await
     }
 
     /// Trigger a response from the model.
@@ -379,7 +536,7 @@ impl IntegratedRealtimeRunner {
     /// runner.create_response().await?;
     /// ```
     pub async fn create_response(&self) -> Result<()> {
-        self.runner.create_response().await
+        self.inner.runner.create_response().await
     }
 
     /// Interrupt the current response.
@@ -392,7 +549,15 @@ impl IntegratedRealtimeRunner {
     /// runner.interrupt().await?;
     /// ```
     pub async fn interrupt(&self) -> Result<()> {
-        self.runner.interrupt().await
+        self.inner.runner.interrupt().await
+    }
+
+    /// The system instruction the provider session was created with.
+    ///
+    /// Includes any prior-history and recalled-memory context carried in by
+    /// [`IntegratedRealtimeRunner::connect`].
+    pub async fn instruction(&self) -> Option<String> {
+        self.inner.runner.instruction().await
     }
 
     /// Update the session configuration.
@@ -409,16 +574,8 @@ impl IntegratedRealtimeRunner {
     /// );
     /// runner.update_session(update).await?;
     /// ```
-    /// The system instruction the provider session was created with.
-    ///
-    /// Includes any prior-history and recalled-memory context carried in by
-    /// [`IntegratedRealtimeRunner::connect`].
-    pub async fn instruction(&self) -> Option<String> {
-        self.runner.instruction().await
-    }
-
     pub async fn update_session(&self, config: SessionUpdateConfig) -> Result<()> {
-        self.runner.update_session(config).await
+        self.inner.runner.update_session(config).await
     }
 
     /// Close the realtime session.
@@ -431,7 +588,7 @@ impl IntegratedRealtimeRunner {
     /// runner.close().await?;
     /// ```
     pub async fn close(&self) -> Result<()> {
-        self.runner.close().await
+        self.inner.runner.close().await
     }
 
     /// Process the next event from the realtime session with full integration.
@@ -439,6 +596,16 @@ impl IntegratedRealtimeRunner {
     /// Feeds each [`ServerEvent`] to the [`TranscriptAggregator`] for turn assembly.
     /// When a turn completes, persists the aggregated event to session/memory.
     /// The raw event is always forwarded to the caller.
+    ///
+    /// A hold a tool dispatch surfaced is returned as
+    /// [`ServerEvent::ToolConfirmationRequested`] ahead of the provider's next event. With
+    /// concurrent tool dispatch, a hold recorded while this call already waits on the provider
+    /// is returned by the next call, after the provider's next event; the hold is in the
+    /// session and the approval store as soon as it is recorded.
+    /// The run's spend ledger meters each response; a refused reservation returns
+    /// [`RealtimeError::SpendRefused`]. With output guardrails, a completed turn the
+    /// guardrails block is interrupted, left out of the session, and reported as
+    /// [`RealtimeError::OutputBlocked`].
     ///
     /// Returns `None` when the session is closed or no more events are available.
     ///
@@ -449,34 +616,143 @@ impl IntegratedRealtimeRunner {
     ///     match event? {
     ///         ServerEvent::AudioDelta { delta, .. } => { /* forward to browser */ }
     ///         ServerEvent::TranscriptDelta { delta, .. } => { /* show in UI */ }
+    ///         ServerEvent::ToolConfirmationRequested { request, .. } => { /* ask the user */ }
     ///         _ => {}
     ///     }
     /// }
     /// ```
     pub async fn next_event(&self) -> Option<Result<ServerEvent>> {
-        let event = self.runner.next_event().await?;
+        let inner = &self.inner;
+        if let Some(event) =
+            inner.pending_events.lock().unwrap_or_else(|e| e.into_inner()).pop_front()
+        {
+            return Some(Ok(event));
+        }
+
+        // A concurrently dispatched call may have surfaced its hold while
+        // this call waited on the provider. That hold must reach the caller
+        // before the provider event just obtained: a caller that acts on
+        // holds as events arrive (a spoken decision, say) would otherwise
+        // settle the earlier hold before learning the repeat superseded
+        // it. The obtained event keeps its place behind the queued hold.
+        let event = match inner.runner.next_event().await? {
+            Ok(current) => {
+                let mut pending = inner.pending_events.lock().unwrap_or_else(|e| e.into_inner());
+                if pending
+                    .iter()
+                    .any(|queued| matches!(queued, ServerEvent::ToolConfirmationRequested { .. }))
+                {
+                    pending.push_back(current);
+                    let queued = pending.pop_front();
+                    return Some(Ok(queued.expect("a hold was queued above")));
+                }
+                Ok(current)
+            }
+            Err(error) => Err(error),
+        };
 
         if let Ok(server_event) = &event {
             // Feed to transcript aggregator
-            let aggregated = self.aggregator.write().await.process(server_event);
+            let aggregated = {
+                let mut aggregator = inner.aggregator.write().await;
+                let first = aggregator.process(server_event);
+                let rest = aggregator.take_pending();
+                first.into_iter().chain(rest).collect::<Vec<_>>()
+            };
 
-            if let Some(agg_event) = aggregated {
-                self.handle_aggregated_event(agg_event).await;
+            for agg_event in aggregated {
+                let agg_event = match inner.screen_turn(agg_event).await {
+                    Ok(agg_event) => agg_event,
+                    Err(blocked) => return Some(Err(blocked)),
+                };
+                // A provider that streams the user's transcript without completing it
+                // (Gemini Live) gets the completion the aggregator inferred, so a caller
+                // sees one `InputTranscriptCompleted` per utterance on every provider.
+                if let AggregatedEvent::UserUtteranceComplete { transcript } = &agg_event
+                    && !matches!(server_event, ServerEvent::InputTranscriptCompleted { .. })
+                {
+                    inner.pending_events.lock().unwrap_or_else(|e| e.into_inner()).push_back(
+                        ServerEvent::InputTranscriptCompleted {
+                            item_id: "aggregated".to_string(),
+                            content_index: 0,
+                            transcript: transcript.clone(),
+                        },
+                    );
+                }
+                inner.handle_aggregated_event(agg_event).await;
+            }
+
+            // Fence dispatched calls the provider has withdrawn, so the
+            // spawn path below and any in-flight dispatch observe it.
+            match server_event {
+                ServerEvent::ToolCallCancelled { call_ids } => {
+                    inner.runner.cancel_tool_calls(call_ids);
+                }
+                ServerEvent::ResponseCancelled { .. } => {
+                    inner.runner.cancel_all_tool_calls();
+                }
+                _ => {}
             }
 
             // Auto-execute tool calls. Unlike `RealtimeRunner::run`, the pull-based
             // `next_event` path does not dispatch tools on its own, so we do it here:
             // bridged ADK tools and native handlers registered on the builder run,
             // and (with `auto_respond_tools`) the result is sent back to the model.
-            if let ServerEvent::FunctionCallDone { call_id, name, arguments, .. } = server_event
-                && let Err(e) = self.dispatch_with_policy(call_id, name, arguments).await
-            {
-                tracing::warn!(
-                    tool = %name,
-                    call_id = %call_id,
-                    error = %e,
-                    "tool dispatch failed (non-fatal)"
-                );
+            if let ServerEvent::FunctionCallDone { call_id, name, arguments, .. } = server_event {
+                inner
+                    .connected_calls
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(call_id.clone());
+                if inner.concurrent_dispatch {
+                    let task_inner = Arc::clone(inner);
+                    let (call_id, name, arguments) =
+                        (call_id.clone(), name.clone(), arguments.clone());
+                    task_inner.runner.begin_dispatch();
+                    let fence_token = task_inner.runner.register_tool_call(&call_id, &name);
+                    let spawn_token = fence_token.clone();
+                    let abort_inner = Arc::clone(&task_inner);
+                    let abort_call_id = call_id.clone();
+                    let task = tokio::spawn(async move {
+                        if let Err(e) = task_inner
+                            .dispatch_with_policy_fenced(
+                                &call_id,
+                                &name,
+                                &arguments,
+                                Some(spawn_token.clone()),
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                tool = %name,
+                                call_id = %call_id,
+                                error = %e,
+                                "tool dispatch failed (non-fatal)"
+                            );
+                        }
+                        task_inner.runner.unregister_tool_call(&call_id);
+                        // A fenced call is owed no follow-up response.
+                        if !spawn_token.is_cancelled()
+                            && task_inner.runner.end_dispatch()
+                            && let Err(e) = task_inner.runner.respond_after_tools().await
+                        {
+                            tracing::warn!(
+                                error = %e,
+                                "post-tool response trigger failed (non-fatal)"
+                            );
+                        } else if spawn_token.is_cancelled() {
+                            let _ = task_inner.runner.end_dispatch();
+                        }
+                    });
+                    abort_inner.runner.set_tool_abort_handle(&abort_call_id, task.abort_handle());
+                } else if let Err(e) = inner.dispatch_with_policy(call_id, name, arguments).await {
+                    tracing::warn!(
+                        tool = %name,
+                        call_id = %call_id,
+                        error = %e,
+                        "tool dispatch failed (non-fatal)"
+                    );
+                }
             }
 
             // When the dispatch response finishes, send the single owed follow-up
@@ -484,13 +760,245 @@ impl IntegratedRealtimeRunner {
             // mirrors what `RealtimeRunner::run` does in `handle_event`; the
             // pull-based path must do it explicitly.
             if let ServerEvent::ResponseDone { .. } = server_event
-                && let Err(e) = self.runner.respond_after_tools().await
+                && let Err(e) = inner.runner.respond_after_tools().await
             {
                 tracing::warn!(error = %e, "post-tool response trigger failed (non-fatal)");
             }
         }
 
         Some(event)
+    }
+
+    /// The calls this runner holds for a confirmation decision in its session, oldest
+    /// first: holds recorded by this runner or an earlier one on the same session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session cannot be read.
+    pub async fn held_calls(&self) -> Result<Vec<adk_core::HeldToolCall>> {
+        let Some(session_service) = &self.inner.session_service else {
+            return Ok(Vec::new());
+        };
+        let events = self.inner.session_events(session_service.as_ref()).await?;
+        Ok(adk_core::held_tool_calls(&events, self.inner.runner.agent_name(), ""))
+    }
+
+    /// Runs every held call of the session that has a decision, as `LlmAgent` resumes its
+    /// held calls at the start of a run.
+    ///
+    /// Each held call is re-authorized through the governed path under its original call
+    /// ID as a resumption of its request, so the decision — a `tool_approvals` entry, a
+    /// record in the run's `ApprovalStore`, or a confirmation handler — is taken by the same
+    /// path that would have taken it in the standard agent loop; a denial answers the call
+    /// as not run. The answer is saved to the session authored by the runner's agent, which
+    /// clears the hold. When the provider session still knows the call, the result goes
+    /// back as its tool output and the follow-up response is requested; otherwise it is
+    /// carried as a text turn, since the provider cannot accept output for a call it never
+    /// issued. A call without a decision stays held.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session cannot be read, the kill switch is frozen, the
+    /// approval store fails, or the provider refuses the result.
+    pub async fn resume_held_calls(&self) -> Result<Vec<ResumedToolCall>> {
+        let inner = &self.inner;
+        let (Some(session_service), Some(config), Some(scope)) = (
+            &inner.session_service,
+            inner.runner.governance_config(),
+            inner.runner.approval_scope(),
+        ) else {
+            return Ok(Vec::new());
+        };
+        let events = inner.session_events(session_service.as_ref()).await?;
+        let agent_name = inner.runner.agent_name();
+        let held = adk_core::held_tool_calls(&events, agent_name, "");
+        if held.is_empty() {
+            return Ok(Vec::new());
+        }
+        let gate = adk_core::ToolGate::new(config, agent_name, &scope.session_id, scope.clone());
+        let mut resumed = Vec::new();
+        for held in held {
+            let Some(call_id) = held.request.function_call_id.clone() else {
+                continue;
+            };
+            let decided = adk_core::confirmation_decision_available(&gate, &held.request)
+                .await
+                .map_err(|error| RealtimeError::ToolError(error.to_string()))?;
+            if !decided {
+                continue;
+            }
+            let Some(tool) = inner.adk_tools.get(&held.name).cloned() else {
+                tracing::warn!(
+                    tool = %held.name,
+                    call_id = %call_id,
+                    "held call names a tool this runner does not have; left held"
+                );
+                continue;
+            };
+            let ctx = inner.create_tool_context(&call_id);
+            let call =
+                adk_core::GovernedCall::for_tool(tool.as_ref(), call_id.clone(), held.args.clone())
+                    .resuming(held.request.clone());
+            let mut outcome = inner.governed_call(&tool, &ctx, call).await?;
+            if outcome.held.is_some() {
+                // The decision was not live after all: the call stays held.
+                continue;
+            }
+            outcome.screened(
+                inner
+                    .runner
+                    .screen_tool_result(&held.name, &held.args, outcome.result.clone())
+                    .await,
+            );
+            inner.persist_answer(&call_id, &held.name, &held.args, &outcome).await;
+            inner.deliver_resumed_result(&call_id, &held.name, &outcome.result).await?;
+            resumed.push(ResumedToolCall { call_id, name: held.name, result: outcome.result });
+        }
+        Ok(resumed)
+    }
+
+    /// Handles a completed aggregated event, for the crate's tests.
+    #[cfg(test)]
+    pub(crate) async fn handle_aggregated_event(&self, event: AggregatedEvent) {
+        self.inner.handle_aggregated_event(event).await;
+    }
+
+    /// Runs one tool through the policy pipeline, for the crate's tests.
+    #[cfg(test)]
+    pub(crate) async fn execute_tool_with_plugins(
+        &self,
+        tool: &Arc<dyn adk_core::Tool>,
+        call: &crate::events::ToolCall,
+    ) -> Result<Value> {
+        self.inner.execute_tool_with_plugins(tool, call).await
+    }
+
+    /// Runs one tool through the policy pipeline, for conformance tests.
+    ///
+    /// Exposed so the governed path can be asserted directly rather than only through a live
+    /// provider session, which is why this defect had no coverage.
+    #[doc(hidden)]
+    pub async fn execute_tool_with_plugins_for_test(
+        &self,
+        tool: &Arc<dyn adk_core::Tool>,
+        call: &crate::events::ToolCall,
+    ) -> Result<Value> {
+        self.inner.execute_tool_with_plugins(tool, call).await
+    }
+}
+
+/// A user event carrying `text`, as a spoken or typed turn is saved.
+fn user_event(text: &str) -> adk_core::Event {
+    let content = adk_core::Content::new("user").with_text(text);
+    let mut adk_event = adk_core::Event::new("realtime");
+    adk_event.author = "user".to_string();
+    adk_event.set_content(content);
+    adk_event
+}
+
+impl Inner {
+    /// The session's event log, oldest first.
+    async fn session_events(
+        &self,
+        session_service: &dyn SessionService,
+    ) -> Result<Vec<adk_core::Event>> {
+        let session = session_service
+            .get(adk_session::GetRequest {
+                app_name: self.identity.app_name.clone(),
+                user_id: self.identity.user_id.clone(),
+                session_id: self.identity.session_id.clone(),
+                num_recent_events: None,
+                after: None,
+            })
+            .await
+            .map_err(|error| RealtimeError::ToolError(error.to_string()))?;
+        Ok(session.events().all())
+    }
+
+    /// Appends `event` to the session, logging `failure` when it cannot be saved.
+    async fn persist_event(&self, event: adk_core::Event, failure: &'static str) {
+        if let Some(session_service) = &self.session_service
+            && let Err(e) = session_service.append_event(&self.identity.session_id, event).await
+        {
+            tracing::warn!(error = %e, "{failure}");
+        }
+    }
+
+    /// Screens a completed turn with the output guardrails, as `LlmAgent` screens final
+    /// text: a transform replaces the text, a block interrupts the response and fails the
+    /// event.
+    #[cfg(feature = "guardrails")]
+    async fn screen_turn(&self, event: AggregatedEvent) -> Result<AggregatedEvent> {
+        use adk_guardrail::{GuardrailError, GuardrailExecutor, GuardrailPhase, Severity};
+
+        let Some(guardrails) = &self.output_guardrails else {
+            return Ok(event);
+        };
+        let AggregatedEvent::TurnComplete {
+            text,
+            audio_transcript,
+            tool_calls,
+            item_id,
+            interrupted,
+        } = event
+        else {
+            return Ok(event);
+        };
+        let spoke_only = text.is_empty();
+        let shown = if spoke_only { audio_transcript.as_str() } else { text.as_str() };
+        if guardrails.is_empty() || shown.trim().is_empty() {
+            return Ok(AggregatedEvent::TurnComplete {
+                text,
+                audio_transcript,
+                tool_calls,
+                item_id,
+                interrupted,
+            });
+        }
+        let content = Content::new("model").with_text(shown);
+        match GuardrailExecutor::enforce(guardrails, &content, GuardrailPhase::Output, false).await
+        {
+            Ok(screening) => {
+                let screened: String =
+                    screening.content.parts.iter().filter_map(|part| part.text()).collect();
+                let (text, audio_transcript) =
+                    if spoke_only { (text, screened) } else { (screened, audio_transcript) };
+                Ok(AggregatedEvent::TurnComplete {
+                    text,
+                    audio_transcript,
+                    tool_calls,
+                    item_id,
+                    interrupted,
+                })
+            }
+            Err(error) => {
+                // The audio already played cannot be unsaid; what can be stopped is stopped,
+                // and nothing of the turn reaches the session or memory.
+                if let Err(e) = self.runner.interrupt().await {
+                    tracing::warn!(error = %e, "interrupting a blocked response failed");
+                }
+                let (guardrail, reason) = match &error {
+                    GuardrailError::Blocked { failures, .. } => failures
+                        .iter()
+                        .find(|failure| failure.severity != Severity::Low)
+                        .or_else(|| failures.first())
+                        .map(|failure| (failure.guardrail.clone(), failure.reason.clone()))
+                        .unwrap_or_default(),
+                    other => ("output_guardrails".to_string(), other.to_string()),
+                };
+                tracing::warn!(
+                    guardrail.name = %guardrail,
+                    item_id = %item_id,
+                    "output guardrail blocked a realtime turn"
+                );
+                Err(RealtimeError::OutputBlocked { guardrail, reason })
+            }
+        }
+    }
+
+    #[cfg(not(feature = "guardrails"))]
+    async fn screen_turn(&self, event: AggregatedEvent) -> Result<AggregatedEvent> {
+        Ok(event)
     }
 
     /// Handle a completed aggregated event (turn or user utterance).
@@ -500,7 +1008,7 @@ impl IntegratedRealtimeRunner {
     /// - `UserUtteranceComplete`: builds a user `Event`, persists to session
     ///
     /// All service errors are logged and swallowed (non-fatal).
-    async fn handle_aggregated_event(&self, event: AggregatedEvent) {
+    pub(crate) async fn handle_aggregated_event(&self, event: AggregatedEvent) {
         match &event {
             AggregatedEvent::TurnComplete { text, audio_transcript, .. } => {
                 tracing::debug!(text_len = text.len(), "turn complete");
@@ -514,13 +1022,9 @@ impl IntegratedRealtimeRunner {
                 adk_event.set_content(content.clone());
 
                 // 2. Persist to session
-                if self.config.persist_transcripts
-                    && let Some(ref session_service) = self.session_service
-                    && let Err(e) = session_service
-                        .append_event(&self.identity.session_id, adk_event.clone())
-                        .await
-                {
-                    tracing::warn!(error = %e, "session persist failed (non-fatal)");
+                if self.config.persist_transcripts {
+                    self.persist_event(adk_event.clone(), "session persist failed (non-fatal)")
+                        .await;
                 }
 
                 // 3. Store to memory
@@ -560,46 +1064,17 @@ impl IntegratedRealtimeRunner {
             AggregatedEvent::UserUtteranceComplete { transcript } => {
                 tracing::debug!(transcript_len = transcript.len(), "user utterance complete");
 
-                // Build user event and persist to session
-                let content = adk_core::Content::new("user").with_text(transcript);
-                let mut adk_event = adk_core::Event::new("realtime");
-                adk_event.author = "user".to_string();
-                adk_event.set_content(content);
-
-                if self.config.persist_transcripts
-                    && let Some(ref session_service) = self.session_service
-                    && let Err(e) =
-                        session_service.append_event(&self.identity.session_id, adk_event).await
-                {
-                    tracing::warn!(error = %e, "session persist failed (non-fatal)");
+                if self.config.persist_transcripts {
+                    self.persist_event(
+                        user_event(transcript),
+                        "session persist failed (non-fatal)",
+                    )
+                    .await;
                 }
             }
         }
     }
 
-    /// Execute a tool with plugin lifecycle hooks.
-    ///
-    /// When an [`EnhancedPluginManager`] is configured:
-    /// 1. Runs `before_tool_call` pipeline — may short-circuit with a synthetic result
-    /// 2. Executes the tool on `Continue`
-    /// 3. Runs `after_tool_call` pipeline with the result
-    ///
-    /// When no [`EnhancedPluginManager`] is configured, executes the tool directly.
-    ///
-    /// Records the completed tool call in the [`TranscriptAggregator`] regardless of path,
-    /// and emits an [`adk_core::Event`] with the function call and result.
-    ///
-    /// # Arguments
-    ///
-    /// * `tool` - The ADK tool to execute.
-    /// * `call` - The tool call metadata (call_id, name, arguments).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error only if the result construction fails. Plugin hook errors
-    /// are non-fatal: logged and swallowed, with execution falling through to
-    /// direct tool invocation.
-    #[allow(dead_code)] // Will be wired in event loop handling
     /// Dispatches one provider tool call, preferring the policy pipeline.
     ///
     /// An ADK tool registered on this builder runs through `execute_tool_with_plugins`, which
@@ -617,6 +1092,49 @@ impl IntegratedRealtimeRunner {
         name: &str,
         arguments: &serde_json::Value,
     ) -> Result<()> {
+        self.dispatch_with_policy_fenced(call_id, name, arguments, None).await
+    }
+
+    /// [`dispatch_with_policy`](Self::dispatch_with_policy) under a fence
+    /// token (one the caller registered, or a fresh registration here): a
+    /// call fenced before it starts sends nothing, and a call fenced after
+    /// a non-idempotent start is answered outcome-unknown with no
+    /// follow-up response owed.
+    async fn dispatch_with_policy_fenced(
+        &self,
+        call_id: &str,
+        name: &str,
+        arguments: &serde_json::Value,
+        fence_token: Option<tokio_util::sync::CancellationToken>,
+    ) -> Result<()> {
+        let own_token;
+        let token = match &fence_token {
+            Some(token) => token,
+            None => {
+                own_token = self.runner.register_tool_call(call_id, name);
+                &own_token
+            }
+        };
+        if token.is_cancelled() {
+            if fence_token.is_none() {
+                self.runner.unregister_tool_call(call_id);
+            }
+            return Ok(());
+        }
+        let result = self.dispatch_with_policy_inner(call_id, name, arguments, token.clone()).await;
+        if fence_token.is_none() {
+            self.runner.unregister_tool_call(call_id);
+        }
+        result
+    }
+
+    async fn dispatch_with_policy_inner(
+        &self,
+        call_id: &str,
+        name: &str,
+        arguments: &serde_json::Value,
+        token: tokio_util::sync::CancellationToken,
+    ) -> Result<()> {
         let Some(tool) = self.adk_tools.get(name).cloned() else {
             tracing::debug!(
                 tool = %name,
@@ -625,27 +1143,37 @@ impl IntegratedRealtimeRunner {
             return self.runner.dispatch_tool_call(call_id, name, arguments).await;
         };
 
+        let arguments = match crate::runner::parse_tool_arguments(arguments) {
+            Ok(arguments) => arguments,
+            Err(reason) => {
+                if token.is_cancelled() {
+                    return Ok(());
+                }
+                let refusal = serde_json::json!({
+                    "error": format!("Tool '{name}' was not run: {reason}")
+                });
+                return self.runner.send_tool_result(call_id, refusal).await;
+            }
+        };
         let call = crate::events::ToolCall {
             call_id: call_id.to_string(),
             name: name.to_string(),
-            arguments: arguments.clone(),
+            arguments,
         };
 
-        let result = self.execute_tool_with_plugins(&tool, &call).await?;
-        self.runner.send_tool_result(call_id, result).await
-    }
-
-    /// Runs one tool through the policy pipeline, for conformance tests.
-    ///
-    /// Exposed so the governed path can be asserted directly rather than only through a live
-    /// provider session, which is why this defect had no coverage.
-    #[doc(hidden)]
-    pub async fn execute_tool_with_plugins_for_test(
-        &self,
-        tool: &Arc<dyn adk_core::Tool>,
-        call: &crate::events::ToolCall,
-    ) -> Result<Value> {
-        self.execute_tool_with_plugins(tool, call).await
+        let result =
+            self.execute_tool_with_plugins_fenced(&tool, &call, Some(token.clone())).await?;
+        if token.is_cancelled() && !adk_core::is_outcome_unknown(&result) {
+            // Fenced before it finished: no output reaches the model.
+            return Ok(());
+        }
+        let sent = self.runner.send_tool_result(call_id, result).await;
+        if token.is_cancelled() {
+            // An outcome-unknown answer is reported, but no follow-up
+            // response is owed for a withdrawn call.
+            self.runner.clear_pending_tool_response();
+        }
+        sent
     }
 
     pub(crate) async fn execute_tool_with_plugins(
@@ -653,9 +1181,18 @@ impl IntegratedRealtimeRunner {
         tool: &Arc<dyn adk_core::Tool>,
         call: &crate::events::ToolCall,
     ) -> Result<Value> {
-        let ctx = self.create_tool_context(&call.call_id);
+        self.execute_tool_with_plugins_fenced(tool, call, None).await
+    }
 
-        let result = if let Some(ref pm) = self.plugin_manager {
+    async fn execute_tool_with_plugins_fenced(
+        &self,
+        tool: &Arc<dyn adk_core::Tool>,
+        call: &crate::events::ToolCall,
+        token: Option<tokio_util::sync::CancellationToken>,
+    ) -> Result<Value> {
+        let ctx = self.create_tool_context_with_cancellation(&call.call_id, token);
+
+        let mut outcome = if let Some(ref pm) = self.plugin_manager {
             // Run before_tool_call pipeline
             match pm
                 .run_before_tool_call(
@@ -667,29 +1204,75 @@ impl IntegratedRealtimeRunner {
             {
                 Ok(adk_plugin::BeforeToolCallResult::ShortCircuit(value)) => {
                     tracing::debug!(tool = tool.name(), "plugin short-circuited tool execution");
-                    value
+                    GovernedOutcome {
+                        result: value,
+                        held: None,
+                        status: None,
+                        cause: None,
+                        executed: false,
+                    }
                 }
                 Ok(adk_plugin::BeforeToolCallResult::Continue(args)) => {
-                    // Execute tool with potentially modified args
-                    let tool_result = tool
-                        .execute(ctx.clone() as Arc<dyn adk_core::ToolContext>, args)
-                        .await
-                        .unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() }));
-
-                    // Run after_tool_call pipeline
-                    match pm
-                        .run_after_tool_call(
-                            tool.clone(),
-                            &call.arguments,
-                            tool_result.clone(),
-                            ctx as Arc<dyn adk_core::CallbackContext>,
-                        )
-                        .await
-                    {
-                        Ok(adk_plugin::AfterToolCallResult::Continue(v)) => v,
-                        Err(e) => {
-                            tracing::warn!(error = %e, "after_tool_call plugin error (non-fatal)");
-                            tool_result
+                    // The governed path sees the plugin-rewritten arguments.
+                    let mut outcome =
+                        self.governed_execute(tool, &ctx, &call.call_id, args).await?;
+                    if outcome.held.is_some() {
+                        // A held call has no result to screen; the after-tool pipeline runs
+                        // when the call resumes.
+                        outcome
+                    } else {
+                        // An unknown outcome outlives whatever replaces the answer.
+                        let unknown =
+                            outcome.status == Some(adk_core::ToolResultStatus::OutcomeUnknown);
+                        // Run after_tool_call pipeline
+                        match pm
+                            .run_after_tool_call(
+                                tool.clone(),
+                                &call.arguments,
+                                outcome.result.clone(),
+                                ctx as Arc<dyn adk_core::CallbackContext>,
+                            )
+                            .await
+                        {
+                            Ok(adk_plugin::AfterToolCallResult::Continue(v)) => {
+                                // The plugin's value is the answer the model reads.
+                                if v != outcome.result && !unknown {
+                                    outcome.status = None;
+                                    outcome.cause = None;
+                                }
+                                outcome.result = v;
+                                outcome
+                            }
+                            Err(e) => {
+                                // Fail closed. An after-tool plugin is where result redaction
+                                // and screening live, so the unscreened result is withheld.
+                                // The tool has already run, and the model is told so it does
+                                // not repeat a side effect.
+                                if self.runner.records_payloads() {
+                                    tracing::error!(
+                                        tool = tool.name(),
+                                        error = %e.diagnostics(),
+                                        error.message = %e.message,
+                                        "after_tool_call plugin failed; withholding the tool result"
+                                    );
+                                } else {
+                                    tracing::error!(
+                                        tool = tool.name(),
+                                        error = %e.diagnostics(),
+                                        "after_tool_call plugin failed; withholding the tool result"
+                                    );
+                                }
+                                outcome.result = adk_core::result_withheld_response(
+                                    tool.name(),
+                                    &e,
+                                    self.runner.exposes_tool_error_messages(),
+                                );
+                                if !unknown {
+                                    outcome.status = Some(adk_core::ToolResultStatus::Withheld);
+                                    outcome.cause = Some(e);
+                                }
+                                outcome
+                            }
                         }
                     }
                 }
@@ -697,26 +1280,51 @@ impl IntegratedRealtimeRunner {
                     // Fail closed. A before-tool plugin is where authorization, redaction, and
                     // policy live, so executing the tool when that pipeline fails turns a
                     // broken guard into no guard. The model receives the error instead.
-                    tracing::error!(
-                        tool = tool.name(),
-                        error = %e,
-                        "before_tool_call plugin failed; refusing the tool"
-                    );
-                    serde_json::json!({
-                        "error": format!(
-                            "tool {} was refused: its before-tool plugin pipeline failed ({e}). \
-                             Execution is refused rather than proceeding without policy.",
-                            tool.name()
-                        )
-                    })
+                    if self.runner.records_payloads() {
+                        tracing::error!(
+                            tool = tool.name(),
+                            error = %e.diagnostics(),
+                            error.message = %e.message,
+                            "before_tool_call plugin failed; refusing the tool"
+                        );
+                    } else {
+                        tracing::error!(
+                            tool = tool.name(),
+                            error = %e.diagnostics(),
+                            "before_tool_call plugin failed; refusing the tool"
+                        );
+                    }
+                    let failure = if self.runner.exposes_tool_error_messages() {
+                        e.to_string()
+                    } else {
+                        e.redacted()
+                    };
+                    GovernedOutcome::answer(
+                        serde_json::json!({
+                            "error": format!(
+                                "tool {} was refused: its before-tool plugin pipeline failed with \
+                                 {failure}. Execution is refused rather than proceeding without policy.",
+                                tool.name()
+                            )
+                        }),
+                        adk_core::ToolResultStatus::NotRun,
+                        Some(e),
+                    )
                 }
             }
         } else {
-            // No plugin manager — execute directly
-            tool.execute(ctx as Arc<dyn adk_core::ToolContext>, call.arguments.clone())
-                .await
-                .unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() }))
+            self.governed_execute(tool, &ctx, &call.call_id, call.arguments.clone()).await?
         };
+        // Screened after every plugin, so neither the transcript, the session, nor the model
+        // sees a result the screen did not pass. A held call carries no result to screen.
+        if outcome.held.is_none() {
+            outcome.screened(
+                self.runner
+                    .screen_tool_result(&call.name, &call.arguments, outcome.result.clone())
+                    .await,
+            );
+        }
+        let result = outcome.result.clone();
 
         // Record completed tool call in aggregator
         self.aggregator.write().await.record_tool_call(CompletedToolCall {
@@ -734,24 +1342,275 @@ impl IntegratedRealtimeRunner {
             id: Some(call.call_id.clone()),
             thought_signature: None,
         });
-        content.parts.push(adk_core::Part::FunctionResponse {
-            function_response: adk_core::FunctionResponseData::new(&call.name, result.clone()),
-            id: Some(call.call_id.clone()),
-            annotations: None,
-        });
+        content.parts.push(outcome.part(&call.name, &call.call_id));
 
-        if let Some(ref session_service) = self.session_service {
-            let mut adk_event = adk_core::Event::new(&call.call_id);
-            adk_event.author = "tool".to_string();
-            adk_event.set_content(content);
+        let mut adk_event = adk_core::Event::new(&call.call_id);
+        adk_event.author = "tool".to_string();
+        adk_event.set_content(content);
+        self.persist_event(adk_event, "tool event session persist failed (non-fatal)").await;
 
-            if let Err(e) = session_service.append_event(&self.identity.session_id, adk_event).await
-            {
-                tracing::warn!(error = %e, "tool event session persist failed (non-fatal)");
-            }
+        if let Some(request) = outcome.held {
+            self.surface_hold(&call.call_id, &call.name, &call.arguments, request).await;
         }
 
         Ok(result)
+    }
+
+    /// Authorizes one call through the inner runner's governed path, then executes it
+    /// under the runner's tool timeout.
+    async fn governed_execute(
+        &self,
+        tool: &Arc<dyn adk_core::Tool>,
+        ctx: &Arc<context::RealtimeToolContext>,
+        call_id: &str,
+        args: Value,
+    ) -> Result<GovernedOutcome> {
+        let call = adk_core::GovernedCall::for_tool(tool.as_ref(), call_id, args);
+        self.governed_call(tool, ctx, call).await
+    }
+
+    /// Runs `call` through the governed path: a held call is answered as pending with its
+    /// request, and so is a call whose delegate held a call of its own.
+    async fn governed_call(
+        &self,
+        tool: &Arc<dyn adk_core::Tool>,
+        ctx: &Arc<context::RealtimeToolContext>,
+        call: adk_core::GovernedCall,
+    ) -> Result<GovernedOutcome> {
+        let call_id = call.function_call_id.clone();
+        Ok(match self.runner.authorize_tool_call(call).await? {
+            adk_core::ToolAuthorization::Execute { args, .. } => {
+                let timeout = self.runner.tool_timeout();
+                let execution = adk_core::ModelCallScope::within_tool(
+                    ctx.as_ref(),
+                    tool.execute(ctx.clone() as Arc<dyn adk_core::ToolContext>, args),
+                );
+                let mut status = None;
+                let mut cause = None;
+                // Set when a non-idempotent call timed out, so its effect is unknown.
+                let mut outcome_unknown = false;
+                // The fence token drops the execution when the provider
+                // withdraws the call; a non-idempotent call fenced after
+                // it started is answered outcome-unknown, never success.
+                let fenced = ctx.cancellation_token().cloned();
+                let timed = async {
+                    match fenced {
+                        Some(token) => tokio::select! {
+                            biased;
+                            _ = token.cancelled() => None,
+                            result = tokio::time::timeout(timeout, execution) => Some(result),
+                        },
+                        None => Some(tokio::time::timeout(timeout, execution).await),
+                    }
+                };
+                let result = match timed.await {
+                    None => {
+                        outcome_unknown = tool.effect() == adk_core::ToolEffect::NonIdempotent;
+                        status = Some(if outcome_unknown {
+                            adk_core::ToolResultStatus::OutcomeUnknown
+                        } else {
+                            adk_core::ToolResultStatus::Failed
+                        });
+                        if outcome_unknown {
+                            adk_core::outcome_unknown_response(format!(
+                                "tool '{}' was cancelled after it started; its outcome is unknown",
+                                tool.name()
+                            ))
+                        } else {
+                            serde_json::json!({
+                                "error": format!(
+                                    "tool '{}' was cancelled before it completed",
+                                    tool.name()
+                                )
+                            })
+                        }
+                    }
+                    Some(result) => match result {
+                        Ok(Ok(value)) => value,
+                        Ok(Err(e)) => {
+                            if self.runner.records_payloads() {
+                                tracing::warn!(
+                                    tool = tool.name(),
+                                    error = %e.diagnostics(),
+                                    error.message = %e.message,
+                                    "realtime tool failed"
+                                );
+                            } else {
+                                tracing::warn!(
+                                    tool = tool.name(),
+                                    error = %e.diagnostics(),
+                                    "realtime tool failed"
+                                );
+                            }
+                            let response = adk_core::tool_error_response(
+                                tool.name(),
+                                &e,
+                                self.runner.exposes_tool_error_messages(),
+                            );
+                            status = Some(adk_core::ToolResultStatus::of_tool_error(&e));
+                            cause = Some(e);
+                            response
+                        }
+                        Err(_) => {
+                            let message =
+                                format!("Tool '{}' timed out after {timeout:?}", tool.name());
+                            // A timed-out call was dropped mid-flight, as in `LlmAgent`.
+                            outcome_unknown = tool.effect() == adk_core::ToolEffect::NonIdempotent;
+                            status = Some(if outcome_unknown {
+                                adk_core::ToolResultStatus::OutcomeUnknown
+                            } else {
+                                adk_core::ToolResultStatus::Failed
+                            });
+                            cause = Some(adk_core::AdkError::new(
+                                adk_core::ErrorComponent::Tool,
+                                adk_core::ErrorCategory::Timeout,
+                                "tool.timeout",
+                                message.clone(),
+                            ));
+                            serde_json::json!({ "error": message })
+                        }
+                    },
+                };
+                // An agent tool whose delegate held a call of its own holds this call with
+                // it: the request is the delegate's, and this call resumes once that request
+                // has a decision (spec 3.1 §10 F4), as `LlmAgent` does.
+                let mut actions = ctx.actions();
+                match actions.tool_confirmation.take() {
+                    // A call that may have taken effect is not held to run again on a
+                    // decision, and no decision on its request may authorize an identical call.
+                    Some(request) if outcome_unknown => {
+                        ctx.set_actions(actions);
+                        self.runner.withdraw_held_call(&request).await?;
+                        GovernedOutcome { result, held: None, status, cause, executed: true }
+                    }
+                    Some(mut request) => {
+                        actions.skip_summarization = false;
+                        actions.escalate = false;
+                        ctx.set_actions(actions);
+                        // The request describes the delegate's call; its ID is this call's,
+                        // so the hold resumes as the agent-tool call (`held_tool_calls`).
+                        request.function_call_id = Some(call_id);
+                        let result = if adk_core::is_confirmation_pending(&result) {
+                            result
+                        } else {
+                            adk_core::confirmation_pending_response(format!(
+                                "Tool '{}' is waiting for a confirmation",
+                                tool.name()
+                            ))
+                        };
+                        GovernedOutcome {
+                            result,
+                            held: Some(request),
+                            status: Some(adk_core::ToolResultStatus::Held),
+                            cause: None,
+                            executed: true,
+                        }
+                    }
+                    None => GovernedOutcome { result, held: None, status, cause, executed: true },
+                }
+            }
+            adk_core::ToolAuthorization::Refuse { reason, .. } => GovernedOutcome::answer(
+                serde_json::json!({ "error": reason }),
+                adk_core::ToolResultStatus::Refused,
+                None,
+            ),
+            adk_core::ToolAuthorization::Pending { request, reason } => GovernedOutcome {
+                held: Some(request),
+                ..GovernedOutcome::answer(
+                    adk_core::confirmation_pending_response(reason),
+                    adk_core::ToolResultStatus::Held,
+                    None,
+                )
+            },
+        })
+    }
+
+    /// Records a hold in the session and surfaces it as a realtime event.
+    ///
+    /// The session event is authored by the runner's agent and carries the call and the
+    /// request, so [`adk_core::held_tool_calls`] finds it and an approvals inbox lists it;
+    /// the governed path has already recorded the request in the run's `ApprovalStore`.
+    async fn surface_hold(
+        &self,
+        call_id: &str,
+        name: &str,
+        args: &Value,
+        request: adk_core::ToolConfirmationRequest,
+    ) {
+        let mut content = adk_core::Content::new("model");
+        content.parts.push(adk_core::Part::FunctionCall {
+            name: name.to_string(),
+            args: args.clone(),
+            id: Some(call_id.to_string()),
+            thought_signature: None,
+        });
+        let mut event = adk_core::Event::new(call_id);
+        event.author = self.runner.agent_name().to_string();
+        event.set_content(content);
+        event.actions.tool_confirmation = Some(request.clone());
+        self.persist_event(event, "held call session persist failed (non-fatal)").await;
+
+        tracing::info!(
+            tool = %name,
+            call_id = %call_id,
+            "tool call held for confirmation; surfaced as a realtime event"
+        );
+        self.pending_events.lock().unwrap_or_else(|e| e.into_inner()).push_back(
+            ServerEvent::ToolConfirmationRequested { call_id: call_id.to_string(), request },
+        );
+    }
+
+    /// Saves a resumed call's answer authored by the runner's agent, which clears its hold.
+    async fn persist_answer(
+        &self,
+        call_id: &str,
+        name: &str,
+        args: &Value,
+        outcome: &GovernedOutcome,
+    ) {
+        let result = &outcome.result;
+        let mut content = adk_core::Content::new("model");
+        content.parts.push(adk_core::Part::FunctionCall {
+            name: name.to_string(),
+            args: args.clone(),
+            id: Some(call_id.to_string()),
+            thought_signature: None,
+        });
+        content.parts.push(outcome.part(name, call_id));
+        let mut event = adk_core::Event::new(call_id);
+        event.author = self.runner.agent_name().to_string();
+        event.set_content(content);
+        self.persist_event(event, "resumed call session persist failed (non-fatal)").await;
+        self.aggregator.write().await.record_tool_call(CompletedToolCall {
+            call_id: call_id.to_string(),
+            name: name.to_string(),
+            arguments: args.clone(),
+            result: result.clone(),
+        });
+    }
+
+    /// Gives the model a resumed call's result: as the call's tool output when the provider
+    /// session issued the call, as a text turn otherwise.
+    async fn deliver_resumed_result(
+        &self,
+        call_id: &str,
+        name: &str,
+        result: &Value,
+    ) -> Result<()> {
+        let known =
+            self.connected_calls.lock().unwrap_or_else(|e| e.into_inner()).contains(call_id);
+        if known {
+            self.runner.send_tool_result(call_id, result.clone()).await?;
+            return self.runner.respond_after_tools().await;
+        }
+        let rendered = bounded(&result.to_string(), RESUMED_RESULT_MAX_CHARS);
+        self.runner
+            .send_text(&format!(
+                "The call to {name} you made earlier was decided and has now run. Its result: \
+                 {rendered}"
+            ))
+            .await?;
+        self.runner.create_response().await
     }
 
     /// Create a [`RealtimeToolContext`](context::RealtimeToolContext) for the given
@@ -759,16 +1618,40 @@ impl IntegratedRealtimeRunner {
     ///
     /// Returns an `Arc<RealtimeToolContext>` which implements both [`ToolContext`]
     /// and [`CallbackContext`], allowing it to be passed to plugin hooks and tool
-    /// execution alike.
-    #[allow(dead_code)] // Used by execute_tool_with_plugins
+    /// execution alike. It carries the governance run config and the acting context the
+    /// gate authorizes the call under.
     fn create_tool_context(&self, function_call_id: &str) -> Arc<context::RealtimeToolContext> {
-        Arc::new(context::RealtimeToolContext::new(
+        self.create_tool_context_with_cancellation(function_call_id, None)
+    }
+
+    fn create_tool_context_with_cancellation(
+        &self,
+        function_call_id: &str,
+        token: Option<tokio_util::sync::CancellationToken>,
+    ) -> Arc<context::RealtimeToolContext> {
+        let mut ctx = context::RealtimeToolContext::new(
             self.identity.app_name.clone(),
             self.identity.user_id.clone(),
             self.identity.session_id.clone(),
             function_call_id.to_string(),
             self.memory_service.clone(),
-        ))
+        );
+        if let Some(request_context) = &self.request_context {
+            ctx = ctx.with_request_context(request_context.clone());
+        }
+        if let Some(config) = self.runner.governance_config() {
+            ctx = ctx
+                .with_acting_context(config.acting_context_for(
+                    &self.identity.app_name,
+                    self.runner.agent_name(),
+                    &self.identity.user_id,
+                ))
+                .with_run_config(config.clone());
+        }
+        if let Some(token) = token {
+            ctx = ctx.with_cancellation_token(token);
+        }
+        Arc::new(ctx)
     }
 }
 
@@ -1172,7 +2055,7 @@ mod session_persistence_tests {
             .build()
             .expect("mock runner build should succeed");
 
-        IntegratedRealtimeRunner {
+        IntegratedRealtimeRunner::from_inner(Inner {
             runner: Arc::new(runner),
             session_service: None,
             memory_service: None,
@@ -1185,7 +2068,13 @@ mod session_persistence_tests {
             },
             config: IntegrationConfig::default(),
             adk_tools: HashMap::new(),
-        }
+            request_context: None,
+            pending_events: Default::default(),
+            connected_calls: Default::default(),
+            concurrent_dispatch: false,
+            #[cfg(feature = "guardrails")]
+            output_guardrails: None,
+        })
     }
 
     // ─── Property Test: Plugin Short-Circuit ─────────────────────────────────
@@ -1307,7 +2196,7 @@ mod session_persistence_tests {
             .build()
             .expect("mock runner build should succeed");
 
-        let runner = IntegratedRealtimeRunner {
+        let runner = IntegratedRealtimeRunner::from_inner(Inner {
             runner: Arc::new(runner_inner),
             session_service: Some(session_service.clone()),
             memory_service: None,
@@ -1326,11 +2215,17 @@ mod session_persistence_tests {
                 max_memory_injection: 0,
             },
             adk_tools: HashMap::new(),
-        };
+            request_context: None,
+            pending_events: Default::default(),
+            connected_calls: Default::default(),
+            concurrent_dispatch: false,
+            #[cfg(feature = "guardrails")]
+            output_guardrails: None,
+        });
 
         // 5. Start a turn in the aggregator so record_tool_call has somewhere to attach
         {
-            let mut agg = runner.aggregator.write().await;
+            let mut agg = runner.inner.aggregator.write().await;
             agg.process(&crate::events::ServerEvent::ResponseCreated {
                 event_id: "evt_created".to_string(),
                 response: serde_json::json!({}),
@@ -1362,7 +2257,7 @@ mod session_persistence_tests {
         // ─── Assertion 3: tool call recorded in the aggregator ───────────────
         // Finalize the turn to extract tool calls (recorded during execute_tool_with_plugins)
         let aggregated = {
-            let mut agg = runner.aggregator.write().await;
+            let mut agg = runner.inner.aggregator.write().await;
             agg.process(&crate::events::ServerEvent::ResponseDone {
                 event_id: "evt_done".to_string(),
                 response: serde_json::json!({}),
@@ -1592,7 +2487,7 @@ mod graceful_degradation_tests {
 
                 let mock_model: Arc<dyn RealtimeModel> = Arc::new(MockRealtimeModel);
 
-                let runner_struct = IntegratedRealtimeRunner {
+                let runner_struct = IntegratedRealtimeRunner::from_inner(Inner {
                     runner: Arc::new(
                         crate::runner::RealtimeRunner::builder()
                             .model(mock_model)
@@ -1616,13 +2511,19 @@ mod graceful_degradation_tests {
                         max_history_injection: 20,
                     },
                     adk_tools: HashMap::new(),
-                };
+                    request_context: None,
+                    pending_events: Default::default(),
+                    connected_calls: Default::default(),
+                    concurrent_dispatch: false,
+                    #[cfg(feature = "guardrails")]
+                    output_guardrails: None,
+                });
 
                 // Process events through the aggregator — this is the path that
                 // next_event() would take internally. We test that no panics
                 // occur and no errors propagate even with failing services.
                 for event in &events {
-                    let aggregated = runner_struct.aggregator.write().await.process(event);
+                    let aggregated = runner_struct.inner.aggregator.write().await.process(event);
 
                     if let Some(agg_event) = aggregated {
                         // This is the key test: handle_aggregated_event must NOT
@@ -1647,7 +2548,7 @@ mod graceful_degradation_tests {
         let failing_session: Arc<dyn SessionService> = Arc::new(FailingSessionService);
         let mock_model: Arc<dyn RealtimeModel> = Arc::new(MockRealtimeModel);
 
-        let runner_struct = IntegratedRealtimeRunner {
+        let runner_struct = IntegratedRealtimeRunner::from_inner(Inner {
             runner: Arc::new(
                 crate::runner::RealtimeRunner::builder().model(mock_model).build().unwrap(),
             ),
@@ -1668,7 +2569,13 @@ mod graceful_degradation_tests {
                 max_memory_injection: 0,
             },
             adk_tools: HashMap::new(),
-        };
+            request_context: None,
+            pending_events: Default::default(),
+            connected_calls: Default::default(),
+            concurrent_dispatch: false,
+            #[cfg(feature = "guardrails")]
+            output_guardrails: None,
+        });
 
         // Process a UserUtteranceComplete event — should not panic even
         // though session_service.append_event will fail.

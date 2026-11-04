@@ -1,0 +1,262 @@
+# The Kernel Control Plane
+
+Every surface reaches the [agent kernel](index.md) through one API on three transports: the
+Unix socket at the kernel home, a named pipe named after it on Windows, and HTTP (spec 3.2
+§7.11). Surfaces hold no state:
+disconnecting one changes nothing in the process table (K-I17).
+
+## Transports and authentication
+
+Every route needs an authenticated caller (K-I16); the routes that change the kernel also need
+the `operator` scope.
+
+| Transport | Caller | `operator` |
+|---|---|---|
+| Socket `<home>/kernel.sock`, or a short socket when that path is too long ([below](#the-socket-path)) | The OS user, when the peer's uid is the socket owner's; created `0600`, any other peer is refused | Yes |
+| Named pipe `\\.\pipe\adk-rust-kernel-<tag>` (Windows) | The OS user, when the token the client opened the pipe with is the kernel's user; any other client is refused | Yes |
+| HTTP on loopback (`adk-rust up` default) | Loopback peers as the OS user (`LoopbackOperatorExtractor`) | Yes |
+| HTTP with `--auth-token` | `Authorization: Bearer <token>` (`BearerTokenExtractor`) | Yes |
+| HTTP with an SSO extractor | The extractor's subject | When the extractor grants it |
+| HTTP beyond loopback without a token or extractor | Refused at start (K-I18) | — |
+| HTTP with a paired device's token (`Authorization: Bearer adkd_…`) | The person who paired the device, only on the routes its scopes open, on loopback too ([pairing](pairing.md)); the socket and the pipe read no device token | Only for `POST /kernel/freeze`, with the `stop` scope |
+
+| Answer | When |
+|---|---|
+| `401` | No authenticated caller |
+| `403 kernel.unauthorized` | A change without the `operator` scope |
+| `404 kernel.not_found` | An unknown process, session or target |
+| `404 kernel.agenda_not_found` | An unknown agenda item |
+| `409 kernel.invalid_state` | The process is in a state the action does not apply to, such as resuming one a freeze parked |
+| `409 kernel.agenda_state` | The agenda item is in a state the action does not apply to |
+| `409 kernel.spawn_rejected` | Another run holds the spawn's concurrency key and the run does not queue behind it |
+| `429 kernel.quota` | A partition quota refuses the process |
+| `422` | A body field the route does not take, such as `userId` on a spawn |
+
+### The socket path
+
+A Unix socket path holds at most 103 bytes on macOS and 107 on Linux. When `<home>/kernel.sock`
+fits, both as given and with the home's symlinks resolved, the kernel serves it there. When it
+does not, the kernel and every client — the attached terminal and the CLI commands — derive one
+short path from the resolved home instead (`ControlPlaneConfig::socket_path`, spec 3.3 G18):
+
+| Platform | Short socket path |
+|---|---|
+| macOS | `<user temp dir>/adk-rust-<tag>/kernel.sock`, the per-user directory `$TMPDIR` names (`confstr(_CS_DARWIN_USER_TEMP_DIR)`) |
+| Linux and other Unix | `$XDG_RUNTIME_DIR/adk-rust-<tag>/kernel.sock`, else under the system temp directory |
+
+The tag is sixteen hex digits of the SHA-256 of the resolved socket path, so each home has its
+own directory. The kernel creates the directory `0700`. The kernel refuses to serve, and a client
+refuses to connect, when the directory is a symlink, belongs to another user, or is open to other
+users; the error names the directory, which you remove before starting the kernel again. The
+kernel removes the socket and the directory when it stops. `adk-rust up` prints the socket it
+serves.
+
+A path too long even there fails the start with an error naming both paths and the limit; start
+the kernel with a shorter `--home`.
+
+### The named pipe on Windows
+
+Windows has the named pipe where Unix has the socket (spec 3.2 §10 W2, W4). Pipe names are
+not files, so the name carries a tag derived from the kernel home's socket path
+(`ControlPlaneConfig::pipe_name`), and each guard below stands in for what the home
+directory and mode `0600` give the socket:
+
+| Guard | What it stops |
+|---|---|
+| A protected DACL with one entry, full access for the user the kernel runs as, who also owns the pipe | Any other account opening the pipe or creating an instance of it |
+| The server reads the client's first message, impersonates it at identification level and compares its token's user with its own | A client of another identity the DACL let through |
+| The client uses the pipe only when the kernel's user owns it | Another account's process that took the name first answering in the kernel's place |
+| The first instance is created with `FILE_FLAG_FIRST_PIPE_INSTANCE`; remote clients are rejected | Joining a pipe someone else created; callers from another machine |
+
+A second kernel on the same home is refused while the first answers, as on the socket.
+
+## Routes
+
+All routes are under `/api`, on both transports. `adk-rust up` merges them into its
+`ServerBuilder` with `add_api_routes`, so the server's auth middleware applies.
+
+| Route | Purpose | `operator` | Recorded |
+|---|---|---|---|
+| `GET /kernel/health` | State, frozen, per-worker health, scheduler lag, store latency | — | — |
+| `GET /kernel/inventory` | What the kernel runs — targets, triggers with whether each target is served, wake sources, the partitions it files signals in, each store with where it came from — and a warning for each thing it would silently not do ([inventory](#inventory)) | Yes | — |
+| `GET /kernel/processes?partition=&state=&limit=` | The process table, each process with its live view | — | — |
+| `POST /kernel/processes` | Start a process of a registered target as the caller | Yes | `spawn` |
+| `POST /kernel/processes/{pid}/kill` | Cancel at the next checkpoint; body `{"reason": "..."}` | Yes | `kill` |
+| `POST /kernel/processes/{pid}/nice` | Move a queued or sleeping process to another queue; body `{"queue": "background"}`; the moved process has a new pid | Yes | `nice` |
+| `POST /kernel/processes/{pid}/suspend` | Park at the next model-call boundary | Yes | `suspend` |
+| `POST /kernel/processes/{pid}/resume` | Wake a suspended or sleeping process | Yes | `resume` |
+| `GET /kernel/events?after=` | The event bus as server-sent events from a cursor; `Last-Event-ID` wins over `after` | — | — |
+| `POST /kernel/attach/{session}` | Transcript since a cursor, held calls, the process running the session | — | `attach` |
+| `POST /kernel/freeze`, `POST /kernel/unfreeze` | `Kernel::freeze` and `Kernel::unfreeze`; the answer reports `parkedRuns`. `unfreeze` answers only on the socket and the pipe, the kernel's own terminal: over HTTP it is `403 kernel.resume.not_here`, and the web home resumes in the kernel's process (spec 3.3 S-I10) | Yes | `freeze`, `unfreeze` |
+| `GET /kernel/drivers` | The mounted [drivers](drivers.md) with their state | — | — |
+| `POST /kernel/drivers/{id}/mount` | `{"manifest": "<toml>"}` answers what the mount approves; with `"confirm": true` mounts it as the caller | Yes | `drivers.mount` |
+| `POST /kernel/drivers/{id}/{unmount,restart,reapprove}` | Unmount, restart, re-approve as the caller | Yes | `drivers.unmount`, `drivers.restart`, `drivers.reapprove` |
+| `POST /kernel/pairing` | Issue a device pairing code ([pairing](pairing.md)) | Yes | `pairing.issue` |
+| `POST /kernel/pairing/claim` | Claim a code; needs no caller, the code is the credential | — | `pairing.claim` |
+| `GET /kernel/devices`, `POST /kernel/devices/{id}/revoke` | The paired devices; remove one | Yes | `devices.revoke` |
+| `POST /kernel/channels/pair`, `GET /kernel/channels`, `POST /kernel/channels/{id}/revoke`, `POST /kernel/channels/waiting/{id}/dismiss` (feature `channels`) | Accept the code a chat account was sent; the paired and waiting accounts; remove one; dismiss a waiting one | Yes | `channels.pair`, `channels.revoke`, `channels.dismiss` |
+| `GET /kernel/proc/ledger?partition=&kind=&agent=&from=&to=&after=&limit=&format=` | A page of the activity ledger, or JSONL with `format=jsonl` ([`/proc`](proc.md)) | Yes | `proc.ledger` |
+| `GET /kernel/proc/baselines`, `GET /kernel/proc/observations?partition=&since=&limit=` | Each partition's last baseline pass; the observations | Yes | — |
+| `GET /kernel/partitions` | The [partition](partitions.md) table | — | — |
+| `POST /kernel/partitions` | Create or replace a partition; body: the partition record | Yes | `partition.put` |
+| `POST /kernel/partitions/{id}/mode` | Set a partition's mode; body `{"mode": "auto"}` | Yes | `partition.mode` |
+| `GET /kernel/settings`, `GET /kernel/settings/{partition}` | Each area's quiet time, daily spending limit, spend today and mode in force ([settings](today-and-memory.md#settings-while-the-kernel-runs)) | Yes, or a device with `read` | — |
+| `POST /kernel/settings/{partition}/{quiet-time,spending-limit,mode}` | Change one while the kernel runs; never from a device token | Yes, no device | `settings.quiet_time`, `settings.spending_limit`, `settings.mode` |
+| `GET /kernel/away?viewer=&after=&limit=`, `POST /kernel/away/seen`, `GET /kernel/away/lines/{seq}` (feature `proc`) | "While you were away" from the viewer's cursor; move the cursor; one line's ledger row ([while you were away](today-and-memory.md#while-you-were-away)) | Yes, or a device with `read` | — |
+| `GET /kernel/memory?area=` | What the agents remember, with provenance, and the overnight tidy-ups ([memory](today-and-memory.md#what-your-agents-remember)) | Yes, or a device with `read` | — |
+| `POST /kernel/memory/facts/{id}/{confirm,fix,forget}`, `POST /kernel/memory/undo` | "That's right", "Fix it", "Forget it", "Undo"; never from a device token | Yes, no device | `memory.confirm`, `memory.fix`, `memory.forget`, `memory.undo` |
+| `GET /kernel/record?limit=`, `GET /kernel/record/check` | The latest actions on record; the check `adk-rust audit verify` makes ([record](today-and-memory.md#what-your-agents-did)) | Yes, or a device with `read` | — |
+| `GET /kernel/commands`, `POST /kernel/commands/run` | The REPL's slash commands, run on the kernel's harness in the caller's session; body `{"name": "rules", "args": "rm 2", "sessionId": "..."}`, answer `{"text": "..."}`. While everything is stopped, a command that lets the agents do more answers `409 kernel.frozen`; one that only makes them do less (`CommandHost::tightens`: `/rules rm`, `/memory forget`, `/sandbox on`, a stricter `/mode`) runs. The host gets how the caller reached the kernel (`CommandReach`: transport, device, calling process), and the record names it ([the terminal](../surfaces/terminal.md#commands)) | Yes, no device | `commands.run` |
+| `GET /kernel/rules/always-allow/{id}`, `POST /kernel/rules/always-allow/{id}/{prepare,grant}` | What "Always allow" makes for the caller's waiting decision; make it while the decision waits; grant it once the decision's last answer is the caller's own "Allow once" (`409` before, after an edit or someone else's yes). Never for a high-risk call: not offered (`404`), and `prepare` answers `403` | Yes, no device | `rules.always_allow` |
+| `GET /kernel/sessions/{session}/mode` | The mode of the caller's session, `{"mode": "ask"}`, as the harness names it (`read_only`, `plan`, `ask`, `auto`); `404` when the host keeps no modes | Yes, no device | — |
+| `POST /kernel/surface/records` | One record of a surface engine attached to the kernel, such as the terminal's answers with the surface and how they were given (`SurfaceRecord`: `kind`, `action`, `decision`, `ext`), written on the kernel's signed log with the caller as its actor and the transport it came over; only `surface.*` actions, an answer only to the caller's own decision (`404` otherwise) | Yes, no device | The record itself |
+| `/approvals…` | The approvals inbox; the socket and the pipe serve it too. A decision is answered under the caller's surface (see [Deciding on the approvals route](#deciding-on-the-approvals-route)) | Per inbox rules | `approvals.decide` |
+
+On HTTP the server's own routes stay beside them: `/api/runs` (submissions land on the
+`interactive` queue), `/api/admin/freeze` (delegates to `Kernel::freeze` and reports
+`parkedRuns`; administrators only, which the loopback operator and the `--auth-token` holder
+are), `/api/admin/governance` (`runningRuns: "park"`), `/api/rules` and the session
+routes.
+
+### Deciding on the approvals route
+
+`POST /api/approvals/{id}/decide` on a kernel answers each decision under spec 3.3 §7.2 for
+the surface the server established, never one the client declares
+(`adk_kernel::control::decide_guard`; `adk-rust up` installs it on its server too):
+
+| Caller | Surface | Allow once, Edit | High risk | Add a suggested agent |
+|---|---|---|---|---|
+| The socket or the pipe | `terminal`, the kernel's own | Yes | Yes | Yes |
+| A device paired as a phone | `phone` | Yes | No | Low and medium risk |
+| A device paired as a remote terminal | `terminal` | Yes | No | Low and medium risk |
+| A device paired as a tray | `tray` | Allow once only | No | No |
+| An operator credential over HTTP | `api` | Yes | No | Low and medium risk |
+
+Deny stays open to every caller. A refused answer is `403 surface.decide.not_here`: a
+high-risk call is approved with "Confirm it's you" in the home or on the kernel's own
+terminal. An admitted decision is recorded as `approvals.decide` with its `surface`, `how` and
+`transport` before it reaches the inbox, and one whose record cannot be written is refused. A
+suggested agent approved or refused here is added or ended at once, its
+`kernel.agent.created` naming that surface.
+
+### Starting a process
+
+```bash
+curl --unix-socket "$HOME/Library/Application Support/adk-rust/kernel.sock" \
+  -H 'content-type: application/json' \
+  -d '{"target": "adk-rust", "input": {"text": "summarize CHANGELOG.md"}, "sessionId": "s-1"}' \
+  http://localhost/api/kernel/processes
+```
+
+| Field | Default | Notes |
+|---|---|---|
+| `target` | — | A target the kernel registered: `adk-rust` or `harness.goal`; another answers `404` naming them |
+| `input` | `null` | A string, `{"text": ...}` or `{"content": ...}` |
+| `sessionId` | A new session | The session an agent run continues |
+| `queue` | `interactive` | `interactive`, `background`, `maintenance` or a named queue |
+| `kind` | `interactive` | `goal`, `scheduled`, `{"triggered": {"source": ...}}`, … |
+| `wake` | — | A wake set: the process starts asleep |
+| `parent`, `labels` | — | Lineage and free-form labels |
+
+The run belongs to the authenticated caller and is marked authenticated, as `/api/runs`
+marks one.
+
+### Attaching to a session
+
+```bash
+curl --unix-socket "$HOME/Library/Application Support/adk-rust/kernel.sock" \
+  -H 'content-type: application/json' -d '{"after": "2026-10-22T10:42:07Z"}' \
+  http://localhost/api/kernel/attach/s-1
+```
+
+The answer carries `transcript` (the session's events after `after`), `cursor` (the last
+event's time, for the next attach), `pending` (the calls the session holds for a decision) and
+`process` (the unfinished process running the session, if any). A surface attaches only to
+its caller's own sessions.
+
+## Inventory
+
+`Kernel::inventory()` reports what a kernel runs and warns about what it would silently not
+do. The kernel logs it when it starts — one `kernel started` line, then one warning per entry —
+and serves it at `GET /api/kernel/inventory` to the `operator` scope
+(`ControlClient::inventory`).
+
+| Warning code | When |
+|---|---|
+| `kernel.trigger.unserved` | A trigger's run names a target no agent or workflow of the kernel serves, so each of its runs fails |
+| `kernel.trigger.signal_unfiled` | A trigger wakes on a `Wake::Signal` in a partition the kernel files no signals in (`KernelBuilder::signals`), so it never fires |
+| `kernel.store.in_memory` | A stateful store is held in memory: one warning per store the builder defaulted, naming its setter, and one per [`KernelStores`](backends.md#every-store-at-once-kernelstores) bundle that keeps stores in memory; the settings store only when the kernel serves a control plane |
+| `kernel.idle` | The kernel has no agent, trigger, workflow, schedule store or agent factory |
+| Any other code | A warning the host or a kit added with `KernelBuilder::inventory_warning`, such as a job it does not schedule and why |
+
+## Audit records
+
+Every recorded action writes `kernel.control` to the kernel's signed audit log before it
+acts, and is refused when the record cannot be written, except `freeze`, which takes effect
+regardless:
+
+| Field | Value |
+|---|---|
+| `kind` | `Other("kernel")` |
+| `action` | `kernel.control` |
+| `actor` | The caller as a `human` subject |
+| `subject` | `{"kind": "human", "id": "<user>"}` |
+| `transport` | `socket`, `pipe` or `http` |
+| `action` (ext) | `spawn`, `kill`, `nice`, `suspend`, `resume`, `freeze`, `unfreeze`, `attach`, a pairing action: `pairing.issue`, `pairing.claim`, `devices.revoke`, `channels.pair`, `channels.revoke`, `channels.dismiss`, `approvals.decide`, or a change the home makes: `settings.quiet_time`, `settings.spending_limit`, `settings.mode` (with `from` and `to`), `memory.confirm`, `memory.fix`, `memory.forget`, `memory.undo` (ids only) |
+| `target` | The pid, session or spawned target |
+| `pid` | The new process, on `spawn` |
+| `device` | The paired device, on an action a device took |
+
+`freeze` and `unfreeze` also write `governance.freeze` and `governance.unfreeze`. When the
+freeze's own record fails, the freeze still takes effect, the kernel logs a warning, and the
+answer carries the failure in `auditError`.
+
+## From code
+
+`adk_kernel::control::ControlClient` speaks the API over every transport;
+`ControlClient::connect_local` finds the socket, or the pipe on Windows. A refusal reaches
+the caller with the kernel's code from the table above; a code the client does not know reads
+as `kernel.control_plane`.
+
+```rust
+use adk_kernel::control::ControlClient;
+use adk_kernel::control::api::{ProcessesQuery, SpawnRequest};
+
+async fn list(home: &std::path::Path) -> adk_kernel::Result<()> {
+    let client = match ControlClient::connect_local(home).await? {
+        Some(client) => client,
+        None => ControlClient::http("https://kernel.example.com").with_bearer_token("token"),
+    };
+    let turn = SpawnRequest::new("adk-rust", serde_json::json!({ "text": "status?" }));
+    let process = client.spawn(&turn).await?;
+    println!("started {}", process.meta.pid);
+    for process in client.processes(&ProcessesQuery::default()).await? {
+        println!("{} {:?} {}", process.meta.pid, process.run.state, process.meta.kind);
+    }
+    for held in client.approvals().await? {
+        println!("{} waits: {}", held.id, held.tool_name);
+    }
+    Ok(())
+}
+```
+
+To serve the control plane from your own server, merge `adk_kernel::control::router(kernel)`
+with `ServerBuilder::add_api_routes` and register the kernel with
+`ServerBuilder::with_freeze_delegate`; `ControlPlane::start` serves it on the socket (the pipe
+on Windows) and, with `ControlPlaneConfig::with_http`, on a bind of its own. With a bind on
+port 0, `Kernel::control_addr` returns the address the listener took once the kernel runs.
+
+`KernelConfig::default()` serves no control plane, so a kernel embedded in an application
+never takes the socket of the kernel `adk-rust up` runs at the same home. Pass
+`KernelConfig::with_control(ControlPlaneConfig::default())` to serve the socket at the
+kernel's home, as `adk-rust up` does:
+
+```rust
+use adk_kernel::KernelConfig;
+use adk_kernel::control::ControlPlaneConfig;
+
+let config = KernelConfig::default()
+    .with_home("/srv/kernel")
+    .with_control(ControlPlaneConfig::default());
+assert!(config.control.socket.is_some());
+```

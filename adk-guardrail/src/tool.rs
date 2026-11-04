@@ -1,14 +1,17 @@
 //! Guardrails for tool calls.
 //!
-//! [`Guardrail`](crate::Guardrail) validates [`Content`](adk_core::Content) — a user message or a
+//! [`Guardrail`] validates [`Content`](adk_core::Content) — a user message or a
 //! model response. It never sees a tool call, so it cannot express "this tool may run, but not
 //! with these arguments." That left argument-level policy with nowhere to live:
 //! [`ToolConfirmationPolicy`](adk_core::ToolConfirmationPolicy) decides per *tool name*, and a
 //! plugin short-circuit is a general-purpose hook rather than a stated policy.
 //!
 //! [`ToolGuardrail`] closes that gap. It runs before a tool executes, sees the tool name and the
-//! arguments, and can allow, deny, or revise.
+//! arguments, and can allow, deny, or revise. After the tool runs, it sees the result too
+//! ([`ToolGuardrail::validate_result`]) and can deliver, rewrite, or withhold it before the model
+//! and the session see it.
 
+use std::collections::VecDeque;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
@@ -16,7 +19,7 @@ use async_trait::async_trait;
 use regex::Regex;
 use serde_json::Value;
 
-use crate::Severity;
+use crate::{Guardrail, GuardrailResult, Severity};
 
 /// Outcome of validating a tool call.
 #[derive(Debug, Clone)]
@@ -59,6 +62,39 @@ impl ToolGuardrailResult {
     }
 }
 
+/// Outcome of validating a tool's result.
+#[derive(Debug, Clone)]
+pub enum ToolResultGuardrailResult {
+    /// The result is delivered unchanged.
+    Allow,
+    /// The result is withheld. The model is told the tool ran and why its result is withheld.
+    Withhold {
+        /// Why the result was withheld. Surfaced to the model, so it must not quote the result.
+        reason: String,
+        /// How serious the violation is.
+        severity: Severity,
+    },
+    /// The result is delivered as `result` instead, such as with personal data redacted.
+    Revise {
+        /// The result the model and the session see.
+        result: Value,
+        /// Why the result was changed.
+        reason: String,
+    },
+}
+
+impl ToolResultGuardrailResult {
+    /// Withholds the result.
+    pub fn withhold(reason: impl Into<String>, severity: Severity) -> Self {
+        Self::Withhold { reason: reason.into(), severity }
+    }
+
+    /// Delivers `result` in place of the tool's result.
+    pub fn revise(result: Value, reason: impl Into<String>) -> Self {
+        Self::Revise { result, reason: reason.into() }
+    }
+}
+
 /// Validates a tool call before it executes.
 ///
 /// # Example
@@ -90,8 +126,55 @@ pub trait ToolGuardrail: Send + Sync {
     /// Unique name, used in denial messages and logs.
     fn name(&self) -> &str;
 
-    /// Validates a call to `tool_name` with `args`.
-    async fn validate_call(&self, tool_name: &str, args: &Value) -> ToolGuardrailResult;
+    /// Validates a call to `tool_name` with `args`. Defaults to allowing every call, for a
+    /// guardrail that screens only results.
+    async fn validate_call(&self, _tool_name: &str, _args: &Value) -> ToolGuardrailResult {
+        ToolGuardrailResult::Allow
+    }
+
+    /// Validates the result of a call to `tool_name` with `args`, before the model and the
+    /// session see it. Defaults to delivering every result.
+    ///
+    /// The agent runs it on the result it is about to send, after its after-tool callbacks and
+    /// plugins, and on a tool's error response too. `args` are the arguments the model sent.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_guardrail::{Severity, ToolGuardrail, ToolResultGuardrailResult};
+    /// use async_trait::async_trait;
+    /// use serde_json::Value;
+    ///
+    /// /// Withholds any result that carries a card number field.
+    /// struct NoCardNumbers;
+    ///
+    /// #[async_trait]
+    /// impl ToolGuardrail for NoCardNumbers {
+    ///     fn name(&self) -> &str {
+    ///         "no-card-numbers"
+    ///     }
+    ///
+    ///     async fn validate_result(
+    ///         &self,
+    ///         _tool: &str,
+    ///         _args: &Value,
+    ///         result: &Value,
+    ///     ) -> ToolResultGuardrailResult {
+    ///         if result.get("card_number").is_some() {
+    ///             return ToolResultGuardrailResult::withhold("the result carries a card number", Severity::High);
+    ///         }
+    ///         ToolResultGuardrailResult::Allow
+    ///     }
+    /// }
+    /// ```
+    async fn validate_result(
+        &self,
+        _tool_name: &str,
+        _args: &Value,
+        _result: &Value,
+    ) -> ToolResultGuardrailResult {
+        ToolResultGuardrailResult::Allow
+    }
 
     /// Whether this guardrail applies to `tool_name`. Defaults to every tool.
     ///
@@ -127,6 +210,25 @@ impl ToolCallDecision {
     pub fn is_allowed(&self) -> bool {
         matches!(self, Self::Allow { .. })
     }
+}
+
+/// What a [`ToolGuardrailSet`] decided about a tool's result.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ToolResultDecision {
+    /// The result to deliver, which may have been revised.
+    Deliver {
+        /// The result the model and the session see.
+        result: Value,
+    },
+    /// The result is withheld.
+    Withhold {
+        /// Guardrail that withheld it.
+        guardrail: String,
+        /// Why.
+        reason: String,
+        /// How serious.
+        severity: Severity,
+    },
 }
 
 /// A collection of [`ToolGuardrail`]s evaluated together.
@@ -194,10 +296,11 @@ impl ToolGuardrailSet {
             match guardrail.validate_call(tool_name, &current).await {
                 ToolGuardrailResult::Allow => {}
                 ToolGuardrailResult::Deny { reason, severity } => {
+                    // A reason can quote the arguments, such as a refused path, so it is
+                    // returned to the caller but not logged.
                     tracing::warn!(
                         guardrail = guardrail.name(),
                         tool = tool_name,
-                        reason = %reason,
                         ?severity,
                         "tool call denied by guardrail"
                     );
@@ -207,11 +310,10 @@ impl ToolGuardrailSet {
                         severity,
                     };
                 }
-                ToolGuardrailResult::ReviseArgs { args: revised, reason } => {
+                ToolGuardrailResult::ReviseArgs { args: revised, reason: _ } => {
                     tracing::debug!(
                         guardrail = guardrail.name(),
                         tool = tool_name,
-                        reason = %reason,
                         "tool call arguments revised by guardrail"
                     );
                     current = revised;
@@ -220,6 +322,204 @@ impl ToolGuardrailSet {
         }
 
         ToolCallDecision::Allow { args: current }
+    }
+
+    /// Evaluates a tool's result against every applicable guardrail.
+    ///
+    /// Guardrails run in order and revisions compose, as in [`evaluate`](Self::evaluate). The
+    /// first guardrail to withhold the result stops evaluation.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_guardrail::{PiiRedactor, ResultTextGuardrail, ToolGuardrailSet, ToolResultDecision};
+    /// use serde_json::json;
+    ///
+    /// # futures::executor::block_on(async {
+    /// let guardrails = ToolGuardrailSet::new().with(ResultTextGuardrail::new(PiiRedactor::new()));
+    /// let decision = guardrails
+    ///     .evaluate_result("lookup", &json!({}), &json!({"ssn": "123-45-6789"}))
+    ///     .await;
+    /// assert_eq!(
+    ///     decision,
+    ///     ToolResultDecision::Deliver { result: json!({"ssn": "[SSN REDACTED]"}) }
+    /// );
+    /// # });
+    /// ```
+    pub async fn evaluate_result(
+        &self,
+        tool_name: &str,
+        args: &Value,
+        result: &Value,
+    ) -> ToolResultDecision {
+        let mut current = result.clone();
+
+        for guardrail in &self.guardrails {
+            if !guardrail.applies_to(tool_name) {
+                continue;
+            }
+
+            match guardrail.validate_result(tool_name, args, &current).await {
+                ToolResultGuardrailResult::Allow => {}
+                ToolResultGuardrailResult::Withhold { reason, severity } => {
+                    // The reason is returned to the caller, which sends it to the model, but
+                    // is not logged.
+                    tracing::warn!(
+                        guardrail = guardrail.name(),
+                        tool = tool_name,
+                        ?severity,
+                        "tool result withheld by guardrail"
+                    );
+                    return ToolResultDecision::Withhold {
+                        guardrail: guardrail.name().to_string(),
+                        reason,
+                        severity,
+                    };
+                }
+                // A reason can quote the result it replaced, so it is not logged.
+                ToolResultGuardrailResult::Revise { result: revised, reason: _ } => {
+                    tracing::debug!(
+                        guardrail = guardrail.name(),
+                        tool = tool_name,
+                        "tool result revised by guardrail"
+                    );
+                    current = revised;
+                }
+            }
+        }
+
+        ToolResultDecision::Deliver { result: current }
+    }
+}
+
+/// Screens results with [`ToolGuardrailSet::evaluate_result`], so a set can be handed to any
+/// agent that accepts a [`ToolResultScreen`](adk_core::ToolResultScreen).
+#[async_trait]
+impl adk_core::ToolResultScreen for ToolGuardrailSet {
+    async fn screen_result(
+        &self,
+        tool_name: &str,
+        args: &Value,
+        result: &Value,
+    ) -> std::result::Result<Value, String> {
+        match self.evaluate_result(tool_name, args, result).await {
+            ToolResultDecision::Deliver { result } => Ok(result),
+            ToolResultDecision::Withhold { guardrail, reason, severity } => {
+                Err(format!("tool guardrail '{guardrail}' ({severity:?}): {reason}"))
+            }
+        }
+    }
+}
+
+/// Applies a content [`Guardrail`] to every text value of a tool's result.
+///
+/// Each string in the result JSON, at any depth, is validated as one text part: a transform
+/// replaces the string, so [`PiiRedactor`](crate::PiiRedactor) redacts a result field by field
+/// and the result keeps its shape, and a failure above [`Severity::Low`] withholds the whole
+/// result. Object keys are not screened.
+///
+/// # Example
+///
+/// ```rust
+/// use adk_guardrail::{ContentFilter, PiiRedactor, ResultTextGuardrail, ToolGuardrailSet};
+///
+/// # fn main() -> Result<(), adk_guardrail::GuardrailError> {
+/// let guardrails = ToolGuardrailSet::new()
+///     .with(ResultTextGuardrail::new(PiiRedactor::new()))
+///     .with(
+///         ResultTextGuardrail::new(ContentFilter::blocked_keywords(vec!["internal only".into()])?)
+///             .on_tools(["search_wiki"]),
+///     );
+/// # Ok(())
+/// # }
+/// ```
+pub struct ResultTextGuardrail<G> {
+    guardrail: G,
+    tools: Option<Vec<String>>,
+}
+
+impl<G: Guardrail> ResultTextGuardrail<G> {
+    /// Applies `guardrail` to the text of every tool's result.
+    pub fn new(guardrail: G) -> Self {
+        Self { guardrail, tools: None }
+    }
+
+    /// Restricts this guardrail to the named tools. Without this it applies to every tool.
+    pub fn on_tools<I, S>(mut self, tools: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.tools = Some(tools.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Screens every string in `value`, returning the failure that withholds the result.
+    async fn screen(&self, value: &mut Value) -> std::result::Result<bool, (String, Severity)> {
+        let mut changed = false;
+        let mut pending = vec![value];
+        while let Some(value) = pending.pop() {
+            match value {
+                Value::String(text) => {
+                    let content = adk_core::Content::new("tool").with_text(text.as_str());
+                    match self.guardrail.validate(&content).await {
+                        GuardrailResult::Pass => {}
+                        GuardrailResult::Fail { severity: Severity::Low, .. } => {
+                            tracing::warn!(
+                                guardrail.name = self.guardrail.name(),
+                                "guardrail flagged a tool result at low severity; the result passes"
+                            );
+                        }
+                        GuardrailResult::Fail { reason, severity } => {
+                            return Err((reason, severity));
+                        }
+                        GuardrailResult::Transform { new_content, .. } => {
+                            let screened: String =
+                                new_content.parts.iter().filter_map(adk_core::Part::text).collect();
+                            if screened != *text {
+                                *text = screened;
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+                Value::Array(items) => pending.extend(items.iter_mut()),
+                Value::Object(fields) => pending.extend(fields.values_mut()),
+                Value::Null | Value::Bool(_) | Value::Number(_) => {}
+            }
+        }
+        Ok(changed)
+    }
+}
+
+#[async_trait]
+impl<G: Guardrail> ToolGuardrail for ResultTextGuardrail<G> {
+    fn name(&self) -> &str {
+        self.guardrail.name()
+    }
+
+    fn applies_to(&self, tool_name: &str) -> bool {
+        match &self.tools {
+            Some(tools) => tools.iter().any(|t| t == tool_name),
+            None => true,
+        }
+    }
+
+    async fn validate_result(
+        &self,
+        _tool_name: &str,
+        _args: &Value,
+        result: &Value,
+    ) -> ToolResultGuardrailResult {
+        let mut screened = result.clone();
+        match self.screen(&mut screened).await {
+            Ok(false) => ToolResultGuardrailResult::Allow,
+            Ok(true) => ToolResultGuardrailResult::revise(
+                screened,
+                format!("{} rewrote the result's text", self.guardrail.name()),
+            ),
+            Err((reason, severity)) => ToolResultGuardrailResult::withhold(reason, severity),
+        }
     }
 }
 
@@ -300,26 +600,53 @@ impl ToolGuardrail for DeniedArgumentPattern {
 
 /// Denies a call whose path-valued arguments fall outside a set of allowed roots.
 ///
-/// Checks the named arguments when present, and requires each to be an absolute path contained by
-/// one of the allowed roots. Containment is compared by path component and after resolving the
-/// allowed root and every existing candidate component, so string-prefix, dangling-symlink, and
-/// resolved-symlink escapes are refused. Any path containing a `..` component is denied outright.
+/// Checks every key named in `arg_names` at any depth of the arguments: at the top level, in a
+/// nested object, and in an object held in an array. The call is denied when any occurrence is not
+/// an absolute path contained by one of the allowed roots, so a permitted path in one place does
+/// not vouch for another elsewhere.
 ///
-/// This is a preflight policy check, not a replacement for opening filesystem paths relative to a
-/// trusted directory handle. A hostile process able to replace path components between validation
-/// and tool execution can create a time-of-check/time-of-use race; filesystem tools operating
-/// across such a trust boundary must still use platform secure-open primitives.
+/// The value under a named key must be a path string or an array of path strings. Any other value
+/// — a number, a boolean, `null`, an object, or an array holding one of them — is denied, because
+/// it cannot be checked; an empty array holds no path. Every key of a configured name is checked
+/// as a path, including one that holds something else, such as a URL path, so scope the guardrail
+/// to the tools that take filesystem paths. A path inside a string value, such as embedded JSON or
+/// a command line, is not examined; [`DeniedArgumentPattern`] matches the serialized arguments.
+///
+/// A call in which no path is found under one of the names, at any depth, is denied, because the
+/// guardrail cannot vouch for a path it was not shown; [`allow_missing`](Self::allow_missing)
+/// permits such calls. Without [`on_tools`](Self::on_tools) the guardrail applies to every tool, so
+/// a tool that takes no path is denied too — scope it to the tools that take paths. Containment is
+/// compared by path component and after resolving the allowed root and every existing candidate
+/// component, so string-prefix, dangling-symlink, and resolved-symlink escapes are refused. Any
+/// path containing a `..` component is denied outright.
+///
+/// # Time of check and time of use
+///
+/// This is a preflight check: it resolves the path when the call is screened, and the tool opens
+/// it afterwards. A process that replaces a path component in between — a directory swapped for a
+/// symlink — redirects the open outside the root after the check passed. A tool that opens files
+/// where another process can write must open each path relative to a trusted directory handle and
+/// refuse symlinks, as the `adk-devtools` file tools do: `openat2` with `RESOLVE_BENEATH` on Linux,
+/// an `O_NOFOLLOW` walk from the root's descriptor on other Unix systems, and a check of the opened
+/// handle's final path on Windows.
 ///
 /// # Example
 ///
 /// ```rust
-/// use adk_guardrail::PathAllowList;
+/// use adk_guardrail::{PathAllowList, ToolGuardrail};
+/// use serde_json::json;
 ///
 /// let guardrail = PathAllowList::new(
 ///     "launch-agents-only",
 ///     ["path"],
 ///     ["/Users/me/Library/LaunchAgents"],
-/// );
+/// )
+/// .on_tools(["plist_write", "plist_read"]);
+///
+/// // A `path` nested under another key is checked like a top-level one.
+/// let nested = json!({ "options": { "path": "/etc/hosts" } });
+/// let decision = futures::executor::block_on(guardrail.validate_call("plist_read", &nested));
+/// assert!(!decision.is_allowed());
 /// ```
 pub struct PathAllowList {
     name: String,
@@ -327,10 +654,12 @@ pub struct PathAllowList {
     allowed_roots: Vec<PathBuf>,
     severity: Severity,
     tools: Option<Vec<String>>,
+    allow_missing: bool,
 }
 
 impl PathAllowList {
-    /// Creates a guardrail confining `arg_names` to `allowed_roots`.
+    /// Creates a guardrail confining every key named in `arg_names`, at any depth of a call's
+    /// arguments, to `allowed_roots`.
     pub fn new<A, S, R, P>(name: impl Into<String>, arg_names: A, allowed_roots: R) -> Self
     where
         A: IntoIterator<Item = S>,
@@ -344,6 +673,7 @@ impl PathAllowList {
             allowed_roots: allowed_roots.into_iter().map(Into::into).collect(),
             severity: Severity::Critical,
             tools: None,
+            allow_missing: false,
         }
     }
 
@@ -354,12 +684,35 @@ impl PathAllowList {
     }
 
     /// Restricts this guardrail to the named tools. Without this it applies to every tool.
+    ///
+    /// A tool not named here is not checked: its calls pass this guardrail whatever their
+    /// arguments. List every tool that takes one of the configured path arguments.
     pub fn on_tools<I, S>(mut self, tools: I) -> Self
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
         self.tools = Some(tools.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Permits a call in which no path is found under a configured name, at any depth.
+    ///
+    /// By default such a call is denied. Use this when the guardrail names arguments that only
+    /// some of its tools take, such as `source` and `destination` beside `path`; every occurrence
+    /// that is present is still checked.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_guardrail::PathAllowList;
+    ///
+    /// let guardrail = PathAllowList::new("workspace", ["path", "source", "destination"], ["/srv"])
+    ///     .on_tools(["read_file", "move_file"])
+    ///     .allow_missing();
+    /// ```
+    pub fn allow_missing(mut self) -> Self {
+        self.allow_missing = true;
         self
     }
 
@@ -434,33 +787,85 @@ impl ToolGuardrail for PathAllowList {
     }
 
     async fn validate_call(&self, tool_name: &str, args: &Value) -> ToolGuardrailResult {
-        for arg_name in &self.arg_names {
-            let Some(value) = args.get(arg_name) else {
-                continue;
-            };
+        let deny = |reason: String| ToolGuardrailResult::deny(reason, self.severity);
+        // How many paths were checked under each configured name.
+        let mut found = vec![0_usize; self.arg_names.len()];
+        // Breadth first, so a top-level argument is reported before a nested one; a queue rather
+        // than recursion, so deeply nested arguments cannot exhaust the stack. Each entry carries
+        // its JSON pointer for the denial reason.
+        let mut pending = VecDeque::from([(String::new(), args)]);
 
-            let Some(candidate) = value.as_str() else {
-                return ToolGuardrailResult::deny(
-                    format!(
-                        "argument `{arg_name}` of `{tool_name}` must be a path string, got \
-                         {value}"
-                    ),
-                    self.severity,
-                );
-            };
-
-            if !self.is_permitted(candidate) {
-                let roots: Vec<_> =
-                    self.allowed_roots.iter().map(|r| r.display().to_string()).collect();
-                return ToolGuardrailResult::deny(
-                    format!(
-                        "argument `{arg_name}` of `{tool_name}` is {candidate:?}, which is not an \
-                         absolute path inside an allowed root ({})",
-                        roots.join(", ")
-                    ),
-                    self.severity,
-                );
+        while let Some((pointer, value)) = pending.pop_front() {
+            match value {
+                Value::Object(map) => {
+                    for (key, child) in map {
+                        let at = format!("{pointer}/{}", key.replace('~', "~0").replace('/', "~1"));
+                        let Some(index) = self.arg_names.iter().position(|name| name == key) else {
+                            pending.push_back((at, child));
+                            continue;
+                        };
+                        let candidates: Vec<(String, &Value)> = match child {
+                            Value::Array(items) => items
+                                .iter()
+                                .enumerate()
+                                .map(|(position, item)| (format!("{at}/{position}"), item))
+                                .collect(),
+                            Value::Null
+                            | Value::Bool(_)
+                            | Value::Number(_)
+                            | Value::String(_)
+                            | Value::Object(_) => vec![(at, child)],
+                        };
+                        for (at, candidate) in candidates {
+                            let kind = match candidate {
+                                Value::String(path) => {
+                                    if !self.is_permitted(path) {
+                                        let roots: Vec<_> = self
+                                            .allowed_roots
+                                            .iter()
+                                            .map(|root| root.display().to_string())
+                                            .collect();
+                                        return deny(format!(
+                                            "argument `{key}` of `{tool_name}` at `{at}` is \
+                                             {path:?}, which is not an absolute path inside an \
+                                             allowed root ({})",
+                                            roots.join(", ")
+                                        ));
+                                    }
+                                    found[index] += 1;
+                                    continue;
+                                }
+                                Value::Array(_) => "an array".to_string(),
+                                Value::Object(_) => "an object".to_string(),
+                                Value::Null | Value::Bool(_) | Value::Number(_) => {
+                                    candidate.to_string()
+                                }
+                            };
+                            return deny(format!(
+                                "argument `{key}` of `{tool_name}` at `{at}` must be a path string \
+                                 or an array of path strings, got {kind}"
+                            ));
+                        }
+                    }
+                }
+                Value::Array(items) => {
+                    for (position, item) in items.iter().enumerate() {
+                        pending.push_back((format!("{pointer}/{position}"), item));
+                    }
+                }
+                Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
             }
+        }
+
+        if !self.allow_missing
+            && let Some((arg_name, _)) =
+                self.arg_names.iter().zip(&found).find(|(_, count)| **count == 0)
+        {
+            return deny(format!(
+                "argument `{arg_name}` of `{tool_name}` holds no path at any depth, so it cannot \
+                 be checked; configure the guardrail with allow_missing() to permit calls without \
+                 it"
+            ));
         }
 
         ToolGuardrailResult::Allow
@@ -470,7 +875,70 @@ impl ToolGuardrail for PathAllowList {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{ContentFilter, PiiRedactor};
+    use adk_core::ToolResultScreen;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn result_text_guardrail_redacts_every_string_and_keeps_the_shape() {
+        let guardrails = ToolGuardrailSet::new().with(ResultTextGuardrail::new(PiiRedactor::new()));
+        let result = json!({
+            "order": 42,
+            "customer": {"email": "jane@example.com", "notes": ["ssn 123-45-6789", true]},
+        });
+        assert_eq!(
+            guardrails.evaluate_result("lookup", &json!({}), &result).await,
+            ToolResultDecision::Deliver {
+                result: json!({
+                    "order": 42,
+                    "customer": {"email": "[EMAIL REDACTED]", "notes": ["ssn [SSN REDACTED]", true]},
+                }),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failing_text_check_withholds_the_result() {
+        let filter = ContentFilter::blocked_keywords(vec!["internal only".into()]).unwrap();
+        let guardrails = ToolGuardrailSet::new().with(ResultTextGuardrail::new(filter));
+        let decision = guardrails
+            .evaluate_result("wiki", &json!({}), &json!({"page": ["INTERNAL ONLY: roadmap"]}))
+            .await;
+        assert!(matches!(
+            decision,
+            ToolResultDecision::Withhold { ref guardrail, severity: Severity::High, .. }
+                if guardrail == "blocked_keywords"
+        ));
+        let screened =
+            guardrails.screen_result("wiki", &json!({}), &json!({"page": "internal only"})).await;
+        assert!(screened.unwrap_err().starts_with("tool guardrail 'blocked_keywords' (High)"));
+    }
+
+    #[tokio::test]
+    async fn result_guardrails_are_scoped_and_compose() {
+        let guardrails = ToolGuardrailSet::new()
+            .with(ResultTextGuardrail::new(PiiRedactor::new()).on_tools(["lookup"]))
+            .with(ResultTextGuardrail::new(
+                ContentFilter::blocked_keywords(vec!["redacted".into()]).unwrap(),
+            ));
+        let other =
+            guardrails.evaluate_result("search", &json!({}), &json!("mail jane@example.com")).await;
+        assert_eq!(other, ToolResultDecision::Deliver { result: json!("mail jane@example.com") });
+        // The second guardrail sees what the first produced.
+        let lookup =
+            guardrails.evaluate_result("lookup", &json!({}), &json!("mail jane@example.com")).await;
+        assert!(matches!(lookup, ToolResultDecision::Withhold { .. }));
+    }
+
+    #[tokio::test]
+    async fn call_guardrails_deliver_results_unchanged() {
+        let guardrails = ToolGuardrailSet::new().with(ForceDryRun);
+        let result = json!({"ok": true});
+        assert_eq!(
+            guardrails.evaluate_result("run", &json!({}), &result).await,
+            ToolResultDecision::Deliver { result }
+        );
+    }
 
     /// Revises rather than denies, so composition can be observed.
     struct ForceDryRun;
@@ -719,12 +1187,161 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_absent_path_argument_is_not_checked() {
+    async fn an_absent_path_argument_is_denied() {
         let guardrail = PathAllowList::new("agents", ["path"], ["/tmp"]);
 
+        for args in [json!({ "other": 1 }), json!({ "Path": "/etc/passwd" }), json!("/etc/passwd")]
+        {
+            assert!(
+                !guardrail.validate_call("write", &args).await.is_allowed(),
+                "a call without `path` cannot be shown to stay inside the roots: {args}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn allow_missing_permits_an_absent_argument_but_checks_a_present_one() {
+        let root = tempfile::tempdir().expect("allowed root");
+        let guardrail =
+            PathAllowList::new("moves", ["source", "destination"], [root.path()]).allow_missing();
+        let inside = root.path().join("a.txt");
+
+        assert!(guardrail.validate_call("rm", &json!({ "source": inside })).await.is_allowed());
         assert!(
-            guardrail.validate_call("write", &json!({ "other": 1 })).await.is_allowed(),
-            "a guardrail on `path` says nothing about a call that has no `path`"
+            !guardrail
+                .validate_call("mv", &json!({ "source": inside, "destination": "/etc/x" }))
+                .await
+                .is_allowed()
         );
+    }
+
+    #[tokio::test]
+    async fn a_nested_path_outside_the_roots_is_denied() {
+        let root = tempfile::tempdir().expect("allowed root");
+        let inside = root.path().join("notes.txt");
+        let strict = PathAllowList::new("root", ["path"], [root.path()]);
+        let lenient = PathAllowList::new("root", ["path"], [root.path()]).allow_missing();
+
+        for args in [
+            json!({ "config": { "path": "/etc/shadow" } }),
+            json!({ "request": { "target": { "path": "/etc/shadow" } } }),
+        ] {
+            assert!(!strict.validate_call("read", &args).await.is_allowed(), "should deny {args}");
+            assert!(!lenient.validate_call("read", &args).await.is_allowed(), "should deny {args}");
+        }
+        let beside_a_permitted_one = json!({ "path": inside, "backup": { "path": "/etc/shadow" } });
+        assert!(
+            !strict.validate_call("read", &beside_a_permitted_one).await.is_allowed(),
+            "a permitted top-level path must not vouch for a nested one"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_array_held_path_outside_the_roots_is_denied() {
+        let root = tempfile::tempdir().expect("allowed root");
+        let inside = root.path().join("notes.txt");
+        let guardrail = PathAllowList::new("root", ["path"], [root.path()]).allow_missing();
+
+        for args in [
+            json!({ "files": [{ "path": inside }, { "path": "/etc/shadow" }] }),
+            json!({ "batches": [[{ "path": "/etc/shadow" }]] }),
+            json!({ "path": [inside, "/etc/shadow"] }),
+        ] {
+            assert!(
+                !guardrail.validate_call("read", &args).await.is_allowed(),
+                "should deny {args}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_nested_path_inside_the_roots_is_permitted() {
+        let root = tempfile::tempdir().expect("allowed root");
+        let first = root.path().join("a.txt");
+        let second = root.path().join("b.txt");
+        // Without allow_missing: a path found at any depth satisfies the presence check.
+        let guardrail = PathAllowList::new("root", ["path"], [root.path()]);
+
+        for args in [
+            json!({ "source": { "path": first } }),
+            json!({ "files": [{ "path": first }, { "path": second }] }),
+            json!({ "path": [first, second] }),
+            json!({ "path": first, "backup": { "path": second } }),
+        ] {
+            assert!(
+                guardrail.validate_call("read", &args).await.is_allowed(),
+                "should allow {args}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_value_under_the_name_that_is_not_a_path_is_denied_at_any_depth() {
+        let root = tempfile::tempdir().expect("allowed root");
+        let inside = root.path().join("a.txt");
+        let guardrail = PathAllowList::new("root", ["path"], [root.path()]).allow_missing();
+
+        for args in [
+            json!({ "config": { "path": 42 } }),
+            json!({ "config": { "path": null } }),
+            json!({ "config": { "path": { "dir": inside } } }),
+            json!({ "items": [{ "path": true }] }),
+            json!({ "path": [inside, 7] }),
+            json!({ "path": [[inside]] }),
+        ] {
+            assert!(
+                !guardrail.validate_call("read", &args).await.is_allowed(),
+                "a value that is not a path string cannot be checked: {args}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_empty_path_array_holds_no_path() {
+        let root = tempfile::tempdir().expect("allowed root");
+        let args = json!({ "options": { "path": [] } });
+
+        assert!(
+            !PathAllowList::new("root", ["path"], [root.path()])
+                .validate_call("read", &args)
+                .await
+                .is_allowed(),
+            "an empty array shows no path, so it is denied as missing"
+        );
+        assert!(
+            PathAllowList::new("root", ["path"], [root.path()])
+                .allow_missing()
+                .validate_call("read", &args)
+                .await
+                .is_allowed()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_denial_names_where_the_path_was_found() {
+        let root = tempfile::tempdir().expect("allowed root");
+        let guardrail = PathAllowList::new("root", ["path"], [root.path()]).allow_missing();
+
+        let decision =
+            guardrail.validate_call("read", &json!({ "a/b": [{ "path": "/etc/shadow" }] })).await;
+
+        match decision {
+            ToolGuardrailResult::Deny { reason, severity } => {
+                assert_eq!(severity, Severity::Critical);
+                assert!(reason.contains("at `/a~1b/0/path`"), "got {reason}");
+                assert!(reason.contains("not an absolute path inside an allowed root"), "{reason}");
+            }
+            other => panic!("expected Deny, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_tool_outside_on_tools_is_not_checked() {
+        let set = ToolGuardrailSet::new()
+            .with(PathAllowList::new("writes", ["path"], ["/srv"]).on_tools(["write_file"]));
+
+        assert!(set.evaluate("read_file", &json!({ "path": "/etc/passwd" })).await.is_allowed());
+        assert!(!set.evaluate("write_file", &json!({ "path": "/etc/passwd" })).await.is_allowed());
+        assert!(!set.evaluate("write_file", &json!({})).await.is_allowed());
     }
 }

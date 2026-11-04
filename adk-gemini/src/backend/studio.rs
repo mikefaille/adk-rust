@@ -13,9 +13,8 @@ use crate::{
         ListCachedContentsResponse,
     },
     client::{
-        BadResponseSnafu, ConstructUrlSnafu, DecodeResponseSnafu, DeserializeSnafu, Error,
-        InvalidApiKeySnafu, MissingResponseHeaderSnafu, Model, PerformRequestNewSnafu,
-        UrlParseSnafu,
+        BadResponseSnafu, ConstructUrlSnafu, DecodeResponseSnafu, Error, InvalidApiKeySnafu,
+        MissingResponseHeaderSnafu, Model, PerformRequestNewSnafu, UrlParseSnafu,
     },
     embedding::{
         BatchContentEmbeddingResponse, BatchEmbedContentsRequest, ContentEmbeddingResponse,
@@ -79,6 +78,7 @@ impl StudioBackend {
 
         let http_client = Client::builder()
             .default_headers(headers)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("all parameters must be valid");
 
@@ -138,8 +138,13 @@ impl StudioBackend {
     async fn check_response(response: Response) -> Result<Response, Error> {
         let status = response.status();
         if !status.is_success() {
+            let retry_after = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
             let description = response.text().await.ok();
-            BadResponseSnafu { code: status.as_u16(), description }.fail()
+            BadResponseSnafu { code: status.as_u16(), description, retry_after }.fail()
         } else {
             Ok(response)
         }
@@ -194,6 +199,7 @@ impl StudioBackend {
                 v.to_str().map(str::to_string).map_err(|_| Error::BadResponse {
                     code: 500,
                     description: Some("Missing upload URL in response".to_string()),
+                    retry_after: None,
                 })
             })
             .and_then(|url| Url::parse(&url).context(UrlParseSnafu))
@@ -212,7 +218,16 @@ impl GeminiBackend for StudioBackend {
             request.strip_vertex_unsupported_fields();
         }
         let url = self.build_url("generateContent")?;
-        self.post_json(url, &request).await
+        let response = self
+            .http_client
+            .post(url)
+            .json(&request)
+            .send()
+            .await
+            .context(PerformRequestNewSnafu)?;
+        let body =
+            Self::check_response(response).await?.text().await.context(DecodeResponseSnafu)?;
+        super::decode_generation_response(&body)
     }
 
     async fn generate_content_stream(
@@ -238,9 +253,7 @@ impl GeminiBackend for StudioBackend {
             .bytes_stream()
             .eventsource()
             .map_err(|e| Error::BadPart { source: e })
-            .and_then(|event| async move {
-                serde_json::from_str::<GenerationResponse>(&event.data).context(DeserializeSnafu)
-            });
+            .and_then(|event| async move { super::decode_generation_response(&event.data) });
 
         Ok(Box::pin(stream))
     }
@@ -506,7 +519,7 @@ impl GeminiBackend for StudioBackend {
             .map_err(|e| Error::BadPart { source: e })
             .and_then(|event| async move {
                 serde_json::from_str::<crate::interactions::InteractionSseEvent>(&event.data)
-                    .context(DeserializeSnafu)
+                    .context(crate::client::DeserializeSnafu)
             });
 
         Ok(Box::pin(stream))
@@ -663,6 +676,32 @@ impl GeminiBackend for StudioBackend {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn preserves_raw_retry_after() {
+        for header in [Some("7"), Some("Wed, 21 Oct 2037 07:28:00 GMT"), Some("invalid"), None] {
+            let server = wiremock::MockServer::start().await;
+            let mut response = wiremock::ResponseTemplate::new(503).set_body_string("fixture");
+            if let Some(value) = header {
+                response = response.insert_header("retry-after", value);
+            }
+            wiremock::Mock::given(wiremock::matchers::method("GET"))
+                .respond_with(response)
+                .expect(1)
+                .mount(&server)
+                .await;
+            let response = reqwest::get(server.uri()).await.unwrap();
+            let error = StudioBackend::check_response(response).await.unwrap_err();
+            match error {
+                Error::BadResponse { code, description, retry_after } => {
+                    assert_eq!(code, 503);
+                    assert_eq!(description.as_deref(), Some("fixture"));
+                    assert_eq!(retry_after.as_deref(), header);
+                }
+                other => panic!("expected an HTTP failure, got {other:?}"),
+            }
+        }
+    }
+
     #[test]
     fn detect_vertex_url_regional() {
         let url = Url::parse("https://us-central1-aiplatform.googleapis.com/v1/publishers/google/")
@@ -703,5 +742,36 @@ mod tests {
     fn detect_custom_url() {
         let url = Url::parse("https://my-proxy.example.com/gemini/").unwrap();
         assert!(!StudioBackend::detect_vertex_url(&url));
+    }
+
+    #[tokio::test]
+    async fn vertex_rag_store_is_rejected_before_dispatch() {
+        let backend = StudioBackend::new(
+            "test-key",
+            Model::default(),
+            Url::parse("https://generativelanguage.googleapis.com/v1beta/").unwrap(),
+        )
+        .unwrap();
+        let request = GenerateContentRequest {
+            contents: Vec::new(),
+            generation_config: None,
+            safety_settings: None,
+            tools: None,
+            tool_config: None,
+            system_instruction: None,
+            cached_content: None,
+        };
+        let store = crate::tools::model::VertexRagStore::corpus(
+            "projects/p/locations/us-central1/ragCorpora/123",
+        );
+
+        let error = backend
+            .generate_content_with_vertex_rag(request, store)
+            .await
+            .expect_err("the studio backend must reject vertexRagStore retrieval");
+        assert!(
+            matches!(&error, Error::Validation { message } if message.contains("Vertex AI backend")),
+            "expected a validation error naming the Vertex AI backend, got {error:?}"
+        );
     }
 }

@@ -247,6 +247,81 @@ fn try_execution_identity_uses_auth_user_when_request_context_set() {
 }
 
 #[test]
+fn the_identity_is_authenticated_only_with_a_request_context() {
+    let plain = make_ctx("app", "body-user", "sess", "inv", "agent", "");
+    assert!(!plain.is_authenticated(), "a user id from the session is not authenticated");
+
+    let authenticated = make_ctx("app", "body-user", "sess", "inv", "agent", "")
+        .with_request_context(RequestContext {
+            user_id: "alice".to_string(),
+            scopes: vec![],
+            metadata: HashMap::new(),
+        });
+    assert!(authenticated.is_authenticated());
+    assert_eq!(authenticated.user_id(), "alice");
+
+    // The provided method reaches callers that hold the context as a trait object.
+    let as_trait: &dyn ReadonlyContext = &authenticated;
+    assert!(as_trait.is_authenticated());
+    let wrapped = adk_core::ToolCallbackContext::new(
+        Arc::new(authenticated),
+        "t".into(),
+        serde_json::Value::Null,
+    );
+    assert!(wrapped.is_authenticated(), "ToolCallbackContext forwards it");
+}
+
+#[test]
+fn a_visitor_run_is_never_authenticated() {
+    let config =
+        adk_core::RunConfig::builder().subject_kind(adk_core::SubjectKind::Visitor).build();
+    let visitor = make_ctx("app", "v:1", "sess", "inv", "agent", "")
+        .with_run_config(config)
+        .with_request_context(RequestContext {
+            user_id: "v:1".to_string(),
+            scopes: vec![],
+            metadata: HashMap::new(),
+        });
+    assert!(!visitor.is_authenticated(), "no credential identifies a visitor");
+}
+
+#[test]
+fn run_request_metadata_reaches_tools_without_authenticating() {
+    let config = adk_core::RunConfig::builder()
+        .request_metadata("thread", "chat-7")
+        .request_metadata("tier", "public")
+        .build();
+    let anonymous =
+        make_ctx("app", "visitor", "sess", "inv", "agent", "").with_run_config(config.clone());
+    assert!(!anonymous.is_authenticated(), "request metadata authenticates no one");
+    assert_eq!(anonymous.user_id(), "visitor");
+    assert!(anonymous.user_scopes().is_empty());
+    assert_eq!(
+        anonymous.request_metadata(),
+        HashMap::from([
+            ("thread".to_string(), serde_json::json!("chat-7")),
+            ("tier".to_string(), serde_json::json!("public")),
+        ])
+    );
+
+    // An authenticated request context's metadata wins on a shared key.
+    let authenticated = make_ctx("app", "alice", "sess", "inv", "agent", "")
+        .with_run_config(config)
+        .with_request_context(RequestContext {
+            user_id: "alice".to_string(),
+            scopes: vec![],
+            metadata: HashMap::from([("tier".to_string(), "verified".to_string())]),
+        });
+    assert_eq!(
+        authenticated.request_metadata(),
+        HashMap::from([
+            ("thread".to_string(), serde_json::json!("chat-7")),
+            ("tier".to_string(), serde_json::json!("verified")),
+        ])
+    );
+}
+
+#[test]
 fn without_request_context_user_id_is_original() {
     let ctx = make_ctx("app", "original-user", "sess", "inv", "agent", "");
 

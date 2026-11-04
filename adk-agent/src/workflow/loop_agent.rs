@@ -3,7 +3,7 @@ use crate::skill_shim::load_skill_index;
 use crate::skill_shim::{SelectionPolicy, SkillIndex};
 use adk_core::{
     AfterAgentCallback, Agent, BeforeAgentCallback, CallbackContext, Content, Event, EventStream,
-    InvocationContext, ReadonlyContext, Result, Session, State,
+    InvocationContext, Part, ReadonlyContext, Result, Session, State, WorkflowPosition,
 };
 use async_stream::stream;
 use async_trait::async_trait;
@@ -50,6 +50,18 @@ impl LoopAgent {
     }
 
     /// Set the maximum number of loop iterations.
+    ///
+    /// Each iteration runs every sub-agent once, in order; an escalation ends the loop early.
+    /// `0` runs no iterations: the before- and after-agent callbacks still run and the agent
+    /// completes immediately without invoking any sub-agent.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use adk_agent::LoopAgent;
+    ///
+    /// let refine = LoopAgent::new("refine", vec![writer, critic]).with_max_iterations(3);
+    /// ```
     pub fn with_max_iterations(mut self, max: u32) -> Self {
         self.max_iterations = max;
         self
@@ -107,10 +119,38 @@ impl LoopAgent {
     }
 }
 
+/// Tracks the history a loop's sub-agents produce, for a parent session that does not.
+///
+/// Under the runner the parent session records every event as it is yielded
+/// ([`Session::records_invocation_events`]), and history is read from it. Otherwise this
+/// keeps the history the loop started with and adds each sub-agent event to it, with its
+/// author, so each sub-agent sees other agents' turns as context.
 struct HistoryTrackingSession {
     parent_ctx: Arc<dyn InvocationContext>,
-    history: Arc<RwLock<Vec<Content>>>,
+    history: RwLock<TrackedHistory>,
+    /// Event id of the streamed response that produced the last history entry.
+    streamed_id: RwLock<Option<String>>,
     state: StateTrackingState,
+}
+
+/// History entries and, for each, the author and branch of the event that produced it;
+/// `None` for the history the loop started with.
+#[derive(Default)]
+struct TrackedHistory {
+    contents: Vec<Content>,
+    origins: Vec<Option<(String, String)>>,
+}
+
+impl TrackedHistory {
+    fn push(&mut self, content: Content, origin: Option<(String, String)>) {
+        self.contents.push(content);
+        self.origins.push(origin);
+    }
+
+    /// Whether the last entry came from `origin`'s event author.
+    fn last_from(&self, origin: &(String, String)) -> bool {
+        matches!(self.origins.last(), Some(Some(last)) if last == origin)
+    }
 }
 
 struct StateTrackingState {
@@ -154,76 +194,111 @@ impl State for StateTrackingState {
 
 impl HistoryTrackingSession {
     fn new(parent_ctx: Arc<dyn InvocationContext>) -> Self {
+        let mut history = TrackedHistory::default();
+        for content in parent_ctx.session().conversation_history() {
+            history.push(content, None);
+        }
         Self {
-            history: Arc::new(RwLock::new(parent_ctx.session().conversation_history())),
+            history: RwLock::new(history),
+            streamed_id: RwLock::new(None),
             state: StateTrackingState::new(&parent_ctx),
             parent_ctx,
         }
     }
 
+    /// Whether history is read from the parent session, which records every event itself.
+    fn delegates(&self) -> bool {
+        self.parent_ctx.session().records_invocation_events()
+    }
+
     fn apply_event(&self, event: &Event) {
         if let Some(content) = &event.llm_response.content {
-            // Consolidate streaming chunks: if the last history entry has the
-            // same role, merge text into it instead of creating a new entry.
+            let origin = (event.author.clone(), event.branch.clone());
+            // Consolidate streaming chunks: chunks of one response merge into the
+            // entry its first chunk started instead of creating new entries.
             // This prevents N streaming chunks from becoming N separate Content
             // entries that bloat context for subsequent agents.
             let mut history = self.history.write().unwrap_or_else(|e| e.into_inner());
+            let mut streamed_id = self.streamed_id.write().unwrap_or_else(|e| e.into_inner());
+            // A resumed call's response takes its pending response's place, so a later
+            // sub-agent sees one response per call.
+            let unplaced;
+            let content = if !event.llm_response.partial
+                && content.parts.iter().any(|part| matches!(part, Part::FunctionResponse { .. }))
+            {
+                unplaced =
+                    adk_core::supersede_pending_responses(&mut history.contents, content.clone());
+                match &unplaced {
+                    Some(rest) => rest,
+                    None => {
+                        *streamed_id = None;
+                        drop(history);
+                        drop(streamed_id);
+                        self.state.apply_delta(&event.actions.state_delta);
+                        return;
+                    }
+                }
+            } else {
+                content
+            };
+            let continues_stream = streamed_id.as_deref() == Some(event.id.as_str());
+            let same_author = history.last_from(&origin);
 
             if event.llm_response.partial {
-                // Partial chunk — merge into last entry if same role
-                if let Some(last) = history.last_mut()
+                // Partial chunk — merge into the entry this response started, so a
+                // later complete snapshot replaces only this response.
+                if continues_stream
+                    && same_author
+                    && let Some(last) = history.contents.last_mut()
                     && last.role == content.role
                 {
-                    for part in &content.parts {
-                        if let adk_core::Part::Text { text } = part {
-                            // Append text to the last Text part
-                            if let Some(adk_core::Part::Text { text: existing }) =
-                                last.parts.last_mut()
-                            {
-                                existing.push_str(text);
-                            } else {
-                                last.parts.push(part.clone());
-                            }
-                        } else {
-                            last.parts.push(part.clone());
-                        }
-                    }
+                    merge_parts(last, &content.parts);
                     return;
                 }
                 // No matching last entry — start a new one
-                history.push(content.clone());
+                history.push(content.clone(), Some(origin));
+                *streamed_id = Some(event.id.clone());
             } else {
-                // Final event (partial=false) — append as-is.
-                // For non-streaming mode this carries the full content.
-                // For streaming mode the accumulated text is already in the
-                // last history entry from partial merges above, so the final
-                // chunk (which may carry the last fragment or be empty) is
-                // merged if same role, or appended if different.
-                if let Some(last) = history.last_mut() {
-                    if last.role == content.role && !content.parts.is_empty() {
-                        // Merge any remaining text from the final chunk
-                        for part in &content.parts {
-                            if let adk_core::Part::Text { text } = part {
-                                if let Some(adk_core::Part::Text { text: existing }) =
-                                    last.parts.last_mut()
-                                {
-                                    existing.push_str(text);
-                                } else {
-                                    last.parts.push(part.clone());
-                                }
-                            } else {
-                                last.parts.push(part.clone());
-                            }
-                        }
-                    } else if !content.parts.is_empty() {
-                        history.push(content.clone());
-                    }
-                } else {
-                    history.push(content.clone());
+                let content_complete = event
+                    .llm_response
+                    .provider_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get("content_complete"))
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true);
+                let replaced_stream = continues_stream && content_complete && same_author;
+                *streamed_id = None;
+                if replaced_stream && let Some(last) = history.contents.last_mut() {
+                    // A complete snapshot already contains every streamed delta.
+                    *last = content.clone();
+                } else if continues_stream
+                    && same_author
+                    && let Some(last) = history.contents.last_mut()
+                    && last.role == content.role
+                {
+                    // Without a complete snapshot the accumulated text is already in the
+                    // last entry from the partial merges above, so the final chunk (which
+                    // may carry the last fragment or be empty) is merged into it.
+                    merge_parts(last, &content.parts);
+                } else if !content.parts.is_empty() {
+                    history.push(content.clone(), Some(origin));
                 }
             }
         }
         self.state.apply_delta(&event.actions.state_delta);
+    }
+}
+
+/// Appends `parts` to `last`, joining text onto its last text part.
+fn merge_parts(last: &mut Content, parts: &[Part]) {
+    for part in parts {
+        if let Part::Text { text } = part
+            && let Some(Part::Text { text: existing }) = last.parts.last_mut()
+        {
+            existing.push_str(text);
+        } else {
+            last.parts.push(part.clone());
+        }
     }
 }
 
@@ -245,15 +320,80 @@ impl Session for HistoryTrackingSession {
     }
 
     fn conversation_history(&self) -> Vec<Content> {
-        self.history.read().unwrap_or_else(|e| e.into_inner()).clone()
+        if self.delegates() {
+            return self.parent_ctx.session().conversation_history();
+        }
+        self.history.read().unwrap_or_else(|e| e.into_inner()).contents.clone()
     }
 
-    fn conversation_history_for_agent(&self, _agent_name: &str) -> Vec<Content> {
+    fn conversation_history_for_agent(&self, agent_name: &str) -> Vec<Content> {
+        if self.delegates() {
+            return self.parent_ctx.session().conversation_history_for_agent(agent_name);
+        }
         self.conversation_history()
     }
 
+    fn conversation_history_scoped(&self, agent_name: Option<&str>, branch: &str) -> Vec<Content> {
+        if self.delegates() {
+            return self.parent_ctx.session().conversation_history_scoped(agent_name, branch);
+        }
+        self.conversation_history()
+    }
+
+    fn conversation_history_with_context(&self, agent_name: &str, branch: &str) -> Vec<Content> {
+        if self.delegates() {
+            return self.parent_ctx.session().conversation_history_with_context(agent_name, branch);
+        }
+        let history = self.history.read().unwrap_or_else(|e| e.into_inner());
+        let call_ids: std::collections::HashSet<String> = history
+            .contents
+            .iter()
+            .flat_map(|content| content.parts.iter())
+            .filter_map(|part| match part {
+                Part::FunctionCall { id: Some(id), .. } => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        history
+            .contents
+            .iter()
+            .zip(&history.origins)
+            .filter_map(|(content, origin)| match origin {
+                Some((_, event_branch))
+                    if adk_core::history::is_tool_branch_event(branch, event_branch, &call_ids) =>
+                {
+                    None
+                }
+                Some((author, _)) if author != "user" && author != agent_name => {
+                    adk_core::history::other_agent_context(author, content)
+                }
+                Some(_) | None => Some(content.clone()),
+            })
+            .collect()
+    }
+
+    fn records_invocation_events(&self) -> bool {
+        self.delegates()
+    }
+
+    fn held_tool_calls(&self, agent_name: &str, branch: &str) -> Vec<adk_core::HeldToolCall> {
+        self.parent_ctx.session().held_tool_calls(agent_name, branch)
+    }
+
+    fn workflow_resume_positions(
+        &self,
+        workflow: &str,
+        branch: &str,
+    ) -> Vec<adk_core::WorkflowPosition> {
+        self.parent_ctx.session().workflow_resume_positions(workflow, branch)
+    }
+
     fn append_to_history(&self, content: Content) {
-        self.history.write().unwrap_or_else(|e| e.into_inner()).push(content);
+        if self.delegates() {
+            self.parent_ctx.session().append_to_history(content);
+            return;
+        }
+        self.history.write().unwrap_or_else(|e| e.into_inner()).push(content, None);
     }
 }
 
@@ -309,6 +449,14 @@ impl adk_core::ReadonlyContext for HistoryTrackingContext {
 
     fn user_content(&self) -> &Content {
         self.parent_ctx.user_content()
+    }
+
+    fn acting_context(&self) -> adk_core::ActingContext {
+        self.parent_ctx.acting_context()
+    }
+
+    fn is_authenticated(&self) -> bool {
+        self.parent_ctx.is_authenticated()
     }
 }
 
@@ -383,6 +531,10 @@ impl InvocationContext for HistoryTrackingContext {
         self.parent_ctx.requires_tool_confirmation(tool_name)
     }
 
+    fn steering_inbox(&self) -> Option<adk_core::SteeringInbox> {
+        self.parent_ctx.steering_inbox()
+    }
+
     async fn get_secret(&self, name: &str) -> adk_core::Result<Option<String>> {
         self.parent_ctx.get_secret(name).await
     }
@@ -393,6 +545,23 @@ impl InvocationContext for HistoryTrackingContext {
     ) -> adk_core::Result<Option<String>> {
         self.parent_ctx.get_secret_for(request).await
     }
+}
+
+/// The earliest recorded `(iteration, sub-agent index)` a resuming run starts at, if any
+/// names a sub-agent of this loop within its iterations.
+fn resume_point(
+    positions: &[WorkflowPosition],
+    sub_agents: &[Arc<dyn Agent>],
+    max_iterations: u32,
+) -> Option<(u32, usize)> {
+    positions
+        .iter()
+        .filter(|position| position.iteration < max_iterations)
+        .filter_map(|position| {
+            let index = sub_agents.iter().position(|agent| agent.name() == position.sub_agent)?;
+            Some((position.iteration, index))
+        })
+        .min()
 }
 
 #[async_trait]
@@ -417,6 +586,15 @@ impl Agent for LoopAgent {
     }
 
     async fn run(&self, ctx: Arc<dyn InvocationContext>) -> Result<EventStream> {
+        // A call a person asked for needs an agent that holds it for their decision itself
+        // (spec 3.3 §7.4 rule 5).
+        if let Some(refused) = crate::requested_call::refused_by_root(
+            ctx.as_ref(),
+            &self.name,
+            crate::requested_call::RUNS_OTHER_AGENTS,
+        ) {
+            return Ok(refused);
+        }
         let sub_agents = self.sub_agents.clone();
         let max_iterations = self.max_iterations;
         let before_callbacks = self.before_callbacks.clone();
@@ -429,6 +607,11 @@ impl Agent for LoopAgent {
             self.max_skill_chars,
         );
         let run_ctx = Arc::new(HistoryTrackingContext::new(run_ctx));
+        let resume_at = resume_point(
+            &run_ctx.session().workflow_resume_positions(&agent_name, run_ctx.branch()),
+            &sub_agents,
+            max_iterations,
+        );
 
         let s = stream! {
             use futures::StreamExt;
@@ -462,17 +645,28 @@ impl Agent for LoopAgent {
                 }
             }
 
-            let mut remaining = max_iterations;
-
-            loop {
+            // A range cannot underflow, so `max_iterations == 0` runs the body zero times
+            // instead of wrapping to `u32::MAX`. A run that resumes a hold starts at the
+            // iteration and sub-agent it stopped at, so sub-agents that already finished in
+            // that iteration do not run again.
+            let (first_iteration, mut first_index) = resume_at.unwrap_or((0, 0));
+            for iteration in first_iteration..max_iterations {
                 let mut should_exit = false;
 
-                for agent in &sub_agents {
+                for (index, agent) in sub_agents.iter().enumerate().skip(first_index) {
                     let mut stream = agent.run(run_ctx.clone() as Arc<dyn InvocationContext>).await?;
+                    let mut held = false;
 
                     while let Some(result) = stream.next().await {
                         match result {
-                            Ok(event) => {
+                            Ok(mut event) => {
+                                if event.actions.tool_confirmation.is_some() {
+                                    held = true;
+                                    event.actions.workflow_positions.insert(
+                                        agent_name.clone(),
+                                        WorkflowPosition::new(iteration, agent.name()),
+                                    );
+                                }
                                 run_ctx.apply_event(&event);
                                 if event.actions.escalate {
                                     should_exit = true;
@@ -486,17 +680,26 @@ impl Agent for LoopAgent {
                         }
                     }
 
+                    // A held call pauses the workflow: no later sub-agent runs, and the
+                    // after-agent callbacks wait for the run that finishes it.
+                    if held {
+                        tracing::info!(
+                            agent.name = %agent_name,
+                            workflow.iteration = iteration,
+                            workflow.sub_agent = %agent.name(),
+                            workflow.index = index,
+                            "workflow paused on a held tool call"
+                        );
+                        return;
+                    }
+
                     if should_exit {
                         break;
                     }
                 }
+                first_index = 0;
 
                 if should_exit {
-                    break;
-                }
-
-                remaining -= 1;
-                if remaining == 0 {
                     break;
                 }
             }

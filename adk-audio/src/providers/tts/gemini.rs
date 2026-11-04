@@ -281,6 +281,10 @@ fn parse_channels(mime_type: &str, channels: Option<i64>) -> AudioResult<u8> {
 
 #[async_trait]
 impl TtsProvider for GeminiTts {
+    fn billing(&self) -> Option<crate::AudioBilling> {
+        Some(crate::AudioBilling::new("gemini", self.model.clone()))
+    }
+
     async fn synthesize(&self, request: &TtsRequest) -> AudioResult<AudioFrame> {
         if self.model.contains("gemini-2.5") {
             let url = self.base_url();

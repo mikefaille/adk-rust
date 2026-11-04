@@ -13,23 +13,91 @@ remote configuration.
 ```mermaid
 stateDiagram-v2
     [*] --> Stopped
-    [*] --> Disabled
-    Stopped --> Running: start + MCP handshake
-    Stopped --> FailedToStart: spawn or handshake error
+    [*] --> Disabled: disabled in config
+    Stopped --> Starting: start
+    Starting --> Running: MCP handshake succeeds
+    Starting --> FailedToStart: spawn or handshake error, or startup timeout
+    Starting --> Stopped: stop during the handshake
     Running --> Stopped: stop
-    Running --> Restarting: manual restart
-    Running --> Crashed: closed connection detected
-    Crashed --> Restarting: restart policy
+    Running --> Restarting: restart_server
+    Running --> Crashed: monitor finds the connection closed
+    Crashed --> Restarting: restart policy has attempts left
     FailedToStart --> Restarting: restart policy has attempts left
-    Restarting --> Running: handshake succeeds
-    Restarting --> FailedToStart: handshake fails
+    Crashed --> FailedToStart: restart attempts exhausted
+    Restarting --> Starting: start
     Disabled --> Stopped: enable
     Stopped --> Disabled: disable
     Running --> Disabled: disable
 ```
 
-The monitor checks whether the MCP connection has closed. It retries crashed or
-failed starts only while the configured `RestartPolicy` has attempts remaining.
+The monitor checks whether the MCP connection has closed. It restarts a
+`Crashed` or `FailedToStart` server only when the server's configuration has a
+`restartPolicy`. `maxRestartAttempts` bounds consecutive failed restarts: a
+successful restart resets the count, and the server is marked `FailedToStart`
+once that many restarts in a row fail. `disable_server` moves a server in any
+state to `Disabled`, and `start_server` starts any server that is not disabled.
+
+## Status transitions
+
+`subscribe_status_transitions` returns a `tokio::sync::broadcast::Receiver` of
+`ServerStatusTransition { id, from, to }`. The manager publishes one wherever it
+changes a server's status — every arrow in the diagram above — while it holds
+the registry lock, so each server's transitions arrive in the order they
+happened. Nothing is polled.
+
+```rust
+use adk_tool::mcp::{McpServerManager, ServerStatus};
+use tokio::sync::broadcast::error::RecvError;
+
+async fn watch(manager: &McpServerManager) {
+    let mut transitions = manager.subscribe_status_transitions();
+    // The receiver sees only later transitions; this is the state they start from.
+    let mut statuses = manager.all_statuses().await;
+    loop {
+        match transitions.recv().await {
+            Ok(transition) => {
+                if transition.to == ServerStatus::Crashed {
+                    tracing::warn!(server.id = transition.id, "MCP server crashed");
+                }
+                statuses.insert(transition.id, transition.to);
+            }
+            // More than STATUS_CHANNEL_CAPACITY (256) transitions behind.
+            Err(RecvError::Lagged(_)) => statuses = manager.all_statuses().await,
+            Err(RecvError::Closed) => break,
+        }
+    }
+}
+```
+
+`FailedToStart` is the exhausted state. The monitor retries a `Crashed` or
+`FailedToStart` server only while its `restartPolicy` has attempts left, so a
+`FailedToStart` entered by a server without a policy, or after
+`maxRestartAttempts` failed restarts since the server last ran, is followed by
+no further transition until the application starts the server again.
+
+## Stdio launcher
+
+By default the manager spawns `command` with `args` and `env`. A launcher set
+with `with_stdio_launcher` builds the `tokio::process::Command` for every start
+instead, automatic restarts included — for example to run the server inside an
+OS sandbox. It receives the server's `McpServerConfig`; rmcp pipes the
+command's stdin and stdout for the MCP connection. An error from the launcher
+fails that start with the error unchanged and leaves the server
+`FailedToStart`. On Windows the manager replaces the command's creation flags
+with `CREATE_SUSPENDED`, so the server runs only once it is in its Job Object.
+On Unix it pipes the command's standard input and output, leaves standard error
+inherited, and starts the command in a new session, so the server leads a
+process group of its own (see [Shutdown behavior](#shutdown-behavior)).
+
+```rust
+use adk_tool::mcp::McpServerManager;
+
+let manager = McpServerManager::from_json_file("mcp.json")?.with_stdio_launcher(|config| {
+    let mut command = tokio::process::Command::new("/usr/bin/nice");
+    command.arg(&config.command).args(&config.args).envs(&config.env);
+    Ok(command)
+});
+```
 
 ## Configuration
 
@@ -49,11 +117,24 @@ failed starts only while the configured `RestartPolicy` has attempts remaining.
         "maxDelayMs": 15000,
         "backoffMultiplier": 2.0,
         "maxRestartAttempts": 5
+      },
+      "lifecycle": "initialize",
+      "taskConfig": {
+        "enableTasks": false
       }
     }
   }
 }
 ```
+
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `command`, `args`, `env` | — / `[]` / `{}` | The child process to spawn |
+| `disabled` | `false` | Leave the server `Disabled` until it is enabled |
+| `autoApprove` | `[]` | Kept for compatibility; never read as approval |
+| `restartPolicy` | none (no automatic restart) | Each omitted field defaults to `initialDelayMs` 1000, `maxDelayMs` 30000, `backoffMultiplier` 2.0, `maxRestartAttempts` 10 |
+| `lifecycle` | `initialize` | `initialize`, or `auto` / `discover` to probe with `server/discover` (`McpLifecycleMode`) |
+| `taskConfig` | tasks off | `McpTaskConfig` in camelCase (`enableTasks`, `pollIntervalMs`, `timeoutMs`, `maxPollAttempts`, `maxInputRounds`); `enableTasks` also declares the tasks extension to the server |
 
 Server IDs accept ASCII letters, numbers, hyphens, and underscores. Use a
 stable ID because it becomes part of a collision-prefixed tool name.
@@ -88,9 +169,40 @@ let agent = LlmAgentBuilder::new("operator")
     .build()?;
 ```
 
-Registry mutations are serialized while a child completes its MCP handshake.
-`start_all` returns an independent result for every enabled server, but startup
-is not currently a parallel-handshake path.
+A server is `Starting` while its child completes the MCP handshake. The registry
+is not locked during the handshake, so the other servers keep serving tools,
+status and lifecycle calls, and `start_all` runs the handshakes concurrently,
+returning an independent result for every enabled server. A handshake that does
+not finish within the startup timeout (30 seconds by default) ends the child and
+leaves the server `FailedToStart`; stopping, updating, disabling or removing a
+`Starting` server cancels its handshake.
+
+```rust
+use adk_tool::mcp::manager::McpServerManager;
+use std::time::Duration;
+
+// `npx` may download its package on the first start.
+let manager = McpServerManager::from_json_file("mcp.json")?
+    .with_startup_timeout(Duration::from_secs(120));
+```
+
+`with_schema_limits` sets the tool-schema size limits for every managed server.
+Each managed toolset is named after its server ID, so the warning for a skipped
+tool names the server, and each managed tool's origin is `mcp:{server_id}`. See
+[Schema size limits](client.md#schema-size-limits) for the defaults.
+
+`with_discovery_limits` sets the [discovery bounds](client.md#discovery-bounds)
+for every managed server. The manager lists its running servers concurrently,
+so a server that never answers `tools/list` costs the turn at most the
+discovery timeout, and the other servers' tools still resolve.
+
+```rust
+use adk_tool::mcp::McpDiscoveryLimits;
+use std::time::Duration;
+
+let manager = McpServerManager::new(configs)
+    .with_discovery_limits(McpDiscoveryLimits::default().with_timeout(Duration::from_secs(5)));
+```
 
 ## Change the registry at runtime
 
@@ -196,15 +308,61 @@ knowledge__search
 
 A tool name published by only one server is unchanged.
 
+Server IDs and tool names may both contain `__`, so a resolved name can still
+repeat: server `a` with tool `b__x` and server `a__b` with tool `x` both become
+`a__b__x` when each name is also published elsewhere. Servers are visited in
+ID order and the first tool to claim a resolved name keeps it; a later one is
+skipped with a `warn!` naming both servers. A prefixed name longer than the 64
+bytes model providers accept is skipped the same way. Choose server IDs that do
+not contain `__` to avoid both cases.
+
 ## Shutdown behavior
 
-Stopping a server cancels its MCP session, waits up to the configured grace
-period for the connection to close, then drops the transport. The child process
-is owned by the `TokioChildProcess` transport rather than a separately retained
-process handle.
+Stopping a server cancels its pending MCP tasks and its MCP session, then waits
+up to the configured grace period for the child process to exit; a process
+still running 3 seconds after its input closed is ended. A transport still
+closing when the grace period ends is dropped, which ends its child in the
+background. The child process is owned by the server's transport rather than a
+separately retained process handle. `stop_server` and `shutdown` return once
+each stopped server's process has exited or its grace period has elapsed.
 
-Call `shutdown()` before dropping the manager. Dropping a manager with running
-servers emits a warning because `Drop` cannot await asynchronous cleanup.
+On Windows each server starts suspended and runs only once it is in a Job
+Object of its own, so every process it starts belongs to the job and none can
+leave it (spec 3.2 §10 W1). The job closes with the server's transport, and
+closing it ends whatever is left in it: stopping, restarting, updating or
+removing a server, a crash's cleanup, a dropped manager (once the runtime runs
+the server's cancelled connection task), and the managing process exiting each
+end the server's whole process tree. A server that cannot
+be placed in a Job Object is not started.
+
+On Unix each server leads a session and process group of its own, which every
+process it starts joins (spec 3.2 §7.7, K-I5). The group closes with the
+server's transport: stopping, restarting, updating or removing a server, a
+crash's cleanup, and a dropped manager (once the runtime runs the server's
+cancelled connection task) each end the whole group, the background processes
+of a server that has already exited included, and return once every process in
+it has exited:
+
+| Step | What happens |
+|---|---|
+| 1 | The server's standard input closes, and it has 3 seconds to exit |
+| 2 | The group is sent `SIGTERM` |
+| 3 | The group is sent `SIGKILL` once the server has exited, or after 1 second |
+| 4 | The transport closes once no process of the group is left, for at most 2 seconds after step 2 |
+
+A dropped transport skips step 1. A server has no controlling terminal: it
+cannot read from or inject input into the application's terminal, and the
+terminal's Ctrl-C does not reach it; the manager ends it. A process group is not
+a boundary the way a Job Object is: a process that leaves the group (`setsid`,
+`setpgid`) is not ended with the server, and when the managing process is
+killed outright it runs no cleanup, so each server sees its input close and the
+processes it started keep running.
+
+`Runner::close` and `Toolset::close` leave the manager's servers running: one
+manager is shared by every agent that uses it, and the application starts its
+servers. Call `shutdown()` to stop them, and before dropping the manager.
+Dropping a manager with running servers emits a warning because `Drop` cannot
+await asynchronous cleanup.
 
 ## Verified example
 

@@ -125,9 +125,18 @@ async fn test_transfer_to_agent_validation() {
     use adk_realtime::{RealtimeAgent, RealtimeConfig, audio::AudioFormat};
     use futures::StreamExt;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Debug)]
-    struct MockModel;
+    struct MockModel {
+        tool_responses: Arc<AtomicUsize>,
+    }
+
+    impl MockModel {
+        fn new() -> Self {
+            Self { tool_responses: Arc::new(AtomicUsize::new(0)) }
+        }
+    }
     #[async_trait::async_trait]
     impl adk_realtime::model::RealtimeModel for MockModel {
         fn provider(&self) -> &str {
@@ -149,11 +158,17 @@ async fn test_transfer_to_agent_validation() {
             &self,
             _config: RealtimeConfig,
         ) -> adk_realtime::error::Result<BoxedSession> {
-            Ok(Box::new(MockSession))
+            Ok(Box::new(MockSession {
+                tool_responses: Arc::clone(&self.tool_responses),
+                event_calls: AtomicUsize::new(0),
+            }))
         }
     }
 
-    struct MockSession;
+    struct MockSession {
+        tool_responses: Arc<AtomicUsize>,
+        event_calls: AtomicUsize,
+    }
     #[async_trait::async_trait]
     impl adk_realtime::session::RealtimeSession for MockSession {
         fn session_id(&self) -> &str {
@@ -178,6 +193,7 @@ async fn test_transfer_to_agent_validation() {
             &self,
             _r: adk_realtime::events::ToolResponse,
         ) -> adk_realtime::error::Result<()> {
+            self.tool_responses.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
         async fn commit_audio(&self) -> adk_realtime::error::Result<()> {
@@ -199,6 +215,17 @@ async fn test_transfer_to_agent_validation() {
             Ok(())
         }
         async fn next_event(&self) -> Option<adk_realtime::error::Result<ServerEvent>> {
+            if self.event_calls.fetch_add(1, Ordering::SeqCst) > 0 {
+                // After the refused transfer the session is still alive.
+                return Some(Ok(ServerEvent::TextDelta {
+                    event_id: "evt_2".into(),
+                    response_id: "resp_1".into(),
+                    item_id: "item_1".into(),
+                    output_index: 0,
+                    content_index: 0,
+                    delta: "still here".into(),
+                }));
+            }
             Some(Ok(ServerEvent::FunctionCallDone {
                 event_id: "evt_1".into(),
                 response_id: "resp_1".into(),
@@ -227,9 +254,41 @@ async fn test_transfer_to_agent_validation() {
         }
     }
 
+    struct DummyState;
+    impl adk_core::State for DummyState {
+        fn get(&self, _key: &str) -> Option<serde_json::Value> {
+            None
+        }
+        fn set(&mut self, _key: String, _value: serde_json::Value) {}
+        fn all(&self) -> std::collections::HashMap<String, serde_json::Value> {
+            std::collections::HashMap::new()
+        }
+    }
+
+    struct DummySession;
+    impl adk_core::Session for DummySession {
+        fn id(&self) -> &str {
+            "sess_1"
+        }
+        fn app_name(&self) -> &str {
+            "app"
+        }
+        fn user_id(&self) -> &str {
+            "user_1"
+        }
+        fn state(&self) -> &dyn adk_core::State {
+            &DummyState
+        }
+        fn conversation_history(&self) -> Vec<Content> {
+            Vec::new()
+        }
+    }
+
     struct MockInvocationContext {
         content: Content,
         agent: Arc<dyn Agent>,
+        session: DummySession,
+        run_config: RunConfig,
     }
     #[async_trait::async_trait]
     impl ReadonlyContext for MockInvocationContext {
@@ -270,10 +329,10 @@ async fn test_transfer_to_agent_validation() {
             self.agent.clone()
         }
         fn session(&self) -> &dyn adk_core::Session {
-            todo!()
+            &self.session
         }
         fn run_config(&self) -> &RunConfig {
-            todo!()
+            &self.run_config
         }
         fn end_invocation(&self) {}
         fn ended(&self) -> bool {
@@ -281,29 +340,32 @@ async fn test_transfer_to_agent_validation() {
         }
     }
 
-    let sub_agent = RealtimeAgent::builder("sub").model(Arc::new(MockModel)).build().unwrap();
+    let sub_agent =
+        RealtimeAgent::builder("sub").model(Arc::new(MockModel::new())).build().unwrap();
+    let agent_model = MockModel::new();
+    let tool_responses = Arc::clone(&agent_model.tool_responses);
     let agent = RealtimeAgent::builder("test")
-        .model(Arc::new(MockModel))
+        .model(Arc::new(agent_model))
         .sub_agent(Arc::new(sub_agent))
         .build()
         .unwrap();
 
     let ctx = MockInvocationContext {
         content: Content { role: "user".into(), parts: vec![] },
-        agent: Arc::new(RealtimeAgent::builder("test").model(Arc::new(MockModel)).build().unwrap()),
+        agent: Arc::new(
+            RealtimeAgent::builder("test").model(Arc::new(MockModel::new())).build().unwrap(),
+        ),
+        session: DummySession,
+        run_config: RunConfig::default(),
     };
     let mut stream = agent.run(Arc::new(ctx)).await.unwrap();
 
     // First event is session started
     let _ = stream.next().await.unwrap().unwrap();
 
-    // Second event should be the error because of empty agent_name
-    let result = stream.next().await.unwrap();
-    assert!(result.is_err());
-    assert!(
-        result
-            .unwrap_err()
-            .to_string()
-            .contains("transfer_to_agent called with missing or empty 'agent_name'")
-    );
+    // An empty transfer target is answered with an error tool response, not
+    // followed: the run does not fail and the session carries on.
+    let continued = stream.next().await.unwrap().unwrap();
+    assert_eq!(tool_responses.load(Ordering::SeqCst), 1, "the refused transfer is answered once");
+    assert_eq!(continued.actions.transfer_to_agent, None, "no transfer may be followed");
 }

@@ -48,26 +48,49 @@ freeform prompt. The intended production adapter wraps
 
 On suspension, the live interpreter continuation is serialized into a
 `CodeActCheckpoint` and written to session state; the next `run()` reads it back
-and resumes — the confirmation decision arrives via
-`RunConfig::tool_confirmation_decisions`, and a long-running result arrives as a
+and resumes — the confirmation decision arrives via `RunConfig::tool_approvals`
+(keyed by the request's fingerprint, which names the agent and the tool's origin), an
+`ApprovalStore`, or
+`RunConfig::tool_confirmation_decisions` (keyed by call ID), and a long-running result arrives as a
 `FunctionResponse` in the next message. Inline tool calls are bracketed with
 write-ahead (SAVE-BEFORE) and SAVE-AFTER checkpoints: once the SAVE-AFTER
 checkpoint is persisted, recovery resumes with the stored result and never
-re-runs the tool. A crash in the narrow window after a tool's side effect but
-before its SAVE-AFTER checkpoint lands will re-run the tool on recovery, so
-tools that are not idempotent should guard against that (the same at-least-once
-boundary as `LlmAgent`).
+re-runs the tool. A crash after a tool's side effect but before its SAVE-AFTER
+checkpoint lands re-runs the call on recovery.
+
+With `RunConfig::action_ledger` set, a `ToolEffect::NonIdempotent` call is
+recorded before it executes, under an idempotency key that a recovered or
+resumed call keeps. The re-run is then answered from the ledger instead of
+executing again, and the answer is raised into the program at the call site:
+
+| Ledger state | Raised into the program |
+|--------------|-------------------------|
+| Completed with a result | `{"status": "already_succeeded", "result_digest": …}` |
+| Completed with an error | `{"status": "already_failed", "error": …}` |
+| Begun, never completed (crash or timeout mid-call) | `{"status": "outcome_unknown", "detail": …}` |
+
+A non-idempotent call that times out or panics is raised as `outcome_unknown`
+with or without a ledger. Without a ledger, recovery re-runs the call (at least
+once). See [Tool Effects and the Action Ledger](../tools/tool-effects.md) for the
+key format.
+
+A held call that a decision resumes is answered in the session with a function response under
+its call ID, which the model is never sent. That answer carries the
+[tool result status](../tools/function-tools.md#tool-result-status) of how the call resolved —
+none for the tool's result, `refused` for a denial, `failed`, `withheld`, `outcome_unknown`, or
+the ledger record's status — and `not_run` when an identical call in a later turn took its
+decision. Calls raised into the program carry no function response, so they carry no status.
 
 This requires a runtime that can snapshot a paused call. A runtime that cannot
 runs long-running tools inline and rejects confirmation pauses.
 
 ## Building a CodeActAgent
 
-```rust,ignore
+```rust
 use adk_agent::codeact::CodeActAgent;
 use std::sync::Arc;
 
-// `model` implements `adk_core::Llm`; `runtime` implements `CodeRuntime`.
+// `model` is an Arc<dyn adk_core::Llm>; `runtime` an Arc<dyn CodeRuntime>.
 let agent = CodeActAgent::builder()
     .name("analyst")
     .model(model)
@@ -78,7 +101,8 @@ let agent = CodeActAgent::builder()
     .build()?;
 ```
 
-`model` and `runtime` are required; everything else has a default.
+`model` and `runtime` are required; everything else has a default. As with `LlmAgentBuilder`,
+two tools with one name fail `build()` with `agent.duplicate_tool_name`.
 
 ## Parity with LlmAgent
 
@@ -87,14 +111,16 @@ The builder mirrors `LlmAgentBuilder`:
 - **Model**: `generate_content_config` plus `temperature`/`top_p`/`top_k`/
   `max_output_tokens` shorthands.
 - **Instructions**: `instruction`/`instruction_provider`,
-  `global_instruction`/`global_instruction_provider`, with `{state.key}`
-  template injection; plus skills (`skills` feature).
+  `global_instruction`/`global_instruction_provider`, with the same `{key}`
+  templating as `LlmAgent`; plus skills (`skills` feature).
 - **History**: `include_contents`.
 - **Tools**: static `tool`s and per-invocation `toolset`s; `tool_timeout`,
   `default_retry_budget`/`tool_retry_budget`, `circuit_breaker_threshold`, and
   `on_tool_error` fallbacks.
 - **Authorization**: `ToolConfirmationPolicy`
-  (`require_tool_confirmation`/`require_tool_confirmation_for_all`).
+  (`require_tool_confirmation`/`require_tool_confirmation_for_all`), and the run's
+  `ToolPolicy` and kill switch, applied through the same governed path as `LlmAgent`
+  after before-tool plugins and callbacks.
 - **Transfer**: `sub_agent`s and `disallow_transfer_to_parent`/
   `disallow_transfer_to_peers`.
 - **Output**: `output_key`, `output_schema`/`output_type` with a
@@ -136,12 +162,17 @@ cargo run --manifest-path examples/codeact_agent/Cargo.toml
 
 A `CodeRuntime` parses and steps a script, surfacing one external call at a time:
 
-```rust,ignore
+```rust
+use adk_agent::codeact::{ResumeWith, RunStep, RuntimeCapabilities, RuntimeError};
+use adk_core::Tool;
+use std::sync::Arc;
+
 pub trait CodeRuntime: Send + Sync {
     fn start(&self, script: &str, script_name: &str) -> Result<RunStep, RuntimeError>;
     fn resume(&self, snapshot: &[u8], with: ResumeWith) -> Result<RunStep, RuntimeError>;
-    fn capabilities(&self) -> RuntimeCapabilities { /* default */ }
-    fn render_tools(&self, tools: &[Arc<dyn Tool>]) -> String { /* default */ }
+    // Provided methods; override as needed.
+    fn capabilities(&self) -> RuntimeCapabilities;
+    fn render_tools(&self, tools: &[Arc<dyn Tool>]) -> String;
 }
 ```
 
@@ -181,19 +212,20 @@ kernel, which pins the `monty` crates in one place; rustc 1.95+ is required.
 
 ```toml
 [dependencies]
-adk-agent = { version = "2.1.0", features = ["codeact"] }
-adk-codeact-monty = "2.1.0"
+adk-agent = { version = "3.0.0", features = ["codeact"] }
+adk-codeact-monty = "3.0.0"
 ```
 
 Or through the umbrella crate (re-exported as `adk_rust::codeact_monty`):
 
 ```toml
 [dependencies]
-adk-rust = { version = "2.1.0", features = ["minimal", "codeact-monty"] }
+adk-rust = { version = "3.0.0", features = ["minimal", "codeact-monty"] }
 ```
 
-```rust,ignore
+```rust
 use adk_codeact_monty::MontyRuntime;
+use std::sync::Arc;
 
 // Conservative default resource limits (per-advance time + memory caps) make
 // `new()` safe for untrusted, LLM-generated code.
@@ -218,8 +250,9 @@ pause the agent loop. By default a runtime is fully sandboxed (no filesystem
 access, an empty environment, host clock enabled). Grant specific access with
 the builder:
 
-```rust,ignore
+```rust
 use adk_codeact_monty::{MontyRuntime, PathAccess};
+use std::sync::Arc;
 
 let runtime = Arc::new(
     MontyRuntime::builder()

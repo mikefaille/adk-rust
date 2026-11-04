@@ -338,6 +338,15 @@ impl Write for BoundedJsonCounter {
 }
 
 /// Vertex AI Session API service implementation.
+///
+/// State is not split into tiers: `app:` and `user:` keys travel in the session's
+/// `sessionState` and each event's `stateDelta` like any other key, and `get` returns the
+/// values the Session API stores for that session. Unlike the database backends, this
+/// client does not merge app or user state written through other sessions.
+///
+/// `delete_all_sessions` deletes each session `list` returns for the app and user, one
+/// operation at a time, and so erases the user's `user:` keys with them. It is not atomic:
+/// after an error some sessions may be gone, and calling again finishes the erasure.
 pub struct VertexAiSessionService {
     client: GcpHttpClient,
     project_id: String,
@@ -1008,6 +1017,7 @@ impl VertexAiSessionService {
 #[async_trait]
 impl SessionService for VertexAiSessionService {
     async fn create(&self, req: CreateRequest) -> Result<Box<dyn Session>> {
+        req.try_identity()?;
         if req.app_name.trim().is_empty() || req.user_id.trim().is_empty() {
             let app_name = truncate_for_error(&req.app_name);
             let user_id = truncate_for_error(&req.user_id);
@@ -1015,9 +1025,6 @@ impl SessionService for VertexAiSessionService {
                 "app_name and user_id are required, got app_name: '{app_name}' user_id: '{user_id}'",
             )));
         }
-        req.try_app_name()?;
-        req.try_user_id()?;
-        req.try_session_id()?;
         validate_vertex_user_id(&req.user_id)?;
 
         let session_id =
@@ -1058,9 +1065,11 @@ impl SessionService for VertexAiSessionService {
                     ));
                 }
                 if direct.user_id == req.user_id {
-                    return Err(Self::invalid_input(format!(
-                        "legacy vertex session '{session_id}' already exists for the requested app and user",
-                    )));
+                    return Err(crate::service::session_already_exists(
+                        &req.app_name,
+                        &req.user_id,
+                        &session_id,
+                    ));
                 }
             }
         }
@@ -1087,7 +1096,11 @@ impl SessionService for VertexAiSessionService {
                     &identity,
                     "existing create resource",
                 )? {
-                    return Err(error);
+                    return Err(crate::service::session_already_exists(
+                        &req.app_name,
+                        &req.user_id,
+                        &session_id,
+                    ));
                 }
                 return Err(Self::session_error(
                     "vertex create remote ID collides with a foreign or mismatched session resource",
@@ -1230,13 +1243,13 @@ impl SessionService for VertexAiSessionService {
     }
 
     async fn list(&self, req: ListRequest) -> Result<Vec<Box<dyn Session>>> {
+        req.try_app_name()?;
+        req.try_user_id()?;
         if req.app_name.trim().is_empty() || req.user_id.trim().is_empty() {
             return Err(Self::invalid_input(
                 "app_name and user_id are required and must be non-empty",
             ));
         }
-        req.try_app_name()?;
-        req.try_user_id()?;
         validate_vertex_user_id(&req.user_id)?;
         let parent = self.session_parent(&req.app_name)?;
         let mut sessions = Vec::new();
@@ -1486,11 +1499,38 @@ impl SessionService for VertexAiSessionService {
         Ok(())
     }
 
+    async fn delete_all_sessions(&self, app_name: &str, user_id: &str) -> Result<()> {
+        crate::service::validate_scope(app_name, user_id)?;
+        let sessions = self
+            .list(ListRequest {
+                app_name: app_name.to_string(),
+                user_id: user_id.to_string(),
+                limit: None,
+                offset: None,
+            })
+            .await?;
+        for session in sessions {
+            let deleted = self
+                .delete(DeleteRequest {
+                    app_name: app_name.to_string(),
+                    user_id: user_id.to_string(),
+                    session_id: session.id().to_string(),
+                })
+                .await;
+            match deleted {
+                // A concurrent caller deleted it after the list.
+                Err(error) if error.is_not_found() => {}
+                other => other?,
+            }
+        }
+        Ok(())
+    }
+
     async fn append_event(&self, session_id: &str, mut event: Event) -> Result<()> {
+        SessionId::try_from(session_id)?;
         if session_id.trim().is_empty() {
             return Err(Self::invalid_input("session_id is required for append_event"));
         }
-        SessionId::try_from(session_id)?;
 
         event.actions.state_delta = sanitize_state_map(event.actions.state_delta);
         validate_no_vertex_identity_state_key(&event.actions.state_delta)?;
@@ -5562,6 +5602,8 @@ mod tests {
             tool_name: "tool".to_string(),
             function_call_id: None,
             args: deep_value(),
+            acting: None,
+            origin: None,
         });
         assert_depth_error(&confirmation);
 

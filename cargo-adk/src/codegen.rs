@@ -8,7 +8,7 @@
 
 use crate::composition::{CompositionManifest, GeneratedFile};
 use crate::provider::get_provider_config;
-use crate::registry::TemplateRegistry;
+use crate::registry::{OWN_MODEL_TEMPLATES, TemplateRegistry};
 
 /// Current ADK-Rust version, read from this crate's own version at compile time.
 pub const ADK_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -66,8 +66,10 @@ pub fn generate_project_with_registry(
     // A fragment with the same path as an earlier file replaces it, so a
     // template can override a base file (the agent-engine template ships its
     // own README.md).
+    // `{site_id}` gives a generated website its own site id (spec 3.5 §7.6).
+    let site_id = fresh_site_id(project_name);
     let push_or_replace = |files: &mut Vec<GeneratedFile>, path: &str, content: &str| {
-        let content = content.replace("{name}", project_name);
+        let content = content.replace("{name}", project_name).replace("{site_id}", &site_id);
         match files.iter_mut().find(|f| f.path == path) {
             Some(existing) => existing.content = content,
             None => files.push(GeneratedFile { path: path.to_string(), content }),
@@ -87,6 +89,22 @@ pub fn generate_project_with_registry(
     }
 
     files
+}
+
+/// A version 4 UUID derived from `project_name` and the current time, for the `{site_id}`
+/// placeholder.
+fn fresh_site_id(project_name: &str) -> String {
+    use sha2::{Digest as _, Sha256};
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    let digest = Sha256::digest(format!("{project_name}:{nanos}:{}", std::process::id()));
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex = hex::encode(bytes);
+    format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..])
 }
 
 /// Generate `Cargo.toml` with minimal dependencies from the composition manifest.
@@ -221,7 +239,7 @@ pub fn generate_main_rs_with_registry(
     // When nothing serves (no server addon, template doesn't start its own
     // server), run the agent in the interactive console so `cargo run` does
     // something useful out of the box.
-    const SELF_SERVING_TEMPLATES: &[&str] = &["api", "agent-engine"];
+    const SELF_SERVING_TEMPLATES: &[&str] = &["api", "agent-engine", "realtime", "harness"];
     let has_server_addon = manifest.addons.iter().any(|a| a == "server");
     let interactive =
         !has_server_addon && !SELF_SERVING_TEMPLATES.contains(&manifest.template_name.as_str());
@@ -233,17 +251,23 @@ pub fn generate_main_rs_with_registry(
 
     // Build model initialization (includes api_key loading from env)
     // If model_override is set, replace the default model in the init code
+    let own_model =
+        OWN_MODEL_TEMPLATES.iter().any(|(name, _)| *name == manifest.template_name.as_str());
     let model_init = if let Some(pc) = provider_config {
         let init_code = if let Some(ref model_id) = manifest.model_override {
             pc.model_init_code.replace(pc.default_model, model_id)
         } else {
             pc.model_init_code.to_string()
         };
-        if pc.requires_api_key {
-            format!(
-                "    let api_key = std::env::var(\"{}\")\n        .map_err(|_| anyhow::anyhow!(\"{} is not set — copy .env.example to .env and add your key\"))?;\n    let model = {};",
-                pc.env_var, pc.env_var, init_code
-            )
+        let api_key = format!(
+            "    let api_key = std::env::var(\"{}\")\n        .map_err(|_| anyhow::anyhow!(\"{} is not set — copy .env.example to .env and add your key\"))?;",
+            pc.env_var, pc.env_var
+        );
+        // A template that builds its own model needs only the key.
+        if own_model {
+            api_key
+        } else if pc.requires_api_key {
+            format!("{api_key}\n    let model = {init_code};")
         } else {
             format!("    let model = {};", init_code)
         }
@@ -578,6 +602,39 @@ mod tests {
     }
 
     #[test]
+    fn graph_template_builds_a_checkpointed_graph_agent() {
+        let manifest = resolve_composition(&registry(), "graph", &[], "gemini").unwrap();
+        let main_rs = generate_main_rs(&manifest, "my-graph");
+
+        for expected in [
+            "GraphAgent::builder(\"my-graph\")",
+            "AgentNode::new(assistant)",
+            ".list_channel(\"messages\")",
+            ".checkpointer(MemoryCheckpointer::new())",
+            "Launcher::new(agent).run().await?;",
+        ] {
+            assert!(main_rs.contains(expected), "missing `{expected}` in:\n{main_rs}");
+        }
+    }
+
+    #[test]
+    fn realtime_template_runs_a_gemini_live_session() {
+        let manifest = resolve_composition(&registry(), "realtime", &[], "gemini").unwrap();
+        let main_rs = generate_main_rs(&manifest, "my-voice");
+        let toml = generate_cargo_toml(&manifest, "my-voice");
+
+        assert!(main_rs.contains("let api_key = std::env::var(\"GOOGLE_API_KEY\")"));
+        assert!(main_rs.contains("GeminiRealtimeModel::new("));
+        assert!(main_rs.contains("session.send_text(line).await?;"));
+        // The Live session is the model, and the template drives it itself.
+        assert!(!main_rs.contains("let model = adk_rust::model::GeminiModel"), "{main_rs}");
+        assert!(!main_rs.contains("Launcher"), "{main_rs}");
+        assert!(toml.contains(&format!(
+            "adk-realtime = {{ version = \"{ADK_VERSION}\", features = [\"gemini\"] }}"
+        )));
+    }
+
+    #[test]
     fn test_generate_main_rs_with_openai_provider() {
         let reg = registry();
         let manifest = resolve_composition(&reg, "llm", &[], "openai").unwrap();
@@ -833,7 +890,74 @@ mod tests {
         assert!(readme.contains("gcloud builds submit"));
         assert!(readme.contains("terraform -chdir=deploy/terraform apply"));
         assert!(readme.contains("GOOGLE_CLOUD_AGENT_ENGINE_ID"));
-        assert!(readme.contains("/.well-known/agent.json"), "README documents the A2A option");
+        assert!(readme.contains("/.well-known/agent-card.json"), "README documents the A2A option");
+    }
+
+    #[test]
+    fn harness_template_generates_a_self_serving_harness_project() {
+        let manifest = resolve_composition(&registry(), "harness", &[], "gemini").unwrap();
+        let files = generate_project(&manifest, "demo");
+        let file = |path: &str| {
+            let matching: Vec<_> = files.iter().filter(|f| f.path == path).collect();
+            assert_eq!(matching.len(), 1, "expected exactly one '{path}'");
+            matching[0].content.as_str()
+        };
+
+        let main_rs = file("src/main.rs");
+        for expected in [
+            "use adk_rust::prelude::*;",
+            "use adk_rust::harness::{ConsoleIo, ConsolePrompter, HarnessConfig, HarnessLauncher};",
+            "SqliteSessionService::new(\"sqlite://.adk/state.db?mode=rwc\").await?",
+            "sessions.migrate().await?;",
+            "HarnessAgent::builder(\"demo\")",
+            ".workspace(adk_devtools::Workspace::new(\".\").allow_bash(true))",
+            ".prompter(Arc::new(ConsolePrompter::new(console.clone())))",
+            ".config(HarnessConfig::discover(\".\")?)",
+            "HarnessLauncher::new(harness)",
+            ".with_session_service(sessions)",
+            "`cargo run -- up` runs it as the agent kernel",
+            "GeminiModel::new(&api_key, \"gemini-3.7-flash\")?",
+        ] {
+            assert!(main_rs.contains(expected), "missing `{expected}` in:\n{main_rs}");
+        }
+        // The launcher is the console and the server; nothing else runs the agent.
+        assert!(!main_rs.contains("Launcher::new(agent)"), "{main_rs}");
+
+        let cargo_toml = file("Cargo.toml");
+        for feature in ["\"minimal\"", "\"harness\"", "\"cli\"", "\"gemini\""] {
+            assert!(cargo_toml.contains(feature), "missing {feature} in:\n{cargo_toml}");
+        }
+        assert!(cargo_toml.contains(&format!(
+            "adk-session = {{ version = \"{ADK_VERSION}\", features = [\"sqlite\"] }}"
+        )));
+        assert!(cargo_toml.contains(&format!("adk-devtools = \"{ADK_VERSION}\"")));
+
+        assert!(file(".gitignore").contains(".adk/state.db*"));
+        assert!(file(".gitignore").contains(".env"));
+        assert!(file("tests/harness_smoke.rs").contains("HarnessAgent::builder(\"demo\")"));
+        assert!(file("tests/harness_smoke.rs").contains(".mode(HarnessMode::Plan)"));
+        assert!(file("README.md").starts_with("# demo\n"));
+        assert!(file("README.md").contains("cargo run -- up"), "the README names the kernel");
+        assert!(file("AGENTS.md").starts_with("# demo\n"));
+        assert!(file(".adk/harness.toml").contains("[deploy]"));
+        assert!(file(".skills/example/SKILL.md").contains("name: example"));
+    }
+
+    #[test]
+    fn harness_template_composes_with_every_provider_and_refuses_a_second_server() {
+        for provider in ["gemini", "openai", "anthropic"] {
+            let manifest = resolve_composition(&registry(), "harness", &[], provider).unwrap();
+            assert!(manifest.feature_set.contains(provider), "{provider}");
+        }
+        let manifest =
+            resolve_composition(&registry(), "harness", &["telemetry", "mcp"], "gemini").unwrap();
+        assert!(manifest.feature_set.contains("mcp"));
+        for addon in ["server", "docker"] {
+            assert!(
+                resolve_composition(&registry(), "harness", &[addon], "gemini").is_err(),
+                "{addon} must be refused"
+            );
+        }
     }
 
     #[test]

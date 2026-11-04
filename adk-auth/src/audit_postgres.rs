@@ -54,16 +54,26 @@ impl PostgresAuditSink {
 
     /// Run database migrations to create the audit_events table.
     ///
-    /// Safe to call multiple times — uses `CREATE TABLE IF NOT EXISTS`.
-    /// Executes each statement individually since sqlx doesn't support
-    /// multi-statement queries.
+    /// Safe to call multiple times — uses `CREATE TABLE IF NOT EXISTS`. The
+    /// statements run in one transaction under an advisory lock, so concurrent
+    /// processes can call it at startup.
+    ///
+    /// # Errors
+    ///
+    /// Returns `AuthError::AuditError` when a statement fails.
     pub async fn migrate(&self) -> Result<(), AuthError> {
-        for statement in MIGRATION_STATEMENTS {
-            sqlx::query(statement)
-                .execute(&self.pool)
-                .await
-                .map_err(|e| AuthError::AuditError(format!("migration failed: {e}")))?;
+        let fail = |e: sqlx::Error| AuthError::AuditError(format!("migration failed: {e}"));
+        let mut tx = self.pool.begin().await.map_err(fail)?;
+        // `CREATE TABLE IF NOT EXISTS` is not atomic: two concurrent creators both
+        // pass the existence check and one fails on the catalog's unique index.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext('audit_events'))")
+            .execute(&mut *tx)
+            .await
+            .map_err(fail)?;
+        for &statement in MIGRATION_STATEMENTS {
+            sqlx::query(statement).execute(&mut *tx).await.map_err(fail)?;
         }
+        tx.commit().await.map_err(fail)?;
         info!("audit_events table ready");
         Ok(())
     }
@@ -97,6 +107,10 @@ const MIGRATION_STATEMENTS: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_events (user_id, timestamp DESC)",
     "CREATE INDEX IF NOT EXISTS idx_audit_event_type ON audit_events (event_type, timestamp DESC)",
     "CREATE INDEX IF NOT EXISTS idx_audit_resource_id ON audit_events (resource_id) WHERE resource_id IS NOT NULL",
+    // Tables created before agent identity existed gain the columns in place.
+    "ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS agent_id TEXT",
+    "ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS on_behalf_of JSONB",
+    "CREATE INDEX IF NOT EXISTS idx_audit_agent ON audit_events (agent_id, timestamp DESC)",
 ];
 
 #[async_trait::async_trait]
@@ -117,8 +131,8 @@ impl AuditSink for PostgresAuditSink {
             r#"INSERT INTO audit_events
                (timestamp, user_id, session_id, event_type, resource, outcome,
                 metadata, workspace_id, tenant_id, request_id, ip_address,
-                resource_id, action, prev_hash)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)"#,
+                resource_id, action, prev_hash, agent_id, on_behalf_of)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)"#,
         )
         .bind(event.timestamp)
         .bind(&event.user)
@@ -134,6 +148,8 @@ impl AuditSink for PostgresAuditSink {
         .bind(&event.resource_id)
         .bind(&event.action)
         .bind(&event.prev_hash)
+        .bind(&event.agent_id)
+        .bind(on_behalf_of_json(&event)?)
         .execute(&self.pool)
         .await
         .map_err(|e| AuthError::AuditError(format!("insert failed: {e}")))?;
@@ -169,8 +185,8 @@ impl AuditSink for PostgresAuditSink {
                 r#"INSERT INTO audit_events
                    (timestamp, user_id, session_id, event_type, resource, outcome,
                     metadata, workspace_id, tenant_id, request_id, ip_address,
-                    resource_id, action, prev_hash)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)"#,
+                    resource_id, action, prev_hash, agent_id, on_behalf_of)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)"#,
             )
             .bind(event.timestamp)
             .bind(&event.user)
@@ -186,6 +202,8 @@ impl AuditSink for PostgresAuditSink {
             .bind(&event.resource_id)
             .bind(&event.action)
             .bind(&event.prev_hash)
+            .bind(&event.agent_id)
+            .bind(on_behalf_of_json(event)?)
             .execute(&mut *tx)
             .await
             .map_err(|e| AuthError::AuditError(format!("batch insert failed: {e}")))?;
@@ -200,104 +218,59 @@ impl AuditSink for PostgresAuditSink {
     }
 
     async fn query(&self, filter: &AuditFilter) -> Result<Vec<AuditEvent>, AuthError> {
-        let mut conditions = Vec::new();
-        let mut bind_idx = 1u32;
-
-        // Build dynamic WHERE clause
-        if filter.user.is_some() {
-            conditions.push(format!("user_id = ${bind_idx}"));
-            bind_idx += 1;
-        }
-        if filter.workspace_id.is_some() {
-            conditions.push(format!("workspace_id = ${bind_idx}"));
-            bind_idx += 1;
-        }
-        if filter.tenant_id.is_some() {
-            conditions.push(format!("tenant_id = ${bind_idx}"));
-            bind_idx += 1;
-        }
-        if filter.event_type.is_some() {
-            conditions.push(format!("event_type = ${bind_idx}"));
-            bind_idx += 1;
-        }
-        if filter.outcome.is_some() {
-            conditions.push(format!("outcome = ${bind_idx}"));
-            bind_idx += 1;
-        }
-        if filter.resource.is_some() {
-            conditions.push(format!("resource LIKE ${bind_idx}"));
-            bind_idx += 1;
-        }
-        if filter.resource_id.is_some() {
-            conditions.push(format!("resource_id = ${bind_idx}"));
-            bind_idx += 1;
-        }
-        if filter.after.is_some() {
-            conditions.push(format!("timestamp > ${bind_idx}"));
-            bind_idx += 1;
-        }
-        if filter.before.is_some() {
-            conditions.push(format!("timestamp < ${bind_idx}"));
-        }
-
-        let where_clause = if conditions.is_empty() {
-            String::new()
-        } else {
-            format!("WHERE {}", conditions.join(" AND "))
-        };
-
-        let limit = filter.limit.unwrap_or(1000);
-        let offset = filter.offset.unwrap_or(0);
-
-        let sql = format!(
+        let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
             "SELECT timestamp, user_id, session_id, event_type, resource, outcome, \
              metadata, workspace_id, tenant_id, request_id, ip_address, resource_id, \
-             action, prev_hash \
-             FROM audit_events {where_clause} \
-             ORDER BY timestamp DESC \
-             LIMIT {limit} OFFSET {offset}"
+             action, prev_hash, agent_id, on_behalf_of FROM audit_events WHERE TRUE",
         );
-
-        // Use a dynamic query builder approach
-        let mut query = sqlx::query_as::<_, AuditRow>(&sql);
-
         if let Some(ref user) = filter.user {
-            query = query.bind(user);
+            builder.push(" AND user_id = ").push_bind(user);
         }
         if let Some(ref ws) = filter.workspace_id {
-            query = query.bind(ws);
+            builder.push(" AND workspace_id = ").push_bind(ws);
         }
         if let Some(ref tid) = filter.tenant_id {
-            query = query.bind(tid);
+            builder.push(" AND tenant_id = ").push_bind(tid);
         }
         if let Some(ref et) = filter.event_type {
-            let et_str = serde_json::to_value(et)
-                .unwrap_or_default()
-                .as_str()
-                .unwrap_or("unknown")
-                .to_string();
-            query = query.bind(et_str);
+            let value = serde_json::to_value(et).unwrap_or_default();
+            builder
+                .push(" AND event_type = ")
+                .push_bind(value.as_str().unwrap_or("unknown").to_string());
         }
         if let Some(ref oc) = filter.outcome {
-            let oc_str = serde_json::to_value(oc)
-                .unwrap_or_default()
-                .as_str()
-                .unwrap_or("unknown")
-                .to_string();
-            query = query.bind(oc_str);
+            let value = serde_json::to_value(oc).unwrap_or_default();
+            builder
+                .push(" AND outcome = ")
+                .push_bind(value.as_str().unwrap_or("unknown").to_string());
         }
         if let Some(ref res) = filter.resource {
-            query = query.bind(format!("%{res}%"));
+            // `strpos` matches a literal substring, as `AuditFilter::matches` does;
+            // LIKE would read `%` and `_` in the filter as wildcards.
+            builder.push(" AND strpos(resource, ").push_bind(res).push(") > 0");
         }
         if let Some(ref rid) = filter.resource_id {
-            query = query.bind(rid);
+            builder.push(" AND resource_id = ").push_bind(rid);
+        }
+        if let Some(ref agent) = filter.agent_id {
+            builder.push(" AND agent_id = ").push_bind(agent);
         }
         if let Some(after) = filter.after {
-            query = query.bind(after);
+            builder.push(" AND timestamp > ").push_bind(after);
         }
         if let Some(before) = filter.before {
-            query = query.bind(before);
+            builder.push(" AND timestamp < ").push_bind(before);
         }
+        builder
+            .push(" ORDER BY timestamp DESC LIMIT ")
+            .push_bind(i64::try_from(filter.limit.unwrap_or(1000)).map_err(|_| {
+                AuthError::AuditError("query limit exceeds PostgreSQL BIGINT range".to_string())
+            })?)
+            .push(" OFFSET ")
+            .push_bind(i64::try_from(filter.offset.unwrap_or(0)).map_err(|_| {
+                AuthError::AuditError("query offset exceeds PostgreSQL BIGINT range".to_string())
+            })?);
+        let query = builder.build_query_as::<AuditRow>();
 
         let rows = query
             .fetch_all(&self.pool)
@@ -338,6 +311,17 @@ struct AuditRow {
     resource_id: Option<String>,
     action: Option<String>,
     prev_hash: Option<String>,
+    agent_id: Option<String>,
+    on_behalf_of: Option<serde_json::Value>,
+}
+
+fn on_behalf_of_json(event: &AuditEvent) -> Result<Option<serde_json::Value>, AuthError> {
+    event
+        .on_behalf_of
+        .as_ref()
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(|e| AuthError::AuditError(format!("serialize on_behalf_of: {e}")))
 }
 
 impl AuditRow {
@@ -366,6 +350,8 @@ impl AuditRow {
             resource_id: self.resource_id,
             action: self.action,
             prev_hash: self.prev_hash,
+            agent_id: self.agent_id,
+            on_behalf_of: self.on_behalf_of.and_then(|value| serde_json::from_value(value).ok()),
         }
     }
 }

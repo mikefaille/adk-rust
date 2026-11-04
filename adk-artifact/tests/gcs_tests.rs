@@ -28,7 +28,7 @@ struct StoredObject {
 type Store = Arc<Mutex<BTreeMap<String, StoredObject>>>;
 
 fn object_resource(name: &str, object: &StoredObject) -> Value {
-    let mut resource = json!({ "name": name });
+    let mut resource = json!({ "name": name, "size": object.data.len().to_string() });
     if let Some(content_type) = &object.content_type {
         resource["contentType"] = json!(content_type);
     }
@@ -43,12 +43,14 @@ async fn list_objects(
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     let prefix = params.get("prefix").cloned().unwrap_or_default();
-    let store = store.lock().unwrap();
     let items: Vec<Value> = store
+        .lock()
+        .unwrap()
         .iter()
         .filter(|(name, _)| name.starts_with(&prefix))
         .map(|(name, object)| object_resource(name, object))
         .collect();
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     axum::Json(json!({ "items": items })).into_response()
 }
 
@@ -108,7 +110,12 @@ fn parse_multipart_related(headers: &HeaderMap, body: &[u8]) -> (Value, Vec<u8>)
     (resource, parts[1].clone())
 }
 
-async fn upload_object(State(store): State<Store>, headers: HeaderMap, body: Bytes) -> Response {
+async fn upload_object(
+    State(store): State<Store>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     let (resource, data) = parse_multipart_related(&headers, &body);
     let name = resource["name"].as_str().unwrap().to_string();
     let content_type = resource["contentType"].as_str().map(str::to_string);
@@ -119,7 +126,16 @@ async fn upload_object(State(store): State<Store>, headers: HeaderMap, body: Byt
         .unwrap_or_default();
     let object = StoredObject { data, content_type, metadata };
     let response = object_resource(&name, &object);
-    store.lock().unwrap().insert(name, object);
+    // Listing a real bucket takes a few milliseconds; the pause lets concurrent saves overlap.
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    let mut store = store.lock().unwrap();
+    // GCS answers 412 when `ifGenerationMatch=0` names an existing object.
+    if params.get("ifGenerationMatch").is_some_and(|value| value == "0")
+        && store.contains_key(&name)
+    {
+        return StatusCode::PRECONDITION_FAILED.into_response();
+    }
+    store.insert(name, object);
     axum::Json(response).into_response()
 }
 
@@ -315,6 +331,75 @@ async fn test_engine_id_app_name_round_trips() {
     assert!(store.contains_key("1234567890123456789/user123/session456/output.png/0"));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn test_concurrent_saves_each_store_a_distinct_version() {
+    let (endpoint, store) = spawn_mock_gcs().await;
+    let service = Arc::new(mock_service(&endpoint));
+    let writers = 12;
+    let barrier = Arc::new(tokio::sync::Barrier::new(writers));
+    let tasks: Vec<_> = (0..writers)
+        .map(|writer| {
+            let (service, barrier) = (service.clone(), barrier.clone());
+            tokio::spawn(async move {
+                barrier.wait().await;
+                service.save(save_request("my-app", "race.png", inline_part(&[writer as u8]))).await
+            })
+        })
+        .collect();
+    let mut returned = Vec::new();
+    for task in tasks {
+        returned.push(task.await.unwrap().unwrap().version);
+    }
+    returned.sort_unstable();
+    assert_eq!(returned, (0..writers as i64).collect::<Vec<_>>());
+
+    let store = store.lock().unwrap();
+    let stored: Vec<u8> = (0..writers)
+        .map(|version| store[&format!("my-app/user123/session456/race.png/{version}")].data[0])
+        .collect();
+    let mut distinct = stored.clone();
+    distinct.sort_unstable();
+    distinct.dedup();
+    assert_eq!(distinct.len(), writers, "every save's bytes are stored: {stored:?}");
+}
+
+#[tokio::test]
+async fn test_explicit_existing_version_is_never_replaced() {
+    let (endpoint, store) = spawn_mock_gcs().await;
+    let service = mock_service(&endpoint);
+    service.save(save_request("my-app", "chart.png", inline_part(b"original"))).await.unwrap();
+
+    let mut replace = save_request("my-app", "chart.png", inline_part(b"replacement"));
+    replace.version = Some(0);
+    let error = service.save(replace).await.unwrap_err();
+    assert!(error.is_conflict(), "{error}");
+    assert_eq!(error.code, "artifact.version_exists");
+    assert_eq!(store.lock().unwrap()["my-app/user123/session456/chart.png/0"].data, b"original");
+}
+
+#[tokio::test]
+async fn test_user_session_id_is_rejected() {
+    let (endpoint, store) = spawn_mock_gcs().await;
+    let service = mock_service(&endpoint);
+
+    for file_name in ["draft.png", "user:draft.png"] {
+        let mut request = save_request("my-app", file_name, inline_part(b"x"));
+        request.session_id = "user".to_string();
+        let error = service.save(request).await.unwrap_err();
+        assert_eq!(error.code, "artifact.reserved_session_id", "{file_name}: {error}");
+    }
+    let error = service
+        .list(ListRequest {
+            app_name: "my-app".to_string(),
+            user_id: "user123".to_string(),
+            session_id: "user".to_string(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "artifact.reserved_session_id");
+    assert!(store.lock().unwrap().is_empty());
+}
+
 /// Live round-trip against a real bucket. Requires ADC plus
 /// `GOOGLE_CLOUD_PROJECT` and `ADK_ARTIFACT_BUCKET`.
 #[tokio::test]
@@ -345,4 +430,126 @@ async fn test_live_gcs_round_trip() {
         })
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn test_missing_artifacts_and_invalid_names_share_the_local_codes() {
+    let (endpoint, store) = spawn_mock_gcs().await;
+    let service = mock_service(&endpoint);
+    service.save(save_request("my-app", "kept.png", inline_part(b"x"))).await.unwrap();
+
+    for (operation, result) in [
+        ("load", service.load(load_request("my-app", "absent.png", None)).await.map(|_| ())),
+        (
+            "load version",
+            service.load(load_request("my-app", "kept.png", Some(9))).await.map(|_| ()),
+        ),
+        (
+            "versions",
+            service
+                .versions(VersionsRequest {
+                    app_name: "my-app".to_string(),
+                    user_id: "user123".to_string(),
+                    session_id: "session456".to_string(),
+                    file_name: "absent.png".to_string(),
+                })
+                .await
+                .map(|_| ()),
+        ),
+    ] {
+        let error = result.unwrap_err();
+        assert!(error.is_not_found(), "{operation}: {error}");
+        assert_eq!(error.code, "artifact.not_found", "{operation}: {error}");
+    }
+
+    for name in ["../escape.png", "a/../b.png", "/rooted.png", ""] {
+        let error = service.load(load_request("my-app", name, None)).await.unwrap_err();
+        assert_eq!(error.category, adk_core::ErrorCategory::InvalidInput, "{name:?}: {error}");
+        assert_eq!(error.code, "artifact.invalid_name", "{name:?}: {error}");
+    }
+    let mut bad_session = load_request("my-app", "kept.png", None);
+    bad_session.session_id = "../other".to_string();
+    let error = service.load(bad_session).await.unwrap_err();
+    assert_eq!(error.code, "artifact.invalid_identifier", "{error}");
+    assert_eq!(store.lock().unwrap().len(), 1);
+}
+
+/// The GCS backend through `ArtifactSubjectData`, against the mock.
+struct GcsSubjectHarness {
+    service: Arc<GcsArtifactService>,
+}
+
+impl GcsSubjectHarness {
+    async fn start() -> Self {
+        let (endpoint, _store) = spawn_mock_gcs().await;
+        Self { service: Arc::new(mock_service(&endpoint)) }
+    }
+
+    async fn save(&self, app_name: &str, user_id: &str, file_name: &str, part: Part) {
+        let mut request = save_request(app_name, file_name, part);
+        request.user_id = user_id.to_string();
+        self.service.save(request).await.expect("save");
+    }
+}
+
+#[adk_core::async_trait]
+impl adk_core::conformance::SubjectDataStoreHarness for GcsSubjectHarness {
+    async fn open(&self) -> Arc<dyn adk_core::subject::SubjectDataStore> {
+        Arc::new(adk_artifact::ArtifactSubjectData::new(self.service.clone()))
+    }
+
+    async fn seed(&self, app_name: &str, user_id: &str) {
+        self.save(app_name, user_id, "reports/q1.txt", Part::Text { text: "paid".into() }).await;
+        self.save(app_name, user_id, "user:avatar.png", inline_part(&[1, 2, 3])).await;
+    }
+
+    async fn visible(&self, app_name: &str, user_id: &str) -> usize {
+        let listed = self
+            .service
+            .list(ListRequest {
+                app_name: app_name.to_string(),
+                user_id: user_id.to_string(),
+                session_id: "session456".to_string(),
+            })
+            .await
+            .expect("list")
+            .file_names
+            .len();
+        listed + self.service.list_user(app_name, user_id).await.expect("list user").len()
+    }
+}
+
+mod subject_data {
+    adk_core::subject_data_store_conformance_tests!(
+        harness = super::GcsSubjectHarness::start().await
+    );
+}
+
+#[tokio::test]
+async fn list_user_parses_nested_names_and_the_user_namespace() {
+    let harness = GcsSubjectHarness::start().await;
+    harness.save("app", "user123", "reports/q1.txt", Part::Text { text: "paid".into() }).await;
+    harness.save("app", "user123", "user:avatar.png", inline_part(&[1, 2, 3])).await;
+    let listed = harness.service.list_user("app", "user123").await.unwrap();
+    assert_eq!(
+        listed,
+        vec![
+            adk_artifact::UserArtifact {
+                session_id: None,
+                file_name: "user:avatar.png".into(),
+                version: 0,
+                mime_type: Some("image/png".into()),
+                size: 3,
+            },
+            adk_artifact::UserArtifact {
+                session_id: Some("session456".into()),
+                file_name: "reports/q1.txt".into(),
+                version: 0,
+                mime_type: Some("text/plain".into()),
+                size: 4,
+            },
+        ]
+    );
+    assert_eq!(harness.service.delete_user("app", "user123").await.unwrap(), 2);
+    assert!(harness.service.list_user("app", "user123").await.unwrap().is_empty());
 }

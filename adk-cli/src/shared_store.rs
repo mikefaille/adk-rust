@@ -1,0 +1,154 @@
+//! `adk-rust serve --store <url>`: every store a served harness keeps, in one backend that
+//! every replica shares (spec 3.1 §8.2, §13 Q2, Q5).
+
+use std::sync::Arc;
+
+use adk_core::{ApprovalStore, DurableRunStore, GovernanceStateStore};
+use adk_graph::Checkpointer;
+use adk_harness::{ModeStore, StandingRuleStore, redact_store_url};
+use adk_session::SessionService;
+use anyhow::{Result, bail};
+
+/// The stores of a served harness in one backend: sessions, approvals, durable runs, modes,
+/// standing rules, plan checkpoints, read records, long-term facts and the kill switch every
+/// replica shares.
+pub struct SharedStores {
+    /// The store URL with its password redacted, for the banner.
+    pub label: String,
+    pub sessions: Arc<dyn SessionService>,
+    pub modes: Arc<dyn ModeStore>,
+    pub rules: Arc<dyn StandingRuleStore>,
+    pub approvals: Arc<dyn ApprovalStore>,
+    pub runs: Arc<dyn DurableRunStore>,
+    pub checkpointer: Arc<dyn Checkpointer>,
+    /// Stop all on one replica stops every replica (spec 3.3 §11 S-I10).
+    pub governance: Arc<dyn GovernanceStateStore>,
+    /// The file tools' read records, so an edit held on one replica and approved on
+    /// another finds its read (spec 3.1 §7.26, §7.33 fix 5).
+    pub reads: Arc<dyn adk_devtools::ReadLedger>,
+    /// The action ledger, so a call with side effects is not run again by another replica
+    /// or after a restart (spec 3.1 §7.12).
+    pub actions: Arc<dyn adk_core::ActionLedger>,
+    /// The spend ledger model calls reserve against (spec 3.1 §7.13).
+    pub spend: Arc<dyn adk_core::SpendLedger>,
+    /// Long-term facts, which `adk-rust up` remembers and tidies (spec 3.1 §7.15.2; spec 3.3
+    /// §12 phase 3): on PostgreSQL; `None` on a backend with no fact store.
+    pub facts: Option<Arc<dyn adk_harness::FactStore>>,
+}
+
+/// Opens and migrates the standing-rule store at `url`, for `adk-rust rules --store`.
+pub async fn open_rules(url: &str) -> Result<Arc<dyn StandingRuleStore>> {
+    Ok(open(url).await?.rules)
+}
+
+/// Opens and migrates every store at `url`: `postgres://…` or `redis://…`.
+pub async fn open(url: &str) -> Result<SharedStores> {
+    let label = redact_store_url(url);
+    match url.split_once("://").map(|(scheme, _)| scheme.to_ascii_lowercase()).as_deref() {
+        Some("postgres" | "postgresql") => postgres(url, label).await,
+        Some("redis" | "rediss") => redis(url, label).await,
+        _ => bail!(
+            "--store takes a postgres:// or redis:// URL, which every replica shares; {label} is \
+             neither"
+        ),
+    }
+}
+
+#[cfg(feature = "postgres")]
+async fn postgres(url: &str, label: String) -> Result<SharedStores> {
+    use anyhow::Context as _;
+    let pool = sqlx::PgPool::connect(url)
+        .await
+        .with_context(|| format!("could not connect to the store at {label}"))?;
+    let sessions = adk_session::PostgresSessionService::from_pool(pool.clone());
+    sessions.migrate().await?;
+    let modes = adk_harness::PostgresModeStore::new(pool.clone());
+    modes.migrate().await?;
+    let rules = adk_harness::PostgresStandingRuleStore::new(pool.clone());
+    rules.migrate().await?;
+    let reads = adk_harness::PostgresReadRecords::new(pool.clone());
+    reads.migrate().await?;
+    let approvals = adk_session::PostgresApprovalStore::from_pool(pool.clone());
+    approvals.migrate().await?;
+    let runs = adk_session::PostgresRunStore::from_pool(pool.clone());
+    runs.migrate().await?;
+    let actions = adk_session::PostgresActionLedger::from_pool(pool.clone());
+    actions.migrate().await?;
+    let spend = adk_session::PostgresSpendLedger::from_pool(pool.clone());
+    spend.migrate().await?;
+    let facts = adk_harness::PostgresFactStore::new(pool.clone());
+    facts.migrate().await?;
+    let checkpointer = adk_graph::PostgresCheckpointer::from_pool(pool);
+    checkpointer.migrate().await?;
+    let governance = adk_session::PostgresGovernanceStateStore::new(url).await?;
+    governance.migrate().await?;
+    Ok(SharedStores {
+        label,
+        sessions: Arc::new(sessions),
+        modes: Arc::new(modes),
+        rules: Arc::new(rules),
+        approvals: Arc::new(approvals),
+        runs: Arc::new(runs),
+        checkpointer: Arc::new(checkpointer),
+        governance: Arc::new(governance),
+        reads: Arc::new(reads),
+        actions: Arc::new(actions),
+        spend: Arc::new(spend),
+        facts: Some(Arc::new(facts)),
+    })
+}
+
+#[cfg(not(feature = "postgres"))]
+async fn postgres(_url: &str, _label: String) -> Result<SharedStores> {
+    bail!(
+        "--store postgres://… needs adk-cli's `postgres` feature, which this build does not \
+         include: cargo install adk-cli --features postgres"
+    )
+}
+
+#[cfg(feature = "redis")]
+async fn redis(url: &str, label: String) -> Result<SharedStores> {
+    let sessions = adk_session::RedisSessionService::new(adk_session::RedisSessionConfig {
+        url: url.to_string(),
+        ttl: None,
+        cluster_nodes: None,
+    })
+    .await?;
+    let modes = adk_harness::RedisModeStore::connect(url).await?;
+    let rules = adk_harness::RedisStandingRuleStore::connect(url).await?;
+    rules.migrate().await?;
+    let reads = adk_harness::RedisReadRecords::connect(url).await?;
+    let approvals = adk_session::RedisApprovalStore::new(url).await?;
+    approvals.migrate().await?;
+    let runs = adk_session::RedisRunStore::new(url).await?;
+    runs.migrate().await?;
+    let actions = adk_session::RedisActionLedger::new(url).await?;
+    actions.migrate().await?;
+    let spend = adk_session::RedisSpendLedger::new(url).await?;
+    spend.migrate().await?;
+    let checkpointer = adk_harness::checkpointer_from_url(url).await?;
+    let governance = adk_session::RedisGovernanceStateStore::new(url).await?;
+    governance.migrate().await?;
+    Ok(SharedStores {
+        label,
+        sessions: Arc::new(sessions),
+        modes: Arc::new(modes),
+        rules: Arc::new(rules),
+        approvals: Arc::new(approvals),
+        runs: Arc::new(runs),
+        checkpointer,
+        governance: Arc::new(governance),
+        reads: Arc::new(reads),
+        actions: Arc::new(actions),
+        spend: Arc::new(spend),
+        facts: None,
+    })
+}
+
+#[cfg(not(feature = "redis"))]
+async fn redis(_url: &str, _label: String) -> Result<SharedStores> {
+    bail!(
+        "--store redis://… needs adk-cli's `redis` feature, which this build does not include: \
+         cargo install adk-cli --features redis"
+    )
+}

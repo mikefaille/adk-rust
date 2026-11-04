@@ -34,7 +34,14 @@ fn authorize_path_user_id(
     }
 }
 
-// ADK-Go compatible trace response (attributes map)
+/// Returns the attributes of the span recorded for an ADK event ID (ADK-Go compatible).
+///
+/// Mounted when no `RequestContextExtractor` is configured, or when
+/// `SecurityConfig::expose_admin_debug` is set. Only the span's `gcp.vertex.agent.event_id`
+/// is matched, so a session ID or any other attribute value answers `404 Not Found`. An
+/// authenticated caller is answered `403 Forbidden` unless the span's `adk.user_id` is
+/// theirs; the owner reads every attribute, the `gcp.vertex.agent.llm_request` and
+/// `gcp.vertex.agent.llm_response` payloads included.
 pub async fn get_trace_by_event_id(
     State(controller): State<DebugController>,
     Extension(request_context): Extension<Option<adk_core::RequestContext>>,
@@ -44,23 +51,24 @@ pub async fn get_trace_by_event_id(
         return Err(StatusCode::NOT_FOUND);
     }
 
-    if let Some(exporter) = &controller.config.span_exporter {
-        // First try direct lookup by event_id
-        if let Some(attributes) = exporter.get_trace_by_event_id(&event_id) {
-            return Ok(Json(attributes));
-        }
+    // The exporter also answers a span ID, so the event ID itself is checked.
+    let attributes = controller
+        .config
+        .span_exporter
+        .as_ref()
+        .and_then(|exporter| exporter.get_trace_by_event_id(&event_id))
+        .filter(|attributes| {
+            attributes.get("gcp.vertex.agent.event_id").is_some_and(|id| id == &event_id)
+        })
+        .ok_or(StatusCode::NOT_FOUND)?;
 
-        // If not found, search through all spans for matching session event ID
-        let trace_dict = exporter.get_trace_dict();
-        for attributes in trace_dict.values() {
-            // Check if any span has this event_id in its attributes
-            if attributes.values().any(|v| v == &event_id) {
-                return Ok(Json(attributes.clone()));
-            }
-        }
+    if let Some(context) = &request_context
+        && attributes.get("adk.user_id") != Some(&context.user_id)
+    {
+        return Err(StatusCode::FORBIDDEN);
     }
 
-    Err(StatusCode::NOT_FOUND)
+    Ok(Json(attributes))
 }
 
 // Convert ADK exporter format to UI-compatible SpanData format
@@ -97,6 +105,10 @@ pub async fn get_session_traces(
     Extension(request_context): Extension<Option<adk_core::RequestContext>>,
     Path(session_id): Path<String>,
 ) -> Result<Json<Vec<serde_json::Value>>, StatusCode> {
+    if request_context.is_some() && !controller.config.security.expose_admin_debug {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
     if let Some(exporter) = &controller.config.span_exporter {
         let traces = exporter.get_session_trace(&session_id);
         if let Some(context) = request_context.as_ref() {
@@ -142,6 +154,10 @@ pub async fn get_eval_sets(
 }
 
 /// Get event data by event_id - returns event with invocationId for trace linking
+///
+/// Answers `403 Forbidden` when the path user is not the authenticated caller, or
+/// when any span recorded for `session_id` belongs to a different user — traces are
+/// indexed by session ID alone, and session IDs are chosen by their creators.
 pub async fn get_event(
     State(controller): State<DebugController>,
     Extension(request_context): Extension<Option<adk_core::RequestContext>>,
@@ -152,6 +168,12 @@ pub async fn get_event(
     // Try to find trace data for this event_id
     if let Some(exporter) = &controller.config.span_exporter {
         let traces = exporter.get_session_trace(&session_id);
+        if traces
+            .iter()
+            .any(|trace| trace.get("adk.user_id").is_some_and(|owner| owner != &user_id))
+        {
+            return Err(StatusCode::FORBIDDEN);
+        }
 
         // Find a trace with matching event_id
         for attrs in traces {

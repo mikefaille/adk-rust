@@ -2,17 +2,21 @@
 
 use std::sync::Arc;
 
-use adk_core::{CallbackContext, Result, Tool, async_trait};
+use adk_core::{CallbackContext, Result, Tool, ToolEffect, async_trait};
 use adk_plugin::{AfterToolCallResult, EnhancedPlugin, PluginContext};
 use serde_json::Value;
 use tokio::sync::Mutex;
 
 use crate::backoff::compute_backoff;
 use crate::config::RetryReflectConfig;
-use crate::detection::is_error_result;
+use crate::detection::{is_authorization_denial, is_error_result, is_timeout};
 use crate::filter::is_tool_eligible;
 use crate::template::render_reflection;
 use crate::tracker::{GlobalRetryTracker, RetryTracker};
+
+/// What a log line carries in place of a tool's error text when payloads are not recorded.
+const PAYLOAD_OMITTED: &str =
+    "[omitted: set RetryReflectPluginBuilder::record_payloads to log error text]";
 
 /// The Retry & Reflect plugin.
 ///
@@ -20,11 +24,20 @@ use crate::tracker::{GlobalRetryTracker, RetryTracker};
 /// computes backoff delays, and injects structured reflection prompts to help the
 /// agent self-correct on the next turn.
 ///
+/// Two failures pass through unchanged, with no retry suggested:
+///
+/// - **Authorization or approval refusals** — repeating the call is refused again.
+/// - **Timeouts of a [`ToolEffect::NonIdempotent`] tool** — the call may have taken
+///   effect, so repeating it could repeat a payment or other side effect.
+///
 /// # Architecture
 ///
 /// The plugin implements [`EnhancedPlugin`] from `adk-plugin` and uses:
-/// - A per-invocation [`RetryTracker`] (wrapped in `Arc<Mutex<...>>`) for failure counts
-/// - An optional [`GlobalRetryTracker`] for cross-invocation circuit-breaker patterns
+/// - A [`RetryTracker`] (wrapped in `Arc<Mutex<...>>`) that counts failures per invocation,
+///   so one plugin serves every user and session: the retry limits apply within each
+///   invocation, and a tool call that succeeds clears that tool's counts
+/// - An optional [`GlobalRetryTracker`] for cross-invocation circuit-breaker patterns, which
+///   counts each tool's failures since its last success
 ///
 /// # Example
 ///
@@ -67,9 +80,10 @@ impl RetryReflectPlugin {
         &self.config
     }
 
-    /// Reset per-invocation state (called between agent runs).
+    /// Clears the retry counts of every invocation.
     ///
-    /// Clears the per-invocation retry tracker. Does NOT reset the global tracker.
+    /// Counts are kept per invocation, so a run never needs this to start with a full
+    /// budget. Does NOT reset the global tracker.
     pub async fn reset(&self) {
         let mut tracker = self.tracker.lock().await;
         tracker.reset();
@@ -116,15 +130,55 @@ impl EnhancedPlugin for RetryReflectPlugin {
         tool: Arc<dyn Tool>,
         args: &Value,
         result: Value,
-        _ctx: Arc<dyn CallbackContext>,
+        ctx: Arc<dyn CallbackContext>,
         _plugin_ctx: &PluginContext,
     ) -> Result<AfterToolCallResult> {
-        // Step 1: Check if the result is an error
+        let tool_name = tool.name();
+        let invocation = ctx.invocation_id().to_string();
+
+        // Step 1: A success clears the tool's counts, so its next failure is reflected again.
         if !is_error_result(&result) {
+            self.tracker.lock().await.reset_tool(&invocation, tool_name);
+            if let Some(ref global_tracker) = self.global_tracker {
+                global_tracker.lock().await.record_success(tool_name);
+            }
             return Ok(AfterToolCallResult::Continue(result));
         }
 
-        let tool_name = tool.name();
+        // A refusal or a possibly-applied side effect is never worth a retry suggestion.
+        // The function response names only the error's category and code by default, so the
+        // markers match the full message the tool outcome keeps; the prompt and logs use the
+        // response text, which is what the model already sees.
+        let error_msg = Self::extract_error_message(&result);
+        let outcome = ctx.tool_outcome();
+        let local_msg = outcome.as_ref().and_then(|outcome| outcome.error_message.as_deref());
+        let failure = local_msg.unwrap_or(&error_msg);
+        // Log lines name the error by its category and code; its text, which can quote
+        // arguments and credentials, only when payloads are recorded.
+        let diagnostics = outcome
+            .as_ref()
+            .and_then(|outcome| outcome.error.as_deref())
+            .map_or_else(|| "tool error".to_string(), |error| error.diagnostics().to_string());
+        let logged_msg =
+            if self.config.record_payloads { error_msg.as_str() } else { PAYLOAD_OMITTED };
+        if is_authorization_denial(failure) {
+            tracing::info!(
+                tool_name = %tool_name,
+                error = %diagnostics,
+                error.message = %logged_msg,
+                "retry_reflect.skipped_authorization_denial"
+            );
+            return Ok(AfterToolCallResult::Continue(result));
+        }
+        if tool.effect() == ToolEffect::NonIdempotent && is_timeout(failure) {
+            tracing::warn!(
+                tool_name = %tool_name,
+                error = %diagnostics,
+                error.message = %logged_msg,
+                "retry_reflect.skipped_non_idempotent_timeout"
+            );
+            return Ok(AfterToolCallResult::Continue(result));
+        }
 
         // Step 2: Check tool eligibility
         if !is_tool_eligible(&self.config.tool_filter, tool_name) {
@@ -151,21 +205,19 @@ impl EnhancedPlugin for RetryReflectPlugin {
             args.to_string().hash(&mut hasher);
             hasher.finish()
         });
-        let tracker_key = format!("{tool_name}:{call_id}");
-
         let effective_limit = self.effective_limit(tool_name);
 
-        // Step 4: Check per-tool and global retry limits
+        // Step 4: Check per-tool and global retry limits, within this invocation
         let mut tracker = self.tracker.lock().await;
-        let current_count = tracker.get(&tracker_key);
+        let current_count = tracker.get(&invocation, tool_name, &call_id);
 
         if current_count >= effective_limit {
             // Retry limit exceeded — emit exhaustion event and propagate error
-            let error_msg = Self::extract_error_message(&result);
             tracing::warn!(
                 tool_name = %tool_name,
                 total_attempts = current_count,
-                error = %error_msg,
+                error = %diagnostics,
+                error.message = %logged_msg,
                 "retry_reflect.exhausted"
             );
             return Ok(AfterToolCallResult::Continue(result));
@@ -173,20 +225,20 @@ impl EnhancedPlugin for RetryReflectPlugin {
 
         // Check global limit
         if let Some(global_limit) = self.config.global_limit
-            && tracker.total() >= global_limit
+            && tracker.total(&invocation) >= global_limit
         {
-            let error_msg = Self::extract_error_message(&result);
             tracing::warn!(
                 tool_name = %tool_name,
-                total_attempts = tracker.total(),
-                error = %error_msg,
+                total_attempts = tracker.total(&invocation),
+                error = %diagnostics,
+                error.message = %logged_msg,
                 "retry_reflect.global_limit_exhausted"
             );
             return Ok(AfterToolCallResult::Continue(result));
         }
 
         // Step 5: Increment failure counters
-        let attempt = tracker.increment(&tracker_key);
+        let attempt = tracker.increment(&invocation, tool_name, &call_id);
         drop(tracker); // Release lock before sleeping
 
         // Record in global tracker if enabled
@@ -202,7 +254,6 @@ impl EnhancedPlugin for RetryReflectPlugin {
         }
 
         // Step 7: Render reflection prompt
-        let error_msg = Self::extract_error_message(&result);
         let args_str = serde_json::to_string_pretty(args).unwrap_or_else(|_| args.to_string());
         let reflection = render_reflection(
             &self.config.template,
@@ -220,7 +271,8 @@ impl EnhancedPlugin for RetryReflectPlugin {
             attempt = attempt,
             max_retries = effective_limit,
             backoff_ms = backoff.as_millis() as u64,
-            error = %error_msg,
+            error = %diagnostics,
+            error.message = %logged_msg,
             "retry_reflect.retry"
         );
 

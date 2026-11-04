@@ -8,17 +8,22 @@ use serde::{Deserialize, Serialize};
 /// Current lifecycle state of a managed MCP server.
 ///
 /// Transitions:
-/// - `Stopped` → `Running` (on successful start)
-/// - `Stopped` → `FailedToStart` (on start failure)
+/// - `Stopped`, `Crashed`, `FailedToStart`, or `Restarting` → `Starting` (a start begins; the
+///   process is spawned and the MCP handshake runs in this state)
+/// - `Starting` → `Running` (the handshake completed)
+/// - `Starting` → `FailedToStart` (spawn or handshake failure, or the startup timeout)
+/// - `Starting` → `Stopped` (stopped while it was starting)
 /// - `Running` → `Stopped` (on manual stop or shutdown)
-/// - `Running` → `Crashed` (on health check failure or unexpected exit)
-/// - `Running` → `Restarting` (during restart)
-/// - `Crashed` → `Restarting` (on auto-restart)
-/// - `Restarting` → `Running` (on successful restart)
-/// - `Restarting` → `FailedToStart` (on restart failure)
-/// - `Disabled` (set at construction, no transitions out unless re-configured)
+/// - `Running` → `Crashed` (the health check found the connection closed)
+/// - `Running` → `Restarting` (on `restart_server`)
+/// - `Crashed` or `FailedToStart` → `Restarting` (on auto-restart, after the backoff)
+/// - `Crashed` → `FailedToStart` (the restart policy's attempts are exhausted)
+/// - any → `Disabled` (on `disable_server`, or a start of a server configured `disabled`);
+///   `Disabled` → `Stopped` (on `enable_server`)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ServerStatus {
+    /// The server process has been spawned and its MCP handshake is in progress.
+    Starting,
     /// The server process is running and the MCP connection is active.
     Running,
     /// The server has been stopped (manually or via shutdown).
@@ -29,9 +34,46 @@ pub enum ServerStatus {
     Restarting,
     /// The server configuration has `disabled: true`; it will not be started.
     Disabled,
-    /// The server failed to start (spawn failure, handshake failure, or max restarts exceeded).
+    /// The server failed to start (spawn failure, handshake failure or timeout, or max
+    /// restarts exceeded).
     FailedToStart,
 }
+
+/// One change of a managed server's [`ServerStatus`], published as `(id, from, to)` on the
+/// manager's status channel (spec 3.2 §10 T1).
+///
+/// [`McpServerManager::subscribe_status_transitions`](super::McpServerManager::subscribe_status_transitions)
+/// delivers one for every change the manager records, in the order they happen. `from` and
+/// `to` always differ.
+///
+/// # Example
+///
+/// ```rust
+/// use adk_tool::mcp::{ServerStatus, ServerStatusTransition};
+///
+/// let crashed = ServerStatusTransition {
+///     id: "email".to_string(),
+///     from: ServerStatus::Running,
+///     to: ServerStatus::Crashed,
+/// };
+/// assert_eq!(
+///     serde_json::to_value(&crashed).unwrap(),
+///     serde_json::json!({ "id": "email", "from": "Running", "to": "Crashed" })
+/// );
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerStatusTransition {
+    /// ID of the server whose status changed.
+    pub id: String,
+    /// Status the server left.
+    pub from: ServerStatus,
+    /// Status the server entered.
+    pub to: ServerStatus,
+}
+
+/// Sending half of the manager's status channel.
+pub(crate) type StatusSender = tokio::sync::broadcast::Sender<ServerStatusTransition>;
 
 #[cfg(test)]
 mod tests {
@@ -70,6 +112,7 @@ mod tests {
     #[test]
     fn test_server_status_serde_round_trip() {
         let statuses = [
+            ServerStatus::Starting,
             ServerStatus::Running,
             ServerStatus::Stopped,
             ServerStatus::Crashed,

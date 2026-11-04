@@ -2,6 +2,10 @@
 
 Protocol-neutral agentic commerce and payment orchestration for ADK-Rust.
 
+[![Crates.io](https://img.shields.io/crates/v/adk-payments.svg)](https://crates.io/crates/adk-payments)
+[![Documentation](https://docs.rs/adk-payments/badge.svg)](https://docs.rs/adk-payments)
+[![License](https://img.shields.io/crates/l/adk-payments.svg)](https://github.com/zavora-ai/adk-rust/blob/main/LICENSE)
+
 `adk-payments` gives you one canonical commerce kernel and durable transaction
 journal that can sit behind multiple protocol adapters. It is built for cases
 where an agent needs to create, update, authorize, complete, and follow up on
@@ -43,8 +47,11 @@ The crate combines:
 | `ap2` | Alpha baseline | AP2 `v0.1-alpha` mandates, payment execution, receipts, interventions |
 | `ap2-a2a` | Additive | AP2 A2A-oriented helpers and AgentCard metadata |
 | `ap2-mcp` | Additive | AP2 MCP-safe continuation, intervention, and receipt views |
+| `wallet` | Experimental | An owner-funded site wallet: category mandates, caps checked before execution, holds, use-based, provider-billing and (with `ap2`) AP2 rails, anomaly pauses, reconciliation, KPI source (spec 3.5 §7.14) |
+| `sqlite`, `postgres`, `redis` | Experimental | Durable wallet stores: `SqliteWalletStore`, `PostgresWalletStore`, `RedisWalletStore`; each implies `wallet` and the same adk-session backend (spec 3.5 §7.14) |
 
-ACP stable is the conservative production baseline. AP2 support tracks the
+No feature is enabled by default; `acp-experimental` implies `acp`, and `ap2-a2a` and `ap2-mcp`
+imply `ap2`. ACP stable is the conservative production baseline. AP2 support tracks the
 current alpha research draft. The experimental ACP surface is intentionally
 feature-gated because the wire format is still moving.
 
@@ -54,17 +61,25 @@ Choose only the features you need:
 
 ```toml
 [dependencies]
-adk-payments = { version = "2.1.0", features = ["acp"] }
+adk-payments = { version = "3.0", features = ["acp"] }
 ```
 
 ```toml
 [dependencies]
-adk-payments = { version = "2.1.0", features = ["ap2", "ap2-a2a", "ap2-mcp"] }
+adk-payments = { version = "3.0", features = ["ap2", "ap2-a2a", "ap2-mcp"] }
 ```
 
 ```toml
 [dependencies]
-adk-payments = { version = "2.1.0", features = ["acp", "acp-experimental", "ap2"] }
+adk-payments = { version = "3.0", features = ["acp", "acp-experimental", "ap2"] }
+```
+
+Or use the meta-crate, where the `payments` feature (included in `enterprise`) re-exports the
+crate with its default features; enable the protocol features on `adk-payments` itself:
+
+```toml
+[dependencies]
+adk-rust = { version = "3.0", features = ["payments"] }
 ```
 
 ## Core Concepts
@@ -116,77 +131,259 @@ Canonical commerce kernel traits
 
 ### 1. Expose ACP Checkout Routes
 
-```rust,ignore
+Requires the `acp` feature. `build()` returns an `axum::Router` to serve.
+
+```rust
+use adk_core::identity::AdkIdentity;
+use adk_payments::domain::{
+    CommerceActor, CommerceActorRole, CommerceMode, MerchantRef, ProtocolExtensions,
+};
+use adk_payments::kernel::{DelegatedPaymentService, MerchantCheckoutService};
+use adk_payments::protocol::acp::{
+    AcpContextTemplate, AcpRouterBuilder, AcpVerificationConfig, DetachedSignatureVerifier,
+};
 use std::sync::Arc;
 
-use adk_payments::domain::{CommerceActor, CommerceActorRole, CommerceMode, MerchantRef, ProtocolExtensions};
-use adk_payments::protocol::acp::{AcpContextTemplate, AcpRouterBuilder, AcpVerificationConfig};
-
-let router = AcpRouterBuilder::new(AcpContextTemplate {
-    session_identity: Some(identity),
-    actor: CommerceActor {
-        actor_id: "shopper-agent".to_string(),
-        role: CommerceActorRole::AgentSurface,
-        display_name: Some("shopper".to_string()),
-        tenant_id: Some("tenant-1".to_string()),
-        extensions: ProtocolExtensions::default(),
-    },
-    merchant_of_record: MerchantRef {
-        merchant_id: "merchant-123".to_string(),
-        legal_name: "Merchant Example LLC".to_string(),
-        display_name: Some("Merchant Example".to_string()),
-        statement_descriptor: Some("MERCHANT*EXAMPLE".to_string()),
-        country_code: Some("US".to_string()),
-        website: Some("https://merchant.example".to_string()),
-        extensions: ProtocolExtensions::default(),
-    },
-    payment_processor: None,
-    mode: CommerceMode::HumanPresent,
-})
-.with_merchant_checkout_service(checkout_service)
-.with_delegated_payment_service(delegated_payment_service)
-.with_verification(AcpVerificationConfig::strict())
-.build()?;
+fn acp_routes(
+    identity: AdkIdentity,
+    checkout_service: Arc<dyn MerchantCheckoutService>,
+    delegated_payment_service: Arc<dyn DelegatedPaymentService>,
+    signature_verifier: Arc<dyn DetachedSignatureVerifier>,
+) -> adk_core::Result<()> {
+    let router = AcpRouterBuilder::new(AcpContextTemplate {
+        session_identity: Some(identity),
+        actor: CommerceActor {
+            actor_id: "shopper-agent".to_string(),
+            role: CommerceActorRole::AgentSurface,
+            display_name: Some("shopper".to_string()),
+            tenant_id: Some("tenant-1".to_string()),
+            extensions: ProtocolExtensions::default(),
+        },
+        merchant_of_record: MerchantRef {
+            merchant_id: "merchant-123".to_string(),
+            legal_name: "Merchant Example LLC".to_string(),
+            display_name: Some("Merchant Example".to_string()),
+            statement_descriptor: Some("MERCHANT*EXAMPLE".to_string()),
+            country_code: Some("US".to_string()),
+            website: Some("https://merchant.example".to_string()),
+            extensions: ProtocolExtensions::default(),
+        },
+        payment_processor: None,
+        mode: CommerceMode::HumanPresent,
+    })
+    .with_merchant_checkout_service(checkout_service)
+    .with_delegated_payment_service(delegated_payment_service)
+    .with_verification(AcpVerificationConfig::strict().with_signature_verifier(signature_verifier))
+    .build()?;
+    let _ = router; // serve with axum
+    Ok(())
+}
 ```
 
 Use this route surface when you want HTTP endpoints for checkout session create,
 update, completion, cancelation, status lookup, and delegated payment.
 
+`AcpVerificationConfig::strict()` requires a verified `Signature`, a `Timestamp`
+within five minutes, and an `Idempotency-Key` on every POST. `build()` fails when
+a profile requires signatures but has no `DetachedSignatureVerifier`. For local
+development, `AcpVerificationConfig::permissive()` enforces only `API-Version`.
+
 ### 2. Handle AP2 Mandate Flows
 
-```rust,ignore
-use adk_payments::protocol::ap2::Ap2Adapter;
+Requires the `ap2` feature.
 
-let adapter = Ap2Adapter::new(
-    checkout_service,
-    payment_execution_service,
-    transaction_store,
-    evidence_store,
-)
-.with_intervention_service(intervention_service);
+```rust
+use adk_payments::kernel::{
+    CommerceContext, EvidenceStore, InterventionService, MerchantCheckoutService,
+    PaymentExecutionService, TransactionStore,
+};
+use adk_payments::protocol::ap2::{
+    Ap2Adapter, CartMandate, MerchantAuthorizationVerifier, PaymentMandate, PaymentReceipt,
+    UserAuthorizationVerifier,
+};
+use std::sync::Arc;
 
-let record = adapter.submit_cart_mandate(context, cart_mandate).await?;
-let payment = adapter.submit_payment_mandate(context, payment_mandate).await?;
-let final_record = adapter.apply_payment_receipt(context, payment_receipt).await?;
+/// The services and verifiers are your commerce backend's implementations.
+fn ap2_adapter(
+    checkout_service: Arc<dyn MerchantCheckoutService>,
+    payment_execution_service: Arc<dyn PaymentExecutionService>,
+    transaction_store: Arc<dyn TransactionStore>,
+    evidence_store: Arc<dyn EvidenceStore>,
+    merchant_signature_verifier: Arc<dyn MerchantAuthorizationVerifier>,
+    user_authorization_verifier: Arc<dyn UserAuthorizationVerifier>,
+    intervention_service: Arc<dyn InterventionService>,
+) -> Ap2Adapter {
+    Ap2Adapter::new(checkout_service, payment_execution_service, transaction_store, evidence_store)
+        .with_merchant_authorization_verifier(merchant_signature_verifier)
+        .with_user_authorization_verifier(user_authorization_verifier)
+        .with_intervention_service(intervention_service)
+}
+
+async fn pay(
+    adapter: &Ap2Adapter,
+    context: CommerceContext,
+    cart_mandate: CartMandate,
+    payment_mandate: PaymentMandate,
+    payment_receipt: PaymentReceipt,
+) -> adk_core::Result<()> {
+    let record = adapter.submit_cart_mandate(context.clone(), cart_mandate).await?;
+    let payment = adapter.submit_payment_mandate(context.clone(), payment_mandate).await?;
+    let final_record = adapter.apply_payment_receipt(context, payment_receipt).await?;
+    Ok(())
+}
 ```
 
 Use AP2 when your flow is mandate-based and multiple specialized actors
 participate in authorization and settlement.
 
+The adapter fails closed. Until both verifiers are configured, every merchant,
+intent, and payment authorization is rejected with
+`Ap2Error::AuthorizationVerifierNotConfigured`.
+
+| Setting | Default | Change it with |
+|---------|---------|----------------|
+| Merchant authorization (`CartMandate`) | Rejected | `with_merchant_authorization_verifier` |
+| User authorization (intent and payment mandates) | Rejected | `with_user_authorization_verifier` |
+| Presence-only checks for development | Off | `allow_unverified_authorizations()` (logs a warning) |
+| Executed payment mandate registry | `InMemoryPaymentMandateLedger` | `with_payment_mandate_ledger` |
+
+Verifiers check the artifact cryptographically against the mandate contents and
+compare signatures in constant time. A merchant verifier that sets
+`VERIFIED_MERCHANT_NAME_CLAIM` makes the adapter reject carts whose
+`merchant_name` differs from the verified signer. Payment mandates are
+single-use: a resubmitted mandate returns `Ap2Error::PaymentMandateReplayed`, and
+a second mandate for a paid transaction returns `Ap2Error::TransactionAlreadyPaid`.
+
+AP2 amounts are converted exactly. Every amount in one cart is normalised to the
+currency's ISO 4217 minor-unit scale, or a finer scale when an item needs it;
+malformed values, mixed currencies, more than 18 fraction digits, and overflow
+return `Ap2Error::InvalidAmount`.
+
+AP2 money movement runs under the same governance as a governed ACP checkout:
+
+| Step | Governance |
+|------|------------|
+| Cart mandate creates a checkout | Payment policies (`CreateCheckout`) |
+| Payment mandate | Authorization verified first; a verification failure refuses the payment |
+| Payment mandate | Payment policies (`ExecutePayment`) on the stored transaction at the mandate total |
+| Payment mandate | `SpendLimitGuardrail` reserves the total under `app / agent / merchant_id`, committed when the backend authorizes or completes the payment, released otherwise |
+| Payment mandate | `with_payment_auditor` records the decision before money moves; a failed write refuses the payment |
+| Payment mandate | Consumed only after governance allows it; the backend receives an `idempotency_key` extension field |
+| Human-not-present payment without user authorization | Requires a verified intent authorization |
+
+```rust
+use adk_auth::AuditSink;
+use adk_core::SpendLedger;
+use adk_payments::auth::PaymentAuditor;
+use adk_payments::guardrail::{AmountThresholdGuardrail, PaymentPolicySet};
+use adk_payments::protocol::ap2::Ap2Adapter;
+use std::sync::Arc;
+
+fn govern(
+    adapter: Ap2Adapter,
+    spend_ledger: Arc<dyn SpendLedger>,
+    audit_sink: Arc<dyn AuditSink>,
+) -> Ap2Adapter {
+    adapter
+        .with_payment_policies(
+            PaymentPolicySet::new().with(
+                AmountThresholdGuardrail::new(Some(5_000), Some(50_000)).with_currency("USD", 2),
+            ),
+        )
+        .with_spend_ledger(spend_ledger)
+        .with_payment_auditor(PaymentAuditor::new(audit_sink))
+}
+```
+
+`submit_payment_mandate` attributes a payment to the session's app and the acting
+actor; `submit_payment_mandate_as` takes a `PaymentCaller` with its own attribution,
+ledger, and approver. A protocol request has no approver, so an escalated payment
+fails with `payments.policy.approval_required` and its mandate stays unconsumed.
+
 ### 3. Register Agent-Facing Payment Tools
 
-```rust,ignore
+```rust
+use adk_core::Tool;
+use adk_payments::kernel::{InterventionService, MerchantCheckoutService, TransactionStore};
 use adk_payments::tools::PaymentToolsetBuilder;
+use std::sync::Arc;
 
-let toolset = PaymentToolsetBuilder::new(checkout_service, transaction_store)
-    .with_intervention_service(intervention_service)
-    .build();
+fn payment_tools(
+    checkout_service: Arc<dyn MerchantCheckoutService>,
+    transaction_store: Arc<dyn TransactionStore>,
+    intervention_service: Arc<dyn InterventionService>,
+) -> Vec<Arc<dyn Tool>> {
+    let toolset = PaymentToolsetBuilder::new(checkout_service, transaction_store)
+        .with_intervention_service(intervention_service)
+        .build();
 
-let tools = toolset.tools();
+    toolset.tools()
+}
 ```
 
 These tools return masked transaction summaries only. Raw card data, signatures,
 and authorization blobs do not appear in tool outputs.
+
+Every tool the builder produces is wrapped in an `adk-auth` `ScopeGuard`, so a call
+fails unless the caller holds the scope the tool declares (`payments:checkout:create`,
+`payments:checkout:complete`, and so on). The default guard reads
+`ToolContext::user_scopes()`, which the server's auth bridge fills from the request;
+`with_scope_guard` supplies a different resolver or an audit sink. Each call records
+the calling agent as the acting `CommerceActor`, whose `actor_id` is the agent's `AgentId`
+(`urn:adk:agent:{app}/{agent}` unless configured), and binds the transaction to the
+caller's session identity. Agent-scoped `SpendLimits` key on the same id.
+
+`payments_checkout_create` and `payments_checkout_complete` declare
+`ToolEffect::NonIdempotent`, so an agent never retries them, and every checkout tool
+passes the call's `ToolContext::idempotency_key()` to the commerce backend in the
+`idempotency_key` extension field — where the ACP adapter places the `Idempotency-Key`
+header. A created checkout's transaction ID derives from that key, so a replayed call
+names the same transaction.
+
+Checkout creation and completion run through a `GovernedCheckoutService`, which
+evaluates the policies passed to `with_payment_policies` on every call. A denial
+refuses the checkout, an escalation goes through the run's tool confirmation flow (an
+approval that edits the call's arguments re-issues the call with them once, and the
+approver's message is recorded with the decision), and
+`SpendLimitGuardrail` reserves each completed checkout against the spend ledger
+(`with_spend_ledger` or `RunConfig::spend_ledger`), failing closed when the ledger is
+unreachable. `GovernedCheckoutService::with_auditor` records each decision with a
+`PaymentAuditor` before the backend is reached. Wrap the backend handed to the ACP adapter in
+a `GovernedCheckoutService` to govern ACP protocol traffic too; the AP2 adapter governs its own
+checkouts and payment mandates. A custom `PaymentPolicy` is an `#[async_trait]` whose
+`evaluate` receives a context carrying the operation, the paying app and agent, and the spend
+ledger.
+
+With the `ap2` feature, `with_ap2_adapter` adds `payments_ap2_payment_submit`
+(`payments:payment:execute`), which submits an AP2 payment mandate through the adapter
+under the same scope guard. The tool is `ToolEffect::NonIdempotent`, so with an action
+ledger a timed-out payment is answered `outcome_unknown` instead of repeated; it passes
+the call's idempotency key to the payment backend, routes escalations through the run's
+tool confirmation flow, and reserves against `RunConfig::spend_ledger` when the adapter
+has no ledger. With `ap2-mcp`, its response includes the `Ap2McpPaymentContinuation`
+view for MCP clients.
+
+## Site Wallet
+
+With the `wallet` feature, a site pays its own costs — model tokens, hosting, domains,
+advertising — from an owner-funded wallet under the owner's mandates (spec 3.5 §7.14):
+
+| Step | What happens |
+|------|--------------|
+| Policy | `WalletPolicy` gives each `SpendCategory` a `Mandate`: cap per period, limit per payment, payees, rail |
+| Pay | `Wallet::pay` refuses a payee or rail outside the mandate, holds a payment over the limit or the category cap for the owner, and reserves in the spend ledger before the rail pays |
+| Hold | A held payment is paid only on a person's `ApprovalDecision`; through `wallet_pay` it is held as the tool call and resumes once the owner decides. A decision moves it out of `held` with the store's compare-and-set (`WalletStore::update_if`), so of two racing decisions exactly one proceeds |
+| Anomaly | Spend today reaching the anomaly rule's multiple of the trailing daily average pauses the category and raises a P1 alarm |
+| Reconcile | `Wallet::reconcile_due` checks the last period against the provider's statement and each billing provider's invoice |
+| Report | `WalletKpiSource` reports spend, revenue, profit, cost per lead and cost per sale |
+
+With `sqlite`, `postgres` or `redis`, the journal, held payments and paused categories
+survive a restart and are shared by every instance of the site; with a durable spend ledger
+over the same database, instances share each category's cap.
+
+The site never opens accounts, adds payment methods, changes payees or raises a cap: no
+wallet type has a method that would. See
+[`docs/official_docs/security/wallet.md`](https://github.com/zavora-ai/adk-rust/blob/main/docs/official_docs/security/wallet.md).
 
 ## Primary Journeys
 
@@ -203,7 +400,10 @@ The crate is currently shaped around five first-class journeys:
 - Raw payment credentials, merchant signatures, user authorizations, and receipt artifacts are stored as evidence.
 - Session state and semantic memory retain only masked transaction summaries.
 - `adk-auth` binds requests to session identity and audit metadata.
-- `adk-guardrail` enforces amount, merchant, intervention, and protocol-policy checks before persistence.
+- `GovernedCheckoutService` enforces amount, merchant, currency, intervention, protocol-version, and spend policies before every checkout creation and completion; the AP2 adapter enforces the same policies, spend ledger, and audit before every cart-mandate checkout and payment mandate.
+- `AmountThresholdGuardrail` compares totals by value across scales; `with_currency` binds its thresholds to one currency and denies the others.
+- The AP2 adapter rejects authorizations until cryptographic verifiers are configured, and executes each payment mandate at most once.
+- Delegated-payment method selections keep display fields only (type, brand, last four digits); the raw card reaches the tokenization backend and evidence store, not the selection.
 - The kernel refuses lossy protocol-to-protocol conversions rather than approximating semantics.
 
 ## Validation and Examples
@@ -213,17 +413,21 @@ The integration tests are the authoritative executable reference path:
 ```bash
 cargo test -p adk-payments --features acp --test acp_integration_tests
 cargo test -p adk-payments --features ap2,ap2-a2a,ap2-mcp --test ap2_integration_tests
+cargo test -p adk-payments --features ap2,ap2-a2a,ap2-mcp --test ap2_governance_tests
 cargo test -p adk-payments --test cross_protocol_correlation_tests
 cargo test -p adk-payments --features acp-experimental --test acp_experimental_integration_tests
+cargo test -p adk-payments --features wallet,ap2 --test wallet_tests --test wallet_s12_scenario_tests --test wallet_s9_ap2_tests
+cargo test -p adk-payments --features sqlite --test wallet_store_sqlite
 ```
 
 Use these as the starting point for real implementations:
 
-- `adk-payments/tests/acp_integration_tests.rs`
-- `adk-payments/tests/ap2_integration_tests.rs`
-- `adk-payments/tests/cross_protocol_correlation_tests.rs`
-- `examples/payments/`
-- `docs/official_docs/security/payments.md`
+- [`adk-payments/tests/acp_integration_tests.rs`](https://github.com/zavora-ai/adk-rust/blob/main/adk-payments/tests/acp_integration_tests.rs)
+- [`adk-payments/tests/ap2_integration_tests.rs`](https://github.com/zavora-ai/adk-rust/blob/main/adk-payments/tests/ap2_integration_tests.rs)
+- [`adk-payments/tests/ap2_governance_tests.rs`](https://github.com/zavora-ai/adk-rust/blob/main/adk-payments/tests/ap2_governance_tests.rs)
+- [`adk-payments/tests/cross_protocol_correlation_tests.rs`](https://github.com/zavora-ai/adk-rust/blob/main/adk-payments/tests/cross_protocol_correlation_tests.rs)
+- [`examples/payments/`](https://github.com/zavora-ai/adk-rust/tree/main/examples/payments)
+- [`docs/official_docs/security/payments.md`](https://github.com/zavora-ai/adk-rust/blob/main/docs/official_docs/security/payments.md)
 
 ## Related Modules
 
@@ -234,3 +438,12 @@ Use these as the starting point for real implementations:
 - `protocol::ap2` - AP2 adapter, verification, A2A, and MCP surfaces
 - `tools` - agent-facing checkout, status, and intervention tools
 - `server` - ACP router re-exports and AP2 integration notes
+- `wallet` (`wallet`) - the owner-funded site wallet, its rails, alarms, reconciliation and tools
+
+## License
+
+Apache-2.0
+
+## Part of ADK-Rust
+
+This crate is part of the [ADK-Rust](https://adk-rust.com) framework for building AI agents in Rust.

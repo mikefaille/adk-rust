@@ -15,15 +15,40 @@ use std::collections::HashMap;
 /// Build an Azure AI Inference chat completions request body from an ADK `LlmRequest`.
 ///
 /// Converts ADK contents, tools, and generation config into the JSON format
-/// expected by the Azure AI Inference REST API.
+/// expected by the Azure AI Inference REST API. Images a tool returned follow the tool
+/// messages in a user message, since a tool message carries only text.
+///
+/// # Errors
+///
+/// Returns `model.unsupported_config` when `config` sets `top_logprobs`, which the Azure AI
+/// Inference API does not accept.
 pub(crate) fn build_request_body(
     model: &str,
     contents: &[Content],
     tools: &HashMap<String, Value>,
     config: Option<&GenerateContentConfig>,
     stream: bool,
-) -> Value {
-    let messages: Vec<Value> = contents.iter().map(content_to_message).collect();
+) -> Result<Value, adk_core::AdkError> {
+    crate::generation_config::reject_unsupported(
+        "azure-ai",
+        config,
+        crate::generation_config::Supports {
+            stop_sequences: true,
+            seed: true,
+            penalties: true,
+            top_logprobs: false,
+        },
+    )?;
+    // The Azure AI Inference API exposes no effort control (spec 3.1 §7.23).
+    if let Some(level) = config.and_then(|config| config.effort) {
+        tracing::debug!(
+            model.name = model,
+            effort = %level,
+            "azure ai inference takes no reasoning effort; the request's effort is ignored"
+        );
+    }
+    let contents = crate::tool_result::with_images(contents);
+    let messages: Vec<Value> = contents.iter().flat_map(content_to_messages).collect();
 
     let mut body = serde_json::json!({
         "model": model,
@@ -64,15 +89,61 @@ pub(crate) fn build_request_body(
         if let Some(max_tokens) = cfg.max_output_tokens {
             body["max_tokens"] = serde_json::json!(max_tokens);
         }
+        if !cfg.stop_sequences.is_empty() {
+            body["stop"] = serde_json::json!(cfg.stop_sequences);
+        }
+        if let Some(seed) = cfg.seed {
+            body["seed"] = serde_json::json!(seed);
+        }
+        if let Some(penalty) = cfg.frequency_penalty {
+            body["frequency_penalty"] = serde_json::json!(penalty);
+        }
+        if let Some(penalty) = cfg.presence_penalty {
+            body["presence_penalty"] = serde_json::json!(penalty);
+        }
     }
 
-    body
+    Ok(body)
+}
+
+/// Convert one ADK content to the Azure AI messages that carry it.
+///
+/// A content holding function responses becomes one `tool` message per response, in order,
+/// followed by a user message with any other parts; every other content is one message.
+fn content_to_messages(content: &Content) -> Vec<Value> {
+    if matches!(content.role.as_str(), "user" | "function" | "tool")
+        && let Some((responses, rest)) = crate::tool_result::split_function_responses(content)
+    {
+        let mut messages: Vec<Value> = responses
+            .into_iter()
+            .map(|(id, response)| {
+                serde_json::json!({
+                    "role": "tool",
+                    "tool_call_id": id.unwrap_or("unknown"),
+                    "content": crate::tool_result::serialize_tool_result(&response.response),
+                })
+            })
+            .collect();
+        messages.extend(rest.map(|rest| content_to_message(&rest)));
+        return messages;
+    }
+    vec![content_to_message(content)]
 }
 
 /// Convert a single ADK `Content` to an Azure AI message JSON object.
 fn content_to_message(content: &Content) -> Value {
     match content.role.as_str() {
         "user" => {
+            if content.parts.iter().any(|part| matches!(part, Part::InlineData { .. })) {
+                let parts = content.parts.iter().filter_map(|part| match part {
+                    Part::Text { text } => Some(serde_json::json!({"type":"text", "text":text})),
+                    Part::InlineData { mime_type, data, .. } => Some(serde_json::json!({
+                        "type":"image_url", "image_url":{"url":format!("data:{mime_type};base64,{}", crate::attachment::encode_base64(data))}
+                    })),
+                    _ => None,
+                }).collect::<Vec<_>>();
+                return serde_json::json!({"role":"user", "content":parts});
+            }
             let text = extract_text(&content.parts);
             serde_json::json!({
                 "role": "user",
@@ -108,22 +179,9 @@ fn content_to_message(content: &Content) -> Value {
                 "content": text,
             })
         }
+        // A tool-role content without a function response carries only user-visible parts.
         "function" | "tool" => {
-            if let Some(Part::FunctionResponse { function_response, id, .. }) =
-                content.parts.first()
-            {
-                let tool_call_id = id.clone().unwrap_or_else(|| "unknown".to_string());
-                serde_json::json!({
-                    "role": "tool",
-                    "tool_call_id": tool_call_id,
-                    "content": crate::tool_result::serialize_tool_result(&function_response.response),
-                })
-            } else {
-                serde_json::json!({
-                    "role": "user",
-                    "content": "",
-                })
-            }
+            content_to_message(&Content { role: "user".to_string(), parts: content.parts.clone() })
         }
         _ => {
             let text = extract_text(&content.parts);
@@ -209,11 +267,11 @@ pub(crate) fn parse_response(body: &Value) -> LlmResponse {
                 if let Some(func) = tc.get("function") {
                     let name =
                         func.get("name").and_then(|n| n.as_str()).unwrap_or_default().to_string();
-                    let args: Value = func
-                        .get("arguments")
-                        .and_then(|a| a.as_str())
-                        .and_then(|a| serde_json::from_str(a).ok())
-                        .unwrap_or(serde_json::json!({}));
+                    let args = crate::tool_args::tool_call_arguments(
+                        "azure-ai",
+                        &name,
+                        func.get("arguments"),
+                    );
                     let id = tc.get("id").and_then(|i| i.as_str()).map(String::from);
                     parts.push(Part::FunctionCall { name, args, id, thought_signature: None });
                 }
@@ -230,8 +288,9 @@ pub(crate) fn parse_response(body: &Value) -> LlmResponse {
         .and_then(|fr| fr.as_str())
         .map(map_finish_reason);
 
-    let usage_metadata = body.get("usage").map(|u| {
+    let usage_metadata = body.get("usage").filter(|usage| usage.is_object()).map(|u| {
         let mut meta = UsageMetadata {
+            provider_usage: Some(u.clone()),
             prompt_token_count: u.get("prompt_tokens").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
             candidates_token_count: u.get("completion_tokens").and_then(|v| v.as_i64()).unwrap_or(0)
                 as i32,
@@ -249,18 +308,21 @@ pub(crate) fn parse_response(body: &Value) -> LlmResponse {
         meta
     });
 
+    let turn_complete = content.as_ref().is_none_or(|content| !content.has_function_calls());
     LlmResponse {
         content,
         usage_metadata,
         finish_reason,
         citation_metadata: None,
         partial: false,
-        turn_complete: true,
+        turn_complete,
         interrupted: false,
         error_code: None,
         error_message: None,
         provider_metadata: None,
         interaction_id: None,
+        model: None,
+        provider: None,
     }
 }
 
@@ -330,7 +392,7 @@ pub(crate) fn parse_sse_chunk(chunk: &Value) -> LlmResponse {
 
     LlmResponse {
         content,
-        usage_metadata: None,
+        usage_metadata: parse_response(chunk).usage_metadata,
         finish_reason,
         citation_metadata: None,
         partial: !is_final,
@@ -340,6 +402,8 @@ pub(crate) fn parse_sse_chunk(chunk: &Value) -> LlmResponse {
         error_message: None,
         provider_metadata: None,
         interaction_id: None,
+        model: None,
+        provider: None,
     }
 }
 
@@ -365,7 +429,7 @@ mod tests {
             role: "user".to_string(),
             parts: vec![Part::Text { text: "Hello".to_string() }],
         }];
-        let body = build_request_body("my-model", &contents, &HashMap::new(), None, false);
+        let body = build_request_body("my-model", &contents, &HashMap::new(), None, false).unwrap();
 
         assert_eq!(body["model"], "my-model");
         assert_eq!(body["stream"], false);
@@ -383,7 +447,7 @@ mod tests {
             max_output_tokens: Some(1024),
             ..Default::default()
         };
-        let body = build_request_body("m", &[], &HashMap::new(), Some(&config), true);
+        let body = build_request_body("m", &[], &HashMap::new(), Some(&config), true).unwrap();
 
         assert_eq!(body["stream"], true);
         // Use f32-safe values (0.5 is exactly representable in f32)
@@ -407,7 +471,7 @@ mod tests {
                 }
             }),
         );
-        let body = build_request_body("m", &[], &tools, None, false);
+        let body = build_request_body("m", &[], &tools, None, false).unwrap();
 
         let tool_array = body["tools"].as_array().unwrap();
         assert_eq!(tool_array.len(), 1);
@@ -492,7 +556,7 @@ mod tests {
                 annotations: None,
             }],
         };
-        let msg = content_to_message(&content);
+        let msg = content_to_messages(&content).remove(0);
         assert_eq!(msg["role"], "tool");
         assert_eq!(msg["tool_call_id"], "call_123");
         assert!(msg["content"].as_str().unwrap().contains("72"));
@@ -704,7 +768,8 @@ mod tests {
             role: "user".to_string(),
             parts: vec![Part::Text { text: "What is Rust?".to_string() }],
         }];
-        let body = build_request_body("test-model", &contents, &HashMap::new(), None, false);
+        let body =
+            build_request_body("test-model", &contents, &HashMap::new(), None, false).unwrap();
 
         // Simulate a response with the same text
         let response_json = serde_json::json!({
@@ -757,7 +822,7 @@ mod tests {
                 annotations: None,
             }],
         };
-        let msg = content_to_message(&content);
+        let msg = content_to_messages(&content).remove(0);
         assert_eq!(msg["tool_call_id"], "unknown");
     }
 
@@ -1002,5 +1067,90 @@ mod tests {
         let usage = resp.usage_metadata.unwrap();
         assert_eq!(usage.cache_read_input_token_count, None);
         assert_eq!(usage.thinking_token_count, None);
+    }
+
+    #[test]
+    fn several_function_responses_become_one_tool_message_each() {
+        let response = |id: &str| Part::FunctionResponse {
+            function_response: adk_core::FunctionResponseData::new(
+                "get_weather",
+                serde_json::json!({"ok": id}),
+            ),
+            id: Some(id.to_string()),
+            annotations: None,
+        };
+        let content = Content {
+            role: "function".to_string(),
+            parts: vec![
+                response("call_a"),
+                response("call_b"),
+                Part::Text { text: "note".to_string() },
+            ],
+        };
+        let messages = content_to_messages(&content);
+        let shape: Vec<(String, Option<String>)> = messages
+            .iter()
+            .map(|m| {
+                (
+                    m["role"].as_str().unwrap_or_default().to_string(),
+                    m["tool_call_id"].as_str().map(str::to_string),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                ("tool".to_string(), Some("call_a".to_string())),
+                ("tool".to_string(), Some("call_b".to_string())),
+                ("user".to_string(), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn stop_seed_and_penalties_are_sent_and_logprobs_are_rejected() {
+        let config = GenerateContentConfig {
+            stop_sequences: vec!["END".to_string()],
+            seed: Some(42),
+            presence_penalty: Some(0.5),
+            frequency_penalty: Some(0.25),
+            ..Default::default()
+        };
+        let body = build_request_body("m", &[], &HashMap::new(), Some(&config), false).unwrap();
+        assert_eq!(body["stop"], serde_json::json!(["END"]));
+        assert_eq!(body["seed"], 42);
+        assert_eq!(body["presence_penalty"], 0.5);
+        assert_eq!(body["frequency_penalty"], 0.25);
+
+        let config = GenerateContentConfig { top_logprobs: Some(2), ..Default::default() };
+        let error = build_request_body("m", &[], &HashMap::new(), Some(&config), false)
+            .expect_err("Azure AI Inference has no logprobs field");
+        assert_eq!(error.code, "model.unsupported_config");
+    }
+
+    #[test]
+    fn tool_images_follow_the_tool_messages() {
+        let contents = vec![Content {
+            role: "function".to_string(),
+            parts: vec![Part::FunctionResponse {
+                function_response: FunctionResponseData::with_inline_data(
+                    "render",
+                    serde_json::json!({"status": "rendered"}),
+                    vec![adk_core::InlineDataPart {
+                        mime_type: "image/png".to_string(),
+                        data: vec![1, 2, 3],
+                        uri: None,
+                        annotations: None,
+                    }],
+                ),
+                id: Some("call_1".to_string()),
+                annotations: None,
+            }],
+        }];
+        let body = build_request_body("m", &contents, &HashMap::new(), None, false).unwrap();
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages[0]["role"], "tool");
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(messages[1]["content"][1]["image_url"]["url"], "data:image/png;base64,AQID");
     }
 }

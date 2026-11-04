@@ -165,24 +165,34 @@ impl CodeRuntime for ScriptedRuntime {
 
 /// A minimal [`InvocationContext`] backed by an in-memory session state map.
 pub(crate) struct MockInvocationContext {
+    invocation_id: String,
     user_content: Content,
     session: MockSession,
     run_config: RunConfig,
+    steering_inbox: Option<adk_core::SteeringInbox>,
 }
 
 impl MockInvocationContext {
     /// Create a context with the given incoming message and empty session state.
     pub(crate) fn new(user_content: Content) -> Self {
         Self {
+            invocation_id: "inv-test".to_string(),
             user_content,
             session: MockSession::new(HashMap::new()),
             run_config: RunConfig::default(),
+            steering_inbox: None,
         }
+    }
+
+    /// Set the invocation id, as a later invocation of the same session has.
+    pub(crate) fn with_invocation_id(mut self, invocation_id: &str) -> Self {
+        self.invocation_id = invocation_id.to_string();
+        self
     }
 
     /// Seed the session state (e.g. a persisted checkpoint from a prior run).
     pub(crate) fn with_state(mut self, state: HashMap<String, Value>) -> Self {
-        self.session = MockSession::new(state);
+        self.session.state = MockState { map: state };
         self
     }
 
@@ -198,9 +208,43 @@ impl MockInvocationContext {
         self
     }
 
+    /// Set static confirmation decisions keyed by call ID.
+    pub(crate) fn with_confirmation_decisions(
+        mut self,
+        decisions: HashMap<String, adk_core::ToolConfirmationDecision>,
+    ) -> Self {
+        self.run_config.tool_confirmation_decisions = decisions;
+        self
+    }
+
+    /// Replace the run config wholesale.
+    pub(crate) fn with_run_config(mut self, run_config: RunConfig) -> Self {
+        self.run_config = run_config;
+        self
+    }
+
+    /// Add a run-wide hook, as a runner installs its plugin manager.
+    pub(crate) fn with_invocation_hook(mut self, hook: Arc<dyn adk_core::InvocationHooks>) -> Self {
+        self.run_config.invocation_hooks.push(hook);
+        self
+    }
+
+    /// Attach a steering inbox, as a runner does for every run.
+    pub(crate) fn with_steering_inbox(mut self, inbox: adk_core::SteeringInbox) -> Self {
+        self.steering_inbox = Some(inbox);
+        self
+    }
+
     /// Seed the session's conversation history.
     pub(crate) fn with_history(mut self, history: Vec<Content>) -> Self {
         self.session.history = history;
+        self
+    }
+
+    /// Seed the session's event log, which its held calls are read from.
+    #[cfg(feature = "enhanced-plugins")]
+    pub(crate) fn with_events(mut self, events: Vec<Event>) -> Self {
+        self.session.events = events;
         self
     }
 }
@@ -208,7 +252,7 @@ impl MockInvocationContext {
 #[async_trait]
 impl ReadonlyContext for MockInvocationContext {
     fn invocation_id(&self) -> &str {
-        "inv-test"
+        &self.invocation_id
     }
     fn agent_name(&self) -> &str {
         "code-agent"
@@ -255,16 +299,20 @@ impl InvocationContext for MockInvocationContext {
     fn ended(&self) -> bool {
         false
     }
+    fn steering_inbox(&self) -> Option<adk_core::SteeringInbox> {
+        self.steering_inbox.clone()
+    }
 }
 
 struct MockSession {
     state: MockState,
     history: Vec<Content>,
+    events: Vec<Event>,
 }
 
 impl MockSession {
     fn new(map: HashMap<String, Value>) -> Self {
-        Self { state: MockState { map }, history: Vec::new() }
+        Self { state: MockState { map }, history: Vec::new(), events: Vec::new() }
     }
 }
 
@@ -283,6 +331,9 @@ impl Session for MockSession {
     }
     fn conversation_history(&self) -> Vec<Content> {
         self.history.clone()
+    }
+    fn held_tool_calls(&self, agent_name: &str, branch: &str) -> Vec<adk_core::HeldToolCall> {
+        adk_core::held_tool_calls(&self.events, agent_name, branch)
     }
 }
 
@@ -505,11 +556,19 @@ impl Tool for SleepingTool {
 /// A tool named `flaky` that fails its first `fail_times` calls, then succeeds
 /// with `{"ok": true}`. Used to exercise retry budgets.
 pub(crate) fn flaky_tool(fail_times: usize) -> Arc<dyn Tool> {
-    Arc::new(FlakyTool { fail_times, calls: AtomicUsize::new(0) })
+    flaky_tool_with_effect(fail_times, adk_core::ToolEffect::Idempotent)
+}
+
+pub(crate) fn flaky_tool_with_effect(
+    fail_times: usize,
+    effect: adk_core::ToolEffect,
+) -> Arc<dyn Tool> {
+    Arc::new(FlakyTool { fail_times, effect, calls: AtomicUsize::new(0) })
 }
 
 struct FlakyTool {
     fail_times: usize,
+    effect: adk_core::ToolEffect,
     calls: AtomicUsize,
 }
 
@@ -520,6 +579,9 @@ impl Tool for FlakyTool {
     }
     fn description(&self) -> &str {
         "fails a few times, then succeeds"
+    }
+    fn effect(&self) -> adk_core::ToolEffect {
+        self.effect
     }
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, _args: Value) -> adk_core::Result<Value> {
         let n = self.calls.fetch_add(1, Ordering::SeqCst);

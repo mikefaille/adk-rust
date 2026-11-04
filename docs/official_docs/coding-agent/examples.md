@@ -1,5 +1,8 @@
 # Coding Agent Examples
 
+> **Note:** the [harness](../harness/index.md) supersedes `adk_agent::coding::CodingAgent` in 3.1;
+> see [Migrating from `CodingAgent`](../migration/coding-agent-to-harness.md).
+
 Three runnable example crates in [`examples/`](https://github.com/zavora-ai/adk-rust/tree/main/examples),
 each a **real agent** (no mocks) that does the work and then **independently
 verifies** the result by running the produced code. All default to a Gemini 3
@@ -52,7 +55,7 @@ fan-in) → revise loop → finalize.
 cargo run --manifest-path examples/coding_graph/Cargo.toml
 ```
 
-Read it for: parallel agents in one super-step, `add_deferred_node_fn` fan-in,
+Read it for: parallel agents in one super-step, deferred fan-in,
 conditional cyclic routing. Verifies by importing the produced function and
 asserting the spec + edge cases.
 

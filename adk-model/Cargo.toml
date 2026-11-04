@@ -5,12 +5,16 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
+homepage.workspace = true
 description = "LLM model integrations for Rust Agent Development Kit (ADK-Rust) (Gemini, OpenAI, Claude, DeepSeek, etc.)"
 repository = "https://github.com/zavora-ai/adk-rust"
 documentation = "https://docs.rs/adk-model"
 keywords = ["ai", "agent", "adk", "gemini", "llm"]
 categories = ["api-bindings", "asynchronous"]
 readme = "README.md"
+
+[package.metadata.docs.rs]
+features = ["all-providers", "gemini-vertex", "gemini-interactions", "openai-responses-full"]
 
 [dependencies]
 adk-core.workspace = true
@@ -22,7 +26,7 @@ futures.workspace = true
 async-stream.workspace = true
 serde_json.workspace = true
 serde = { workspace = true }
-async-openai = { version = "0.41", optional = true, default-features = false, features = ["rustls", "chat-completion", "responses", "middleware"] }
+async-openai = { version = "0.41", optional = true, default-features = false, features = ["rustls", "chat-completion", "responses", "middleware", "byot"] }
 adk-anthropic = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
 reqwest-openai = { package = "reqwest", version = "0.13", optional = true, default-features = false, features = ["rustls", "stream"] }
@@ -32,6 +36,7 @@ tokio-tungstenite = { workspace = true, optional = true }
 anyhow.workspace = true
 tracing.workspace = true
 chrono.workspace = true
+httpdate = "1"
 base64 = "0.22"
 ollama-rs = { version = "0.3.4", optional = true, default-features = false, features = ["stream"] }
 schemars = { version = "1.0", optional = true }
@@ -41,10 +46,10 @@ aws-smithy-types = { version = "1.4.7", optional = true }
 
 [features]
 default = ["gemini"]
-gemini = ["dep:adk-gemini"]
+gemini = ["dep:adk-gemini", "dep:reqwest"]
 gemini-vertex = ["gemini", "adk-gemini/vertex"]
 gemini-interactions = ["gemini", "adk-gemini/interactions"]
-openai = ["dep:async-openai", "dep:reqwest", "dep:reqwest-openai", "dep:http", "dep:tower"]
+openai = ["dep:async-openai", "dep:reqwest", "dep:reqwest-openai", "dep:http", "dep:tower", "tokio/rt"]
 openai-ws = ["openai", "dep:tokio-tungstenite"]
 openai-conversations = ["openai"]
 # openai-webhooks feature removed: it only forwarded a dep on adk-server, creating the
@@ -54,9 +59,15 @@ openai-conversations = ["openai"]
 openai-responses-full = ["openai-ws", "openai-conversations"]
 xai = ["openai"]
 anthropic = ["dep:adk-anthropic"]
+opencode = ["openai", "anthropic", "gemini"]
 deepseek = ["dep:reqwest"]
-ollama = ["dep:ollama-rs", "dep:schemars"]
+ollama = ["dep:ollama-rs", "dep:schemars", "dep:reqwest"]
 groq = ["dep:reqwest"]
+muse = ["dep:reqwest"]
+# Muse Responses mode (`MuseApi::Responses`) through the shared Open Responses engine.
+muse-responses = ["muse", "openai"]
+# Muse realtime transcription (`MuseRealtimeAsrClient`) over the realtime WebSocket.
+muse-realtime = ["muse", "dep:tokio-tungstenite", "tokio/rt"]
 openrouter = ["dep:reqwest"]
 fireworks = ["openai"]
 together = ["openai"]
@@ -66,15 +77,16 @@ cerebras = ["openai"]
 sambanova = ["openai"]
 bedrock = ["dep:aws-sdk-bedrockruntime", "dep:aws-config", "dep:aws-smithy-types"]
 azure-ai = ["dep:reqwest"]
-all-providers = ["gemini", "openai", "anthropic", "deepseek", "ollama", "groq", "openrouter", "bedrock", "azure-ai"]
+all-providers = ["gemini", "openai", "anthropic", "deepseek", "ollama", "groq", "muse", "openrouter", "opencode", "bedrock", "azure-ai"]
 
 [dev-dependencies]
 proptest = "1.5"
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["rt", "macros", "net", "io-util"] }
 tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
 futures = "0.3"
 wiremock = "0.6"
 dotenvy = "0.15"
+google-cloud-gax = { version = "1.9.0", default-features = false }
 # Loss-reporting yardstick for the provider schema adapters below. Points the
 # other way from `adk-schema` depending on `adk-model` — that would drag a
 # 51-dependency provider crate into a small Beta crate's dev graph, exactly

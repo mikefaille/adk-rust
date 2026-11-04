@@ -1,13 +1,22 @@
-//! # adk-macros
+//! # adk-rust-macros
 //!
-//! Proc macros for ADK-Rust that eliminate tool registration boilerplate.
+//! Procedural macros for ADK-Rust.
+//!
+//! | Macro | Generates |
+//! |-------|-----------|
+//! | [`macro@tool`] | A zero-sized struct implementing `adk_core::Tool` from an async function |
+//! | [`macro@entrypoint`] | An `adk-graph` functional workflow agent struct |
+//! | [`macro@task`] | A checkpointed, optionally retried `adk-graph` task wrapper |
 //!
 //! ## `#[tool]`
 //!
-//! Turns an async function into a fully-wired `adk_tool::Tool` implementation:
+//! Turns an async function into a `Tool` implementation. The generated code refers to
+//! `adk_tool`, `schemars`, and `serde_json`, so the calling crate depends on all three;
+//! `adk-tool` re-exports the macro as `adk_tool::tool`.
 //!
-//! ```rust,ignore
-//! use adk_macros::tool;
+//! ```rust
+//! use adk_rust_macros::tool;
+//! use adk_tool::{AdkError, Tool};
 //! use schemars::JsonSchema;
 //! use serde::Deserialize;
 //!
@@ -18,18 +27,22 @@
 //! }
 //!
 //! /// Get the current weather for a city.
-//! #[tool]
-//! async fn get_weather(args: WeatherArgs) -> Result<serde_json::Value, adk_tool::AdkError> {
+//! #[tool(read_only)]
+//! async fn get_weather(args: WeatherArgs) -> Result<serde_json::Value, AdkError> {
 //!     Ok(serde_json::json!({ "temp": 72, "city": args.city }))
 //! }
 //!
-//! // This generates a struct `GetWeather` that implements `adk_tool::Tool`.
-//! // Use it like: Arc::new(GetWeather)
+//! // Generates `pub struct GetWeather` implementing `adk_tool::Tool`.
+//! // Register it with `agent_builder.tool(Arc::new(GetWeather))`.
+//! assert_eq!(GetWeather.name(), "get_weather");
+//! assert!(GetWeather.is_read_only());
 //! ```
 //!
 //! The macro:
 //! - Uses the function's doc comment as the tool description
 //! - Derives the JSON schema from the argument type via `schemars::schema_for!`
+//! - Checks each call's arguments against that schema, rejecting keys it does not name,
+//!   before the function runs
 //! - Names the tool after the function (snake_case)
 //! - Generates a zero-sized struct (PascalCase) implementing `Tool`
 
@@ -51,9 +64,39 @@ use syn::{FnArg, ItemFn, Meta, Type, parse_macro_input};
 ///
 /// Optional attributes can be passed to configure tool metadata:
 ///
-/// - `read_only` — marks the tool as having no side effects (`is_read_only() → true`)
+/// - `read_only` — marks the tool as having no side effects (`is_read_only() → true`,
+///   `effect() → ToolEffect::ReadOnly`)
+/// - `idempotent` — marks the tool as safe to repeat (`effect() → ToolEffect::Idempotent`),
+///   so a retry budget may retry it after a retryable error. Ignored alongside `read_only`.
 /// - `concurrency_safe` — marks the tool as safe for concurrent execution (`is_concurrency_safe() → true`)
 /// - `long_running` — marks the tool as long-running (`is_long_running() → true`)
+/// - `lenient_args` — turns off argument validation; see below
+///
+/// # Argument validation
+///
+/// Before the function runs, the call's arguments are checked against the argument type's
+/// schema, with `additionalProperties: false` set on every object that declares all of its
+/// fields ([`close_object_schemas`]). A key the schema does not name, a value outside a
+/// `#[schemars(range(...))]`, `length(...)` or `pattern(...)` bound, or a missing required field
+/// fails the call with an `ErrorCategory::InvalidInput` error with code
+/// `TOOL_INVALID_ARGUMENTS_CODE`, which lists each violation by JSON pointer. An `LlmAgent`
+/// shows that message to the model so it can correct the call; the function does not run.
+/// `parameters_schema()` is not closed: Gemini's function declarations reject
+/// `additionalProperties`, and not every path to a provider runs a schema adapter.
+///
+/// A schema that differs from what the type deserializes from also rejects calls serde would
+/// accept: a `#[serde(alias = "...")]` key, or a field with a custom `deserialize_with` whose
+/// schema is narrower than its input. Keep such keys open with
+/// `#[schemars(extend("additionalProperties" = true))]` on the struct, or opt the tool out with
+/// `#[tool(lenient_args)]`, which deserializes with serde alone: unknown keys are dropped and
+/// schema bounds are advisory.
+///
+/// In both modes an integral float at an integer field, such as `3.0` for a `u32`, is read as
+/// the integer ([`coerce_integral_floats`]); some models write every number with a decimal
+/// point.
+///
+/// [`close_object_schemas`]: https://docs.rs/adk-tool/latest/adk_tool/fn.close_object_schemas.html
+/// [`coerce_integral_floats`]: https://docs.rs/adk-tool/latest/adk_tool/fn.coerce_integral_floats.html
 ///
 /// # Examples
 ///
@@ -70,6 +113,18 @@ use syn::{FnArg, ItemFn, Meta, Type, parse_macro_input};
 ///     // ...
 /// }
 ///
+/// /// Set a ticket's status; setting the same status twice changes nothing.
+/// #[tool(idempotent)]
+/// async fn set_ticket_status(args: StatusArgs) -> Result<serde_json::Value, adk_tool::AdkError> {
+///     // ...
+/// }
+///
+/// /// Accept legacy argument names that only serde knows about.
+/// #[tool(lenient_args)]
+/// async fn legacy_lookup(args: LegacyArgs) -> Result<serde_json::Value, adk_tool::AdkError> {
+///     // ...
+/// }
+///
 /// // Generated: pub struct SearchDocs; implements Tool
 /// // Use: agent_builder.tool(Arc::new(SearchDocs))
 /// ```
@@ -77,16 +132,21 @@ use syn::{FnArg, ItemFn, Meta, Type, parse_macro_input};
 pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
     let input_fn = parse_macro_input!(item as ItemFn);
 
-    // Parse optional attributes: #[tool(read_only, concurrency_safe, long_running)]
+    // Parse optional attributes:
+    // #[tool(read_only, idempotent, concurrency_safe, long_running, lenient_args)]
     let mut is_read_only = false;
+    let mut is_idempotent = false;
     let mut is_concurrency_safe = false;
     let mut is_long_running = false;
+    let mut is_lenient_args = false;
 
     if !attr.is_empty() {
         let meta = parse_macro_input!(attr as ToolAttrs);
         is_read_only = meta.read_only;
+        is_idempotent = meta.idempotent;
         is_concurrency_safe = meta.concurrency_safe;
         is_long_running = meta.long_running;
+        is_lenient_args = meta.lenient_args;
     }
 
     let fn_name = &input_fn.sig.ident;
@@ -134,104 +194,95 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Extract the single argument type
     let args_type = extract_args_type(&input_fn);
 
-    // Check if we have a typed args parameter or no params
-    let (schema_gen, deserialize_call) = if let Some(args_ty) = &args_type {
-        (
-            quote! {
-                {
-                    let mut schema = serde_json::to_value(
-                        schemars::schema_for!(#args_ty)
-                    ).unwrap_or_default();
-                    // Strip fields that Gemini/LLM APIs don't accept
-                    if let Some(obj) = schema.as_object_mut() {
-                        obj.remove("$schema");
-                        obj.remove("title");
-                    }
-                    // Simplify nullable types: {"type": ["string", "null"]} → {"type": "string"}
-                    fn simplify_nullable(v: &mut serde_json::Value) {
-                        match v {
-                            serde_json::Value::Object(map) => {
-                                if let Some(serde_json::Value::Array(types)) = map.get("type") {
-                                    let non_null: Vec<_> = types.iter()
-                                        .filter(|t| t.as_str() != Some("null"))
-                                        .cloned()
-                                        .collect();
-                                    if non_null.len() == 1 {
-                                        map.insert("type".to_string(), non_null[0].clone());
-                                    }
-                                }
-                                // Remove anyOf wrappers for simple nullable types
-                                if let Some(serde_json::Value::Array(any_of)) = map.remove("anyOf") {
-                                    for variant in &any_of {
-                                        if let Some(obj) = variant.as_object() {
-                                            if obj.get("type").and_then(|t| t.as_str()) != Some("null") {
-                                                for (k, val) in obj {
-                                                    map.insert(k.clone(), val.clone());
-                                                }
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                                for val in map.values_mut() {
-                                    simplify_nullable(val);
-                                }
-                            }
-                            serde_json::Value::Array(arr) => {
-                                for item in arr {
-                                    simplify_nullable(item);
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                    simplify_nullable(&mut schema);
-                    Some(schema)
-                }
-            },
-            quote! {
-                let typed_args: #args_ty = serde_json::from_value(args)
-                    .map_err(|e| adk_tool::AdkError::tool(
-                        format!("invalid arguments for '{}': {e}", #tool_name_str)
-                    ))?;
-                #fn_name(typed_args).await
-            },
-        )
-    } else {
-        (
-            quote! { None },
-            quote! {
-                let _ = args;
-                #fn_name().await
-            },
-        )
+    // The model is shown the generated schema as before; arguments are checked against the
+    // same schema with its objects closed. The closure stays out of `parameters_schema()`
+    // because some schemas reach providers without an adapter (a realtime session posts them
+    // as-is), and Gemini rejects `additionalProperties`. Validation keeps nullable types, so
+    // `null` stays accepted for an optional field the model-facing schema shows as non-null.
+    let schema_gen = match &args_type {
+        Some(args_ty) => quote! {
+            Some(adk_tool::model_facing_schema(
+                serde_json::to_value(schemars::schema_for!(#args_ty)).unwrap_or_default(),
+            ))
+        },
+        None => quote! { None },
     };
+    let validate_args = match &args_type {
+        Some(args_ty) if !is_lenient_args => quote! {
+            static ARGUMENTS: std::sync::LazyLock<
+                std::result::Result<adk_tool::ToolArgumentValidator, String>,
+            > = std::sync::LazyLock::new(|| {
+                let mut schema = serde_json::to_value(schemars::schema_for!(#args_ty))
+                    .unwrap_or_default();
+                adk_tool::close_object_schemas(&mut schema);
+                adk_tool::ToolArgumentValidator::new(&schema).map_err(|error| error.message)
+            });
+            match &*ARGUMENTS {
+                Ok(validator) => validator.validate(#tool_name_str, &args)?,
+                Err(message) => {
+                    return Err(adk_tool::AdkError::new(
+                        adk_tool::ErrorComponent::Tool,
+                        adk_tool::ErrorCategory::Internal,
+                        adk_tool::TOOL_INVALID_PARAMETERS_SCHEMA_CODE,
+                        message.clone(),
+                    ));
+                }
+            }
+        },
+        _ => quote! {},
+    };
+    // Applies with or without `lenient_args`: `3.0` for an integer field is a valid integer
+    // to the schema, but serde rejects it.
+    let coerce_args = args_type.as_ref().map(|args_ty| {
+        quote! {
+            static PARAMETERS: std::sync::LazyLock<serde_json::Value> =
+                std::sync::LazyLock::new(|| {
+                    serde_json::to_value(schemars::schema_for!(#args_ty)).unwrap_or_default()
+                });
+            let mut args = args;
+            adk_tool::coerce_integral_floats(&PARAMETERS, &mut args);
+        }
+    });
+    let deserialize_args = args_type.as_ref().map(|args_ty| {
+        quote! {
+            let typed_args: #args_ty = serde_json::from_value(args)
+                .map_err(|e| adk_tool::AdkError::new(
+                    adk_tool::ErrorComponent::Tool,
+                    adk_tool::ErrorCategory::InvalidInput,
+                    adk_tool::TOOL_INVALID_ARGUMENTS_CODE,
+                    format!("invalid arguments for '{}': {e}", #tool_name_str),
+                ))?;
+        }
+    });
 
     // Check if the function signature includes ctx: Arc<dyn ToolContext>
     let has_ctx = has_tool_context_param(&input_fn);
-    let execute_body = if has_ctx {
-        if let Some(args_ty) = &args_type {
-            quote! {
-                let typed_args: #args_ty = serde_json::from_value(args)
-                    .map_err(|e| adk_tool::AdkError::tool(
-                        format!("invalid arguments for '{}': {e}", #tool_name_str)
-                    ))?;
-                #fn_name(ctx, typed_args).await
-            }
-        } else {
-            quote! {
-                let _ = args;
-                #fn_name(ctx).await
-            }
-        }
-    } else {
-        deserialize_call
+    let call = match (has_ctx, args_type.is_some()) {
+        (true, true) => quote! { #fn_name(ctx, typed_args).await },
+        (true, false) => quote! { let _ = args; #fn_name(ctx).await },
+        (false, true) => quote! { #fn_name(typed_args).await },
+        (false, false) => quote! { let _ = args; #fn_name().await },
+    };
+    let execute_body = quote! {
+        #coerce_args
+        #validate_args
+        #deserialize_args
+        #call
     };
 
     // Generate optional trait method overrides
     let read_only_override = if is_read_only {
         quote! {
             fn is_read_only(&self) -> bool { true }
+        }
+    } else {
+        quote! {}
+    };
+
+    // `read_only` already yields `ToolEffect::ReadOnly` through the trait default.
+    let effect_override = if is_idempotent && !is_read_only {
+        quote! {
+            fn effect(&self) -> adk_tool::ToolEffect { adk_tool::ToolEffect::Idempotent }
         }
     } else {
         quote! {}
@@ -275,6 +326,7 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
             }
 
             #read_only_override
+            #effect_override
             #concurrency_safe_override
             #long_running_override
 
@@ -321,17 +373,25 @@ fn has_tool_context_param(func: &ItemFn) -> bool {
     })
 }
 
-/// Parsed attributes from `#[tool(read_only, concurrency_safe, long_running)]`.
+/// Parsed attributes from
+/// `#[tool(read_only, idempotent, concurrency_safe, long_running, lenient_args)]`.
 struct ToolAttrs {
     read_only: bool,
+    idempotent: bool,
     concurrency_safe: bool,
     long_running: bool,
+    lenient_args: bool,
 }
 
 impl syn::parse::Parse for ToolAttrs {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
-        let mut attrs =
-            ToolAttrs { read_only: false, concurrency_safe: false, long_running: false };
+        let mut attrs = ToolAttrs {
+            read_only: false,
+            idempotent: false,
+            concurrency_safe: false,
+            long_running: false,
+            lenient_args: false,
+        };
 
         let punctuated =
             syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated(input)?;
@@ -340,14 +400,18 @@ impl syn::parse::Parse for ToolAttrs {
             if let Meta::Path(path) = &meta {
                 if path.is_ident("read_only") {
                     attrs.read_only = true;
+                } else if path.is_ident("idempotent") {
+                    attrs.idempotent = true;
                 } else if path.is_ident("concurrency_safe") {
                     attrs.concurrency_safe = true;
                 } else if path.is_ident("long_running") {
                     attrs.long_running = true;
+                } else if path.is_ident("lenient_args") {
+                    attrs.lenient_args = true;
                 } else {
                     return Err(syn::Error::new_spanned(
                         path,
-                        "unknown tool attribute; expected `read_only`, `concurrency_safe`, or `long_running`",
+                        "unknown tool attribute; expected `read_only`, `idempotent`, `concurrency_safe`, `long_running`, or `lenient_args`",
                     ));
                 }
             } else {
@@ -468,44 +532,52 @@ pub fn entrypoint(_attr: TokenStream, item: TokenStream) -> TokenStream {
             /// Invoke the workflow with an initial state and execution configuration.
             ///
             /// This method:
-            /// 1. Creates or restores a `TaskContext` from the last checkpoint
-            /// 2. Validates initial state against the configured schema
-            /// 3. Creates a checkpoint before execution
-            /// 4. Calls the annotated workflow function
-            /// 5. Persists the final checkpoint
-            /// 6. Returns the final workflow state
+            /// 1. Restores state and the execution log from the checkpoint
+            ///    `execution_config.resume_from` names, or starts from
+            ///    `initial_state` when it is unset
+            /// 2. Hands `execution_config.resume_values` to the `TaskContext`,
+            ///    so an interrupt whose key is present returns its value
+            /// 3. Validates state against the configured schema
+            /// 4. Creates a checkpoint before execution, carrying the execution log
+            /// 5. Calls the annotated workflow function
+            /// 6. Persists the final checkpoint
+            /// 7. Returns the final workflow state
+            ///
+            /// Every checkpoint the run writes carries the execution log, so a
+            /// run resumed from any of them replays the tasks that completed
+            /// before it, however many times the workflow is resumed.
+            ///
+            /// # Errors
+            ///
+            /// Returns `GraphError::CheckpointError` when `resume_from` names a
+            /// checkpoint this thread does not have, `GraphError::Cancelled` when
+            /// `execution_config.cancellation_token` is cancelled, and the
+            /// workflow's own error when it fails or suspends at an interrupt.
             pub async fn invoke(
                 &self,
                 initial_state: adk_graph::state::State,
                 execution_config: adk_graph::node::ExecutionConfig,
             ) -> adk_graph::error::Result<adk_graph::state::State> {
-                use adk_graph::checkpoint::Checkpointer;
                 use adk_graph::functional::ExecutionLog;
                 use adk_graph::state::Checkpoint;
                 use adk_graph::stream::StreamEvent;
 
                 let thread_id = execution_config.thread_id.clone();
 
-                // Try to restore from checkpoint if resuming
-                let (state, execution_log) = if execution_config.resume_from.is_some() {
-                    match self.checkpointer.load(&thread_id).await? {
-                        Some(checkpoint) => {
-                            let log: ExecutionLog = checkpoint
-                                .metadata
-                                .get("execution_log")
-                                .and_then(|v| serde_json::from_value(v.clone()).ok())
-                                .unwrap_or_default();
-                            (checkpoint.state, log)
-                        }
-                        None => (initial_state, ExecutionLog::new()),
-                    }
-                } else {
-                    (initial_state, ExecutionLog::new())
-                };
+                let (state, execution_log) = adk_graph::functional::__private::load_resume_point(
+                    self.checkpointer.as_ref(),
+                    &execution_config,
+                )
+                .await?
+                .unwrap_or_else(|| (initial_state, ExecutionLog::new()));
 
                 // Create broadcast channel for stream events
                 let (event_tx, _) = tokio::sync::broadcast::channel::<StreamEvent>(256);
-                let cancel_token = tokio_util::sync::CancellationToken::new();
+                // The caller's token, so the caller can cancel the run.
+                let cancel_token =
+                    execution_config.cancellation_token.clone().unwrap_or_default();
+                let pre_step = execution_log.current_step();
+                let pre_log = serde_json::to_value(&execution_log)?;
                 let execution_log = std::sync::Arc::new(tokio::sync::RwLock::new(execution_log));
 
                 // Create TaskContext
@@ -515,29 +587,39 @@ pub fn entrypoint(_attr: TokenStream, item: TokenStream) -> TokenStream {
                     self.checkpointer.clone(),
                     event_tx.clone(),
                     execution_log.clone(),
-                    cancel_token,
+                    cancel_token.clone(),
                     None,
-                );
+                )
+                .with_resume_values(execution_config.resume_values);
 
                 // Validate initial state against schema (if configured)
                 ctx.validate_state().map_err(|e| adk_graph::error::GraphError::Other(e.to_string()))?;
 
-                // Create pre-execution checkpoint
+                // The pre-execution checkpoint becomes the thread's latest. Without
+                // the log, a crash before the next task completes would resume
+                // with an empty log and run every completed task again.
                 let pre_checkpoint = Checkpoint::new(
                     &thread_id,
                     ctx.state().clone(),
-                    0,
+                    pre_step,
                     vec![],
                 )
-                .with_metadata("phase", serde_json::Value::String("pre_execution".to_string()));
-                self.checkpointer.save(&pre_checkpoint).await?;
+                .with_metadata("phase", serde_json::Value::String("pre_execution".to_string()))
+                .with_metadata("execution_log", pre_log);
+                ctx.save_checkpoint(pre_checkpoint).await?;
 
                 // Emit workflow start event
                 let _ = event_tx.send(StreamEvent::node_start(#fn_name_str, 0));
 
-                // Call the workflow function
+                // Call the workflow function. A cancellation abandons it where it
+                // is: the task running then is not recorded, so it runs again when
+                // the thread resumes from its latest checkpoint.
                 let start = std::time::Instant::now();
-                let result = #fn_name(&mut ctx).await;
+                let result = adk_graph::functional::__private::until_cancelled(
+                    &cancel_token,
+                    #fn_name(&mut ctx),
+                )
+                .await;
 
                 let duration = start.elapsed().as_millis() as u64;
 
@@ -557,12 +639,18 @@ pub fn entrypoint(_attr: TokenStream, item: TokenStream) -> TokenStream {
                             serde_json::to_value(&*execution_log.read().await)
                                 .unwrap_or(serde_json::Value::Null),
                         );
-                        self.checkpointer.save(&final_checkpoint).await?;
+                        ctx.save_checkpoint(final_checkpoint).await?;
 
                         // Emit workflow end event
                         let _ = event_tx.send(StreamEvent::node_end(#fn_name_str, step, duration));
 
                         Ok(ctx.state().clone())
+                    }
+                    // A cancelled run writes nothing more: the thread's latest
+                    // checkpoint is the one the last completed task wrote.
+                    Err(adk_graph::error::GraphError::Cancelled) => {
+                        let _ = event_tx.send(StreamEvent::error("workflow cancelled", Some(#fn_name_str)));
+                        Err(adk_graph::error::GraphError::Cancelled)
                     }
                     Err(e) => {
                         // Persist failure checkpoint
@@ -580,7 +668,7 @@ pub fn entrypoint(_attr: TokenStream, item: TokenStream) -> TokenStream {
                             serde_json::to_value(&*execution_log.read().await)
                                 .unwrap_or(serde_json::Value::Null),
                         );
-                        let _ = self.checkpointer.save(&fail_checkpoint).await;
+                        let _ = ctx.save_checkpoint(fail_checkpoint).await;
 
                         // Emit error event
                         let _ = event_tx.send(StreamEvent::error(&e.to_string(), Some(#fn_name_str)));
@@ -609,13 +697,26 @@ pub fn entrypoint(_attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// - The function **must** be `async`
 /// - The function **must** accept `&mut TaskContext` as its first argument
+/// - Every parameter **must** be a plain identifier (`mut` is allowed)
+///
+/// # Call identity
+///
+/// Each call is recorded in the `ExecutionLog` under its own key,
+/// `{task}#{ordinal}:{arg_hash}`: the ordinal counts this task's calls within
+/// the run, and the hash covers every argument that implements `Serialize`
+/// (`:{arg_hash}` is omitted when none does). A task called in a loop therefore
+/// records one result per call, and a resumed run replays each call's own
+/// result. A replayed call whose arguments differ from the recorded call at the
+/// same position runs again. See `adk_graph::functional::task_call_id`.
 ///
 /// # Attributes
 ///
 /// - `retry(max_attempts = N, backoff = "Xs")` — retry on failure, sleeping
 ///   `backoff × attempt` between tries, so the delay grows linearly: `Xs`, `2Xs`,
 ///   `3Xs`. For exponential growth, a cap, or jitter, attach an
-///   `adk_graph::retry::RetryPolicy` to a graph node instead
+///   `adk_graph::retry::RetryPolicy` to a graph node instead. A suspension at an
+///   interrupt and a cancellation are not failures: they end the task at once,
+///   without a retry, and are not recorded as failures
 /// - `rerun_on_resume` — always re-execute on workflow resume, skip cached results
 /// - `rerun_on_resume = true` / `rerun_on_resume = false` — explicit boolean form
 ///
@@ -693,20 +794,72 @@ pub fn task(attr: TokenStream, item: TokenStream) -> TokenStream {
     let params = &input_fn.sig.inputs;
     let return_type = &input_fn.sig.output;
 
-    // Collect the argument names for forwarding the call (skip `ctx`)
-    let forward_args: Vec<_> = input_fn
-        .sig
-        .inputs
-        .iter()
-        .skip(1) // Skip ctx
-        .filter_map(|arg| if let FnArg::Typed(pat_type) = arg { Some(&pat_type.pat) } else { None })
-        .collect();
+    // The wrapper refers to every parameter by name, so each must be a plain
+    // identifier; `mut` and `ref` are allowed since the name is what matters.
+    let mut param_idents = Vec::new();
+    for arg in &input_fn.sig.inputs {
+        match arg {
+            FnArg::Typed(pat_type) => match pat_type.pat.as_ref() {
+                syn::Pat::Ident(pat_ident) => param_idents.push(pat_ident.ident.clone()),
+                other => {
+                    return syn::Error::new_spanned(
+                        other,
+                        "#[task] parameters must be plain identifiers, such as `item: Item`, so \
+                         the generated wrapper can forward them",
+                    )
+                    .to_compile_error()
+                    .into();
+                }
+            },
+            FnArg::Receiver(receiver) => {
+                return syn::Error::new_spanned(
+                    receiver,
+                    "#[task] functions must be free functions, not methods",
+                )
+                .to_compile_error()
+                .into();
+            }
+        }
+    }
+    let (ctx_ident, forward_args) = param_idents.split_first().expect("validated above");
 
     // Build the call expression
     let call_expr = if forward_args.is_empty() {
-        quote! { #fn_name(ctx).await }
+        quote! { #fn_name(#ctx_ident).await }
     } else {
-        quote! { #fn_name(ctx, #(#forward_args),*).await }
+        quote! { #fn_name(#ctx_ident, #(#forward_args),*).await }
+    };
+
+    // The execution-log key: the task's call ordinal in this run plus a hash of
+    // every argument that implements `Serialize`; see `adk_graph::functional::task_call_id`.
+    let task_id_expr = if forward_args.is_empty() {
+        quote! { #ctx_ident.next_task_call_id(#fn_name_str, &[]) }
+    } else {
+        quote! {
+            {
+                #[allow(unused_imports)]
+                use adk_graph::functional::__private::{
+                    OpaqueTaskArg as _, SerializableTaskArg as _,
+                };
+                let __adk_task_args = [
+                    #((&adk_graph::functional::__private::TaskArg(&#forward_args)).task_arg_value()),*
+                ];
+                #ctx_ident.next_task_call_id(#fn_name_str, &__adk_task_args)
+            }
+        }
+    };
+
+    // A suspension or a cancellation stops the task without failing it: it is not
+    // retried, and the execution log does not record it as a failure, so the
+    // resumed run calls the task again.
+    let halts = quote! {
+        {
+            #[allow(unused_imports)]
+            use adk_graph::functional::__private::{
+                HaltingTaskError as _, OpaqueTaskError as _,
+            };
+            (&adk_graph::functional::__private::TaskError(&e)).halts_task()
+        }
     };
 
     // Generate retry logic or single-attempt logic
@@ -714,23 +867,24 @@ pub fn task(attr: TokenStream, item: TokenStream) -> TokenStream {
         let max_attempts = retry_config.max_attempts;
         let backoff_secs = retry_config.backoff_secs;
         quote! {
-            let mut attempts: u32 = 0;
-            let max_attempts: u32 = #max_attempts;
-            let backoff = std::time::Duration::from_secs(#backoff_secs);
+            let mut __adk_attempts: u32 = 0;
+            let __adk_max_attempts: u32 = #max_attempts;
+            let __adk_backoff = std::time::Duration::from_secs(#backoff_secs);
 
-            let result = loop {
-                attempts += 1;
+            let __adk_result = loop {
+                __adk_attempts += 1;
                 match #call_expr {
                     Ok(value) => break Ok(value),
-                    Err(e) if attempts < max_attempts => {
-                        tokio::time::sleep(backoff * attempts).await;
+                    Err(e) if #halts => break Err(e),
+                    Err(_) if __adk_attempts < __adk_max_attempts => {
+                        tokio::time::sleep(__adk_backoff * __adk_attempts).await;
                         continue;
                     }
                     Err(e) => {
-                        ctx.record_failure(task_id, &e.to_string()).await?;
-                        ctx.emit(adk_graph::stream::StreamEvent::error(
+                        #ctx_ident.record_failure(__adk_task_id, &e.to_string()).await?;
+                        #ctx_ident.emit(adk_graph::stream::StreamEvent::error(
                             &e.to_string(),
-                            Some(task_id),
+                            Some(__adk_task_id),
                         ));
                         break Err(e);
                     }
@@ -739,13 +893,14 @@ pub fn task(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     } else {
         quote! {
-            let result = match #call_expr {
+            let __adk_result = match #call_expr {
                 Ok(value) => Ok(value),
+                Err(e) if #halts => Err(e),
                 Err(e) => {
-                    ctx.record_failure(task_id, &e.to_string()).await?;
-                    ctx.emit(adk_graph::stream::StreamEvent::error(
+                    #ctx_ident.record_failure(__adk_task_id, &e.to_string()).await?;
+                    #ctx_ident.emit(adk_graph::stream::StreamEvent::error(
                         &e.to_string(),
-                        Some(task_id),
+                        Some(__adk_task_id),
                     ));
                     Err(e)
                 }
@@ -761,7 +916,7 @@ pub fn task(attr: TokenStream, item: TokenStream) -> TokenStream {
         // Default: check ExecutionLog for cached results (resume-skip path)
         quote! {
             // Check if already completed (resume path)
-            if let Some(cached_result) = ctx.get_cached_result(task_id).await {
+            if let Some(cached_result) = #ctx_ident.get_cached_result(__adk_task_id).await {
                 return Ok(cached_result);
             }
         }
@@ -779,28 +934,32 @@ pub fn task(attr: TokenStream, item: TokenStream) -> TokenStream {
         /// - Retry logic (if configured)
         /// - `record_completion()` on success
         /// - `record_failure()` after all retries exhausted
+        ///
+        /// Each call is logged under its own key, built from the call's ordinal
+        /// and its arguments; see `adk_graph::functional::task_call_id`.
         #fn_vis async fn #wrapper_name(#params) #return_type {
-            let task_id = #fn_name_str;
+            let __adk_task_key: String = #task_id_expr;
+            let __adk_task_id: &str = &__adk_task_key;
 
             #cache_check
 
             // Emit task start event
-            let current_step = ctx.current_step().await;
-            ctx.emit(adk_graph::stream::StreamEvent::node_start(task_id, current_step));
+            let __adk_step = #ctx_ident.current_step().await;
+            #ctx_ident.emit(adk_graph::stream::StreamEvent::node_start(__adk_task_id, __adk_step));
 
-            let start = std::time::Instant::now();
+            let __adk_start = std::time::Instant::now();
 
             #execution_body
 
-            if let Ok(ref value) = result {
+            if let Ok(ref value) = __adk_result {
                 // Record completion and checkpoint
-                ctx.record_completion(task_id, value).await?;
-                let duration = start.elapsed().as_millis() as u64;
-                let step = ctx.current_step().await;
-                ctx.emit(adk_graph::stream::StreamEvent::node_end(task_id, step, duration));
+                #ctx_ident.record_completion(__adk_task_id, value).await?;
+                let duration = __adk_start.elapsed().as_millis() as u64;
+                let step = #ctx_ident.current_step().await;
+                #ctx_ident.emit(adk_graph::stream::StreamEvent::node_end(__adk_task_id, step, duration));
             }
 
-            result
+            __adk_result
         }
     };
 

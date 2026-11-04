@@ -43,6 +43,33 @@ pub enum OpenAIReasoningEffort {
     Max,
 }
 
+/// The harness effort levels (spec 3.1 §7.23) as `reasoning_effort` values.
+///
+/// # Example
+///
+/// ```rust
+/// use adk_model::openai::ReasoningEffort;
+///
+/// assert_eq!(ReasoningEffort::from(adk_core::Effort::Low), ReasoningEffort::Low);
+/// ```
+impl From<adk_core::Effort> for ReasoningEffort {
+    fn from(effort: adk_core::Effort) -> Self {
+        match effort {
+            adk_core::Effort::Low => Self::Low,
+            adk_core::Effort::Medium => Self::Medium,
+            adk_core::Effort::High => Self::High,
+        }
+    }
+}
+
+/// The harness effort levels (spec 3.1 §7.23); `None`, `Minimal`, `XHigh` and `Max` stay
+/// reachable only through the client's own configuration.
+impl From<adk_core::Effort> for OpenAIReasoningEffort {
+    fn from(effort: adk_core::Effort) -> Self {
+        ReasoningEffort::from(effort).into()
+    }
+}
+
 impl From<ReasoningEffort> for OpenAIReasoningEffort {
     fn from(value: ReasoningEffort) -> Self {
         match value {
@@ -53,10 +80,55 @@ impl From<ReasoningEffort> for OpenAIReasoningEffort {
     }
 }
 
+/// Whether `model` is a reasoning model that takes `reasoning_effort` (spec 3.1 §7.23): the
+/// o-series, GPT-OSS, and GPT-5 and later except their `-chat` variants.
+pub(crate) fn takes_reasoning_effort(model: &str) -> bool {
+    let model = model.strip_prefix("ft:").unwrap_or(model);
+    let model = model.rsplit('/').next().unwrap_or(model);
+    if model.starts_with("gpt-oss") {
+        return true;
+    }
+    if let Some(rest) = model.strip_prefix('o') {
+        return rest.starts_with(|c: char| c.is_ascii_digit());
+    }
+    let Some(version) = model.strip_prefix("gpt-") else {
+        return false;
+    };
+    let major_end = version.find(|c: char| !c.is_ascii_digit()).unwrap_or(version.len());
+    version[..major_end].parse::<u32>().is_ok_and(|major| major >= 5) && !model.contains("-chat")
+}
+
+/// The reasoning effort of one request (spec 3.1 §7.23, §10 C4): the request's `effort` wins
+/// over the client's `configured` level for this call when the model takes one — a reasoning
+/// model, or any model whose client was configured with an effort — and is logged and
+/// ignored otherwise.
+pub(crate) fn request_reasoning_effort(
+    model: &str,
+    configured: Option<OpenAIReasoningEffort>,
+    request: &adk_core::LlmRequest,
+) -> Option<OpenAIReasoningEffort> {
+    let Some(level) = request.config.as_ref().and_then(|config| config.effort) else {
+        return configured;
+    };
+    if configured.is_some() || takes_reasoning_effort(model) {
+        return Some(level.into());
+    }
+    tracing::debug!(
+        model.name = model,
+        effort = %level,
+        "model takes no reasoning effort; the request's effort is ignored"
+    );
+    configured
+}
+
 /// Configuration for OpenAI API.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// The API key is redacted from `Debug` output and omitted when serializing.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OpenAIConfig {
-    /// OpenAI API key.
+    /// OpenAI API key. Never serialized; deserializing a config without it
+    /// yields an empty key.
+    #[serde(skip_serializing, default)]
     pub api_key: String,
     /// Model name (e.g., "gpt-5.6-terra", "gpt-5.6-sol").
     pub model: String,
@@ -75,6 +147,19 @@ pub struct OpenAIConfig {
     /// Only applicable to reasoning-capable models.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffort>,
+}
+
+impl std::fmt::Debug for OpenAIConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenAIConfig")
+            .field("api_key", &"[REDACTED]")
+            .field("model", &self.model)
+            .field("organization_id", &self.organization_id)
+            .field("project_id", &self.project_id)
+            .field("base_url", &self.base_url)
+            .field("reasoning_effort", &self.reasoning_effort)
+            .finish()
+    }
 }
 
 impl Default for OpenAIConfig {
@@ -130,9 +215,13 @@ impl OpenAIConfig {
 }
 
 /// Configuration for Azure OpenAI Service.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// The API key is redacted from `Debug` output and omitted when serializing.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct AzureConfig {
-    /// Azure OpenAI API key.
+    /// Azure OpenAI API key. Never serialized; deserializing a config without
+    /// it yields an empty key.
+    #[serde(skip_serializing, default)]
     pub api_key: String,
     /// Azure resource endpoint (e.g., `https://my-resource.openai.azure.com`).
     pub api_base: String,
@@ -140,6 +229,17 @@ pub struct AzureConfig {
     pub api_version: String,
     /// Deployment name/ID.
     pub deployment_id: String,
+}
+
+impl std::fmt::Debug for AzureConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AzureConfig")
+            .field("api_key", &"[REDACTED]")
+            .field("api_base", &self.api_base)
+            .field("api_version", &self.api_version)
+            .field("deployment_id", &self.deployment_id)
+            .finish()
+    }
 }
 
 impl AzureConfig {
@@ -157,19 +257,6 @@ impl AzureConfig {
             deployment_id: deployment_id.into(),
         }
     }
-}
-
-/// Transport mode for the Responses API.
-///
-/// Controls whether the client uses standard HTTP/SSE or a persistent
-/// WebSocket connection for lower-latency agentic workflows.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ResponsesTransport {
-    /// Standard HTTP/SSE (default).
-    #[default]
-    Http,
-    /// Persistent WebSocket connection (requires `openai-ws` feature).
-    WebSocket,
 }
 
 /// Service tier for processing priority.
@@ -225,9 +312,13 @@ pub enum ReasoningSummary {
 ///     .with_reasoning_effort(ReasoningEffort::High)
 ///     .with_reasoning_summary(ReasoningSummary::Concise);
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// The API key is redacted from `Debug` output and omitted when serializing.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OpenAIResponsesConfig {
-    /// OpenAI API key.
+    /// OpenAI API key. Never serialized; deserializing a config without it
+    /// yields an empty key.
+    #[serde(skip_serializing, default)]
     pub api_key: String,
     /// Model name (e.g., "o3", "o4-mini", "gpt-4.1").
     pub model: String,
@@ -246,9 +337,6 @@ pub struct OpenAIResponsesConfig {
     /// Reasoning summary mode for o-series models.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_summary: Option<ReasoningSummary>,
-    /// Transport mode (HTTP or WebSocket).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub transport: Option<ResponsesTransport>,
     /// Default service tier for processing priority.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<ServiceTier>,
@@ -263,6 +351,23 @@ pub struct OpenAIResponsesConfig {
     pub open_responses_mode: Option<bool>,
 }
 
+impl std::fmt::Debug for OpenAIResponsesConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenAIResponsesConfig")
+            .field("api_key", &"[REDACTED]")
+            .field("model", &self.model)
+            .field("organization_id", &self.organization_id)
+            .field("project_id", &self.project_id)
+            .field("base_url", &self.base_url)
+            .field("reasoning_effort", &self.reasoning_effort)
+            .field("reasoning_summary", &self.reasoning_summary)
+            .field("service_tier", &self.service_tier)
+            .field("prompt_cache_retention", &self.prompt_cache_retention)
+            .field("open_responses_mode", &self.open_responses_mode)
+            .finish()
+    }
+}
+
 impl OpenAIResponsesConfig {
     /// Create a new Responses API config with the given API key and model.
     pub fn new(api_key: impl Into<String>, model: impl Into<String>) -> Self {
@@ -274,7 +379,6 @@ impl OpenAIResponsesConfig {
             base_url: None,
             reasoning_effort: None,
             reasoning_summary: None,
-            transport: None,
             service_tier: None,
             prompt_cache_retention: None,
             open_responses_mode: None,
@@ -316,15 +420,6 @@ impl OpenAIResponsesConfig {
         self
     }
 
-    /// Set the transport mode (HTTP or WebSocket).
-    ///
-    /// Defaults to HTTP when not set. WebSocket requires the `openai-ws` feature.
-    #[must_use]
-    pub fn with_transport(mut self, transport: ResponsesTransport) -> Self {
-        self.transport = Some(transport);
-        self
-    }
-
     /// Set the default service tier for processing priority.
     ///
     /// Priority tier provides lower latency and more consistent token generation.
@@ -351,5 +446,35 @@ impl OpenAIResponsesConfig {
     pub fn with_open_responses_mode(mut self, enabled: bool) -> Self {
         self.open_responses_mode = Some(enabled);
         self
+    }
+}
+
+#[cfg(test)]
+mod effort_tests {
+    use super::{OpenAIReasoningEffort, ReasoningEffort};
+
+    #[test]
+    fn reasoning_models_take_a_reasoning_effort() {
+        for model in
+            ["gpt-5.6-terra", "gpt-5", "o3", "o4-mini", "openai/gpt-oss-120b", "ft:gpt-5:org"]
+        {
+            assert!(super::takes_reasoning_effort(model), "{model}");
+        }
+        for model in ["gpt-4.1", "gpt-4o-mini", "gpt-5-chat-latest", "omni-moderation", "llama-4"] {
+            assert!(!super::takes_reasoning_effort(model), "{model}");
+        }
+    }
+
+    /// The harness levels map to their namesakes on both effort vocabularies.
+    #[test]
+    fn every_harness_effort_maps_to_its_namesake() {
+        for (core, provider) in [
+            (adk_core::Effort::Low, ReasoningEffort::Low),
+            (adk_core::Effort::Medium, ReasoningEffort::Medium),
+            (adk_core::Effort::High, ReasoningEffort::High),
+        ] {
+            assert_eq!(ReasoningEffort::from(core), provider);
+            assert_eq!(OpenAIReasoningEffort::from(core), OpenAIReasoningEffort::from(provider));
+        }
     }
 }

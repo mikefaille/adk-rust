@@ -112,10 +112,14 @@ pub const UI_PROTOCOL_CAPABILITIES: &[UiProtocolCapabilitySpec] = &[
             "messages_snapshot",
             "stable_text_events",
             "stable_tool_events",
+            // Spec 3.3 §10 S2: held calls end the run as `tool_call` interrupts (AG-UI 1.1
+            // draft lifecycle). `interrupt_resume` is added by a server that can decide them.
+            "tool_call_interrupts",
         ],
         limitations: &[
             "Protocol-native AG-UI transport is opt-in and currently scoped to `adk-server`; the default runtime stream remains the generic ADK wrapper for compatibility.",
             "The framework translates generic ADK runtime events into the stable AG-UI subset at the server boundary, but it does not yet emit the full activity, reasoning, or agent-native AG-UI event families end-to-end from `adk-agent`.",
+            "Held calls end a run as `tool_call` interrupts only on the protocol-native transport. Interrupts are answered with `resume` (feature `interrupt_resume`) only on a server with an approval service and a request-context extractor; elsewhere an interrupt has no `responseSchema` and is decided where the call is held.",
         ],
         deprecation: None,
     },
@@ -146,6 +150,19 @@ pub const UI_PROTOCOL_CAPABILITIES: &[UiProtocolCapabilitySpec] = &[
         deprecation: None,
     },
 ];
+
+/// The `ag_ui` feature a server lists when it answers interrupts with `resume`
+/// (spec 3.3 §10 S2): it has an approval service and authenticates callers.
+pub(crate) const AG_UI_RESUME_FEATURE: &str = "interrupt_resume";
+
+/// The `ag_ui` feature a server lists when its AG-UI extension sends agent-drawn surfaces as
+/// `a2ui-surface` activities (spec 3.3 §6.1 `genui`); only a server with that extension wired
+/// lists it.
+pub const AG_UI_A2UI_ACTIVITY_FEATURE: &str = "a2ui_activity";
+
+/// The `activityType` of an agent-drawn surface in an AG-UI `ACTIVITY_SNAPSHOT` (spec 3.3
+/// §6.1 `genui`): a community convention, not part of the AG-UI specification.
+pub const A2UI_SURFACE_ACTIVITY_TYPE: &str = "a2ui-surface";
 
 /// Normalize runtime UI profile aliases to canonical values.
 pub fn normalize_runtime_ui_protocol(raw: &str) -> Option<&'static str> {

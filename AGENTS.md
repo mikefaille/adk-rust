@@ -51,6 +51,7 @@ feature-gated builds and the `full` tier require.
 | `protoc` | `adk-rag --features lancedb` (lance build script) | `apt install protobuf-compiler` | `brew install protobuf` | [prebuilt release](https://github.com/protocolbuffers/protobuf/releases), then set `PROTOC` |
 | NASM | `aws-lc-sys` on MSVC — any rustls path, e.g. `adk-auth --features sso` | not needed | not needed | [nasm.us](https://www.nasm.us/), add to `PATH` |
 | `cmake` | `openai-webrtc` (audiopus builds Opus from source) | `apt install cmake` | `brew install cmake` | [get-cmake](https://github.com/lukka/get-cmake) or the official installer |
+| ALSA (`libasound2-dev`) | `examples/desktop_audio` (cpal links `alsa-sys`); pre-push examples gate | `apt install libasound2-dev` | not needed (CoreAudio) | not needed |
 | `bash` / `sh` | Shell-tool and external-runner tests across `adk-bench`, `adk-devtools`, `adk-managed`, `adk-sandbox`, `adk-tool` | preinstalled | preinstalled | [Git for Windows](https://git-scm.com/download/win) ships them in `Git\bin`, which the installer leaves off `PATH` — add it |
 | `python3` | `adk-sandbox` process-execution tests | preinstalled | preinstalled | [python.org](https://www.python.org/downloads/) — ensure `python3` resolves, not just `python` |
 | WebDriver | `adk-browser` examples | Chrome/Chromium | Chrome/Chromium | Chrome/Chromium |
@@ -98,10 +99,11 @@ or strip the three `[target.*]` linker sections — the shared
 bash-only, so use `./scripts/setup-dev.ps1`. Use the MSVC toolchain
 (`x86_64-pc-windows-msvc`) with Visual Studio Build Tools for the C/C++
 compiler; `.cargo/config.toml` pins `rust-lld` as the linker, which ships with
-rustup. Three further constraints:
+rustup. Four further constraints:
 
-- `adk-sandbox`'s Windows AppContainer enforcer is unimplemented and reports
-  itself unavailable — `sandbox-windows` compiles but does not enforce.
+- `adk-sandbox`'s Windows enforcer is a restricted-token tier that confines only
+  through `WindowsEnforcer::run_confined`; its `probe` reports the generic
+  `sandboxed_command` path unavailable, so the harness shell stays degraded.
 - Nine tests shell out to `bash`, `sh`, or `python3` and fail with
   `program not found` without them. Git for Windows installs a shell but leaves
   `C:\Program Files\Git\bin` off `PATH` (only `Git\cmd` is added), and the
@@ -113,26 +115,17 @@ rustup. Three further constraints:
   `a_working_program_still_runs` fails in a plain shell where `LIB` is unset.
 - Keep Git's `usr/bin` off `PATH` ahead of the toolchain: it ships a GNU
   `link.exe` that shadows the MSVC linker, which once made sandboxed Rust
-  compilation resolve the wrong one. The same directory holds the only `echo`
-  binary on Windows (`echo` is a cmd builtin), so
-  `adk-bench`'s `test_external_runner_invalid_json` cannot pass without
-  accepting that hazard. It is the one expected Windows failure.
+  compilation resolve the wrong one. `adk-bench`'s external-runner tests run
+  their scripts with Windows PowerShell 5.1 and need nothing from Git.
 
 ### Verifying a fresh setup
 
-Start with the three gates:
-
-```bash
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo nextest run --workspace
-```
-
+Start with the three [quality gates](#quality-gates), the full workspace suite included.
 A default `--workspace` build compiles no feature-gated module and no umbrella
 tier above `minimal`, so those need their own pass:
 
 ```bash
-# Feature-gated modules — mirrors the PR-tier feature-coverage matrix
+# Feature-gated modules — one pair from scripts/feature-coverage-pairs.txt
 cargo clippy -p adk-agent --features codeact --all-targets -- -D warnings
 
 # Umbrella tiers — `standard` and above compile code `minimal` never reaches
@@ -142,16 +135,15 @@ cargo clippy -p adk-rust --features full --all-targets -- -D warnings
 cargo test -p adk-rust --features full --doc
 ```
 
-On Linux and macOS a clean setup runs the full suite with zero failures. On
-Windows, expect 4050/4051 from a Developer PowerShell — the single failure is
-`test_external_runner_invalid_json`, explained under
-[Platform notes](#platform-notes). Any failure carrying `program not found` is a
+A clean setup runs the full suite with zero failures on Linux, macOS, and
+Windows — on Windows from a Developer PowerShell, as
+[Platform notes](#platform-notes) explains. Any failure carrying `program not found` is a
 missing host tool, not a regression — diagnose the environment before assuming
 the workspace is broken.
 
 ## Quality gates
 
-Run all three before every commit. CI enforces them — save yourself the round-trip:
+The PR tier runs all three on every pull request:
 
 ```bash
 cargo fmt --all -- --check
@@ -159,39 +151,69 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo nextest run --workspace
 ```
 
+Before every commit, run the first two and `cargo nextest run -p <crate>` for each crate you
+changed; [Testing](#testing) says when to run the full workspace suite.
+
 ### CI cost tiers
 
 CI is organized into cost tiers so per-PR feedback stays fast while full coverage
-is preserved (see the `ci-pipeline-restructure` spec). No coverage is dropped —
+is preserved. No coverage is dropped —
 expensive axes move to a later tier.
 
 - **PR tier** (`ci.yml` + `semver.yml`, on pull requests) — the merge-blocking
-  coverage: `fmt` (prerequisite gate), `clippy --workspace --all-targets -D warnings`,
-  `nextest --workspace` (Linux, runs at most once), `feature-coverage` for
+  coverage: `fmt`, `clippy --workspace --all-targets -D warnings`,
+  `nextest --workspace` (Linux), `feature-coverage` for
   feature-gated modules default builds skip (e.g. `adk-agent --features codeact`),
+  driven by `scripts/feature-coverage-pairs.txt`: every pair linted on its own, each
+  crate's tests run once with its pairs' features combined (a `solo` pair keeps its own
+  build), and only the shards and crates the change can affect (`scripts/ci-scope.py`);
+  the nightly `feature-coverage-isolated` job tests every pair on its own build, `postgres` (the
+  `#[ignore]`d PostgreSQL suites, pgvector and TLS included, against a
+  `pgvector/pgvector:pg17` service, driven by `scripts/test-postgres.sh`),
   `docs` (`cargo doc --workspace --no-deps` plus doctests), standalone examples
-  (4 shards), `templates`, a compile-only macOS build, a Windows workspace build
-  with a targeted sandbox portability smoke, and `semver` (stable strict,
-  everything else warn-only).
-- **Merge tier** (`ci-merge.yml`, on `push: main`) — cross-platform
-  `nextest --workspace` on macOS/Windows and doc-example compilation. Runs
-  post-merge; not branch-protection-required.
+  (4 shards), `kernel-scenarios` (the scripted scenarios of `examples/harness_kernel`, on Linux),
+  `website-scenarios` (spec 3.5's scripted scenarios of `examples/website`),
+  `templates`, a compile-only macOS build, a Windows build with the code only
+  Windows has (the restricted-token enforcer, process trees, owner-only files, the
+  kernel's named pipe and service, the external generators' path), and `semver`
+  (stable strict against the release type in `semver.yml`'s `SEMVER_RELEASE_TYPE`:
+  `minor` fails breakage; `major`, during a major release candidate, accepts every
+  change, so the job reports without building; everything else warn-only). A `scope`
+  job skips the Rust jobs when a change touches only `docs/` or Markdown, and
+  merge-queue builds skip `docs`, the standalone examples, the kernel scenarios and
+  the macOS/Windows builds the pull request already passed. CI builds carry no debug
+  info (`CARGO_PROFILE_DEV_DEBUG=0`). Only `main` saves build caches: a push to `main`
+  runs `ci.yml`'s `clippy` and `test`, whose caches every pull request restores.
+- **Merge tier** (`ci-merge.yml`, on `push: main` and on demand) — cross-platform
+  `nextest --workspace` on macOS/Windows (on Windows this is where the kernel's
+  crate-level scenarios and the adk-code, adk-devtools and adk-managed suites run),
+  the scripted scenarios of `examples/harness_kernel` on macOS
+  (`kernel-scenarios-macos`), the documented-example check, and the computer-use
+  receipt (`computer-use-receipt`). Runs
+  post-merge, or on a branch with `gh workflow run ci-merge.yml --ref <branch>`;
+  not branch-protection-required. `sandbox-linux.yml` (on `push: main`,
+  on a pull request touching the sandbox or the harness shell, and on demand) proves
+  bubblewrap enforcement on `ubuntu-24.04` with `ADK_SANDBOX_REQUIRE_ENFORCER=1`, under
+  which the enforcement tests fail instead of skipping when the enforcer cannot start.
 - **Nightly tier** (`ci-nightly.yml`, on `schedule`) — the feature-combination
-  matrix (clippy with `-D warnings`), `cargo-audit`/`cargo-deny` supply-chain
+  matrix (clippy with `-D warnings`), every feature-coverage pair tested on its own
+  build (`feature-coverage-isolated`), `cargo-audit`/`cargo-deny` supply-chain
   checks, and `#[ignore]` integration tests gated on available secrets. Not
   branch-protection-required.
 
 Only the PR tier gates merges. Branch protection requires the aggregate
 `pr-gate` context plus the separate `semver` context; `pr-gate` fails unless
-every `ci.yml` dependency and matrix entry succeeds. See CONTRIBUTING.md
+every `ci.yml` dependency succeeds or was skipped by the change scope. See CONTRIBUTING.md
 ("Branch Protection — Required Status Checks") for the authoritative set.
 
 ### Local git hooks (lefthook)
 
 - **pre-commit** — `cargo fmt --all -- --check`, `cargo clippy --workspace
-  --all-targets -- -D warnings`, `shellcheck` on staged shell scripts, and
-  PSScriptAnalyzer on staged `*.ps1` via `scripts/lint-powershell.ps1` (skips
-  itself when the module is not installed).
+  --all-targets -- -D warnings`, `scripts/check-feature-growth.sh` (a new
+  `adk-rust` feature must change what links or carry a recorded decision — see
+  [docs/feature-surface.md](docs/feature-surface.md)), `shellcheck` on staged
+  shell scripts, and PSScriptAnalyzer on staged `*.ps1` via
+  `scripts/lint-powershell.ps1` (skips itself when the module is not installed).
 - **pre-push** — `cargo check --workspace` (a fast compilation check, not the full
   test suite), plus `scripts/check-examples-compile.sh` over all four shards when
   an example or a workspace crate it depends on has changed. The standalone
@@ -200,14 +222,14 @@ every `ci.yml` dependency and matrix entry succeeds. See CONTRIBUTING.md
 
 ### AI Agent Workflow (`devenv`)
 
-Use these shorthand scripts instead of raw `cargo` to ensure `sccache` wrap and workspace coverage:
+Inside `devenv shell`, these scripts run the same commands with `sccache`:
 
-| Action | Command | Description |
+| Action | Command | Runs |
 | :--- | :--- | :--- |
-| **Check** | `devenv shell check` | Fast workspace compilation check. |
-| **Test** | `devenv shell test` | Run all non-ignored tests (nextest). |
-| **Lint** | `devenv shell clippy` | Clippy with `-D warnings` (zero tolerance). |
-| **Format** | `devenv shell fmt` | Enforce Rust Edition 2024 style. |
+| **Check** | `devenv shell ws-check` | `cargo check --workspace` |
+| **Test** | `devenv shell ws-test` | `cargo nextest run --workspace` — the full suite |
+| **Lint** | `devenv shell ws-clippy` | `cargo clippy --workspace --all-targets -- -D warnings` |
+| **Format** | `devenv shell ws-fmt` | `cargo fmt --all` |
 
 Run `cargo fmt --all` automatically after finishing Rust code changes; do not ask for approval.
 
@@ -219,151 +241,84 @@ Crate names are prefixed with `adk-`. The Rust module name uses underscores (`ad
 
 ### Core crates (publishable to crates.io)
 
+One line per crate — the crate's README holds the detail.
+
 ```
-adk-core/        Core traits and types: Agent, Tool, Llm, Session, Event, Content, State,
-                 SchemaAdapter, SchemaCache, SharedState, ToolExecutionStrategy, RequestContext
-adk-agent/       Agent implementations: LlmAgent, CustomAgent, SequentialAgent, ParallelAgent,
-                 LoopAgent, ConditionalAgent, LlmConditionalAgent. Parallel tool dispatch,
-                 SharedState coordination, skill shims.
-adk-model/       LLM provider facade: Gemini, OpenAI (Chat + Responses), Anthropic, DeepSeek (V4),
-                 Groq, Ollama, Bedrock, Azure AI, OpenRouter (native). Text-based tool call
-                 parser (7 model formats). Provider-aware schema normalization.
-                 (feature-gated)
-adk-gemini/      Dedicated Gemini client with GeminiBackend trait (Studio + Vertex AI),
-                 ThinkingConfig validation, built-in tool support (Search, Code Execution,
-                 Maps, File Search, Computer Use). Interactions API (Beta, `interactions`
-                 feature): stateful step-timeline client with server-side history,
-                 streaming step events, and lifecycle (get/delete/cancel). The runtime
-                 transport lives in adk-model (`gemini-interactions`): a `GeminiModel`
-                 toggle that drives the standard LlmAgent/Runner through this endpoint.
-adk-gcp/         Shared Google Cloud REST plumbing for Vertex AI backends: ADC credential
-                 caching (GcpHttpClient), bounded HTTP transport, LRO polling (LroPoller),
-                 resource-name parsing (VertexResourceName), consumer-branded errors
-                 (GcpErrorContext). Wave 3 consolidation target for the ADC/LRO pattern.
-adk-anthropic/   Dedicated Anthropic API client: streaming, adaptive thinking, prompt caching,
-                 citations, context management, fast mode, vision, PDF processing, pricing.
-                 Supports Claude Opus 4.8, Opus 4.7, Sonnet 4.6, Haiku 4.5.
-                 Managed Agents API (`managed-agents` feature): agents, environments, sessions,
-                 SSE streaming, custom tools, vaults, memory stores, dreams, webhooks,
-                 multiagent orchestration, file mounting, self-hosted environments.
-                 Files API (`files` feature): upload, download, list, get, delete.
-adk-tool/        Tool system: FunctionTool, StatefulTool, SimpleToolContext, MCP integration
-                 (rmcp 3.1), McpServerManager (lifecycle, health, auto-restart), MCP Resource
-                 API, MCP Elicitation, Google Search, built-in tool wrappers (Gemini/OpenAI/
-                 Anthropic), Slack/BigQuery/Spanner toolsets
-adk-runner/      Agent execution runtime with event streaming, RunnerConfigBuilder (typestate),
-                 Runner::interrupt() API, Runner::run_str(), per-session cancellation tokens
-adk-server/      HTTP server (Axum) and A2A v1.0.0 (Agent-to-Agent) protocol, ServerBuilder
-                 API, ShutdownHandle, YAML agent config, agent registry, auth bridge.
-                 Background Runs and Cron Scheduling (`background` feature): REST endpoints
-                 for async workflow execution (POST/GET/DELETE /runs), cron job management
-                 (POST/GET/PATCH/DELETE /cron), concurrency policies (skip/allow/queue).
-adk-session/     Session management: SQLite, PostgreSQL, Redis, MongoDB, Firestore, Neo4j
-                 backends. Encrypted sessions (AES-256-GCM) with key rotation.
-adk-artifact/    Binary artifact storage for agents
-adk-memory/      Semantic memory and RAG search: InMemory, SQLite, PostgreSQL, Redis, MongoDB,
-                 Neo4j backends. Project-scoped memory isolation.
-adk-graph/       Graph-based workflow orchestration with checkpoints, durable resume,
-                 HITL interrupts, ActionNodeExecutor, WorkflowSchema interchange.
-                 Functional API (`functional` feature): write workflows as async functions
-                 with #[entrypoint]/#[task] macros, automatic checkpointing, typed state
-                 reducers (ReducedValue, UntrackedValue, MessagesValue), state schema
-                 validation, interrupt/resume, and loop iteration checkpoint keying.
-adk-realtime/    Real-time bidirectional audio/video streaming (OpenAI, Gemini Live, Vertex AI Live,
-                 LiveKit, WebRTC), mid-session context mutation, interruption detection,
-                 video avatar providers (HeyGen, D-ID)
-adk-browser/     Browser automation tools via WebDriver
-adk-computer-use/ Governed orchestration layer for the computer-use-mcp desktop-automation server:
-                 deterministic reference graph (parallel observation, digest-bound approval
-                 interrupts, single-executor mutation, verification), camelCase wire contracts,
-                 scope authorization, cancellation bridge, and tamper-evident evaluation
-                 receipts. Performs no actuation itself.
-adk-eval/        Evaluation framework: trajectory, semantic, rubric, LLM-judge, user personas,
-                 prompt optimizer, structured judge (typed verdicts), embedding similarity,
-                 cost/latency tracking, trace analysis (loop/redundancy detection), regression
-                 baselines, JUnit XML CI output, human annotation workflows (JSONL), A/B agent
-                 comparison (Wilcoxon), auto-generated test cases, multi-turn conversation
-                 metrics. Feature-gated: embedding, ci-helpers, statistics.
-adk-telemetry/   OpenTelemetry 0.32 integration for agent observability
-adk-guardrail/   Input/output guardrails: validation, content filtering, PII redaction
-adk-auth/        Authentication: API keys, JWT, OAuth2, OIDC, SSO, cloud secret providers
-                 (AWS Secrets Manager, Azure Key Vault, GCP Secret Manager)
-adk-plugin/      Plugin system for agent lifecycle hooks — EnhancedPlugin trait with tool/model
-                 interception, priority-based pipeline, PluginContext shared state
-adk-retry-reflect/ Retry & Reflect plugin — intercepts tool failures, injects reflection prompts,
-                 exponential backoff, circuit-breaker patterns
-adk-skill/       Skill discovery, parsing, and convention-based agent capabilities
-adk-cli/         Command-line launcher for agents, `cargo adk deploy` for ADK Platform
-adk-rust-macros/ Procedural macros (#[tool] attribute with read_only, concurrency_safe,
-                 long_running metadata)
-adk-code/        Code execution (experimental). Vertex AI Agent Engine sandbox client
-                 (`vertex-sandbox` feature): sandboxEnvironments lifecycle, synchronous
-                 :execute chunk protocol, per-session SandboxCodeExecutor (adk-python
-                 parity), VertexSandboxTool
-adk-codeact-monty/ Python CodeRuntime for the CodeActAgent, backed by the Pydantic Monty
-                 interpreter (via adk-code's embedded-python kernel, which pins the
-                 monty crates once). Sandboxed OS access (mounts, environ, clock),
-                 suspend/resume snapshots. EXPERIMENTAL.
-adk-devtools/    Developer tools for coding agents — inner-loop file/search/edit tools
-                 (read_file, write_file, edit_file, glob, grep, ...) scoped to a sandboxed workspace
-adk-bench/       Benchmarking framework: framework-level runtime performance with real LLM APIs
-                 and cross-framework (Python ADK) comparison
-adk-sandbox/     Sandboxed execution environments — process/WASM backends, OS-level sandbox profiles
-                 (Seatbelt on macOS, bubblewrap on Linux; Windows AppContainer unimplemented)
-adk-audio/       Audio processing, STT/TTS providers, Deepgram streaming, desktop audio
-                 (capture/playback/VAD), ONNX models (Whisper, Moonshine, Kokoro, Chatterbox)
-adk-rag/         Retrieval-augmented generation pipelines
-adk-action/      Action node definitions (14 node types), StandardProperties, variable
-                 interpolation — shared types for adk-graph ActionNodeExecutor
-adk-enterprise/  Enterprise client SDK — lightweight HTTP/SSE client for the ADK-Rust Enterprise
-                 Managed Agent Service. Zero adk-* runtime dependencies. Agents, sessions,
-                 streaming, vaults, memory. Self-hosted support. EXPERIMENTAL.
-adk-managed/     Managed agent runtime — provider-neutral agent execution engine with in-process
-                 checkpointing (state does not survive process loss). ManagedAgentRuntime trait, DefaultManagedAgentRuntime, declarative
-                 ManagedAgentDef, supervised session loop with checkpointing, custom tool
-                 parking, event replay, ScriptedLlm test double, golden fixture tests.
-                 Feature-gated: `managed-runtime` on umbrella crate. EXPERIMENTAL.
-adk-deploy/      Deployment utilities
-adk-payments/    Payment integration: ACP commerce, AP2 alpha mandates, multi-actor flows
-cargo-adk/       Cargo subcommand for project scaffolding and deployment
-adk-rust/        Umbrella crate re-exporting all of the above with tiered feature presets
+adk-core/          Core traits and types, `AdkError`, the governed tool path, identity, durable contracts
+adk-agent/         LlmAgent, workflow agents, teams, CodeActAgent (`codeact`), CodingAgent, AmbientAgent
+adk-model/         LLM providers: Gemini, OpenAI, Anthropic, DeepSeek, Groq, Ollama, Bedrock, Azure, OpenRouter
+adk-gemini/        Gemini client: Studio and Vertex backends, built-in tools, Interactions API (`interactions`)
+adk-gcp/           Google Cloud REST plumbing: ADC credentials, bounded HTTP transport, LRO polling
+adk-anthropic/     Anthropic client: streaming, thinking, prompt caching, Managed Agents and Files APIs
+adk-tool/          FunctionTool, MCP client and server, built-in tool wrappers, Slack/BigQuery/Spanner
+adk-runner/        Execution runtime: event streaming, budgets, ledgers, cancellation and recovery
+adk-server/        Axum server, A2A v1.0.0, background runs and cron (`background`), AWP edge (`awp`)
+adk-session/       Sessions on SQLite, PostgreSQL, Redis, MongoDB, Firestore, Neo4j, Vertex; durable stores
+adk-artifact/      Versioned binary artifacts: in-memory, file, GCS (`gcs`)
+adk-memory/        Semantic memory and search on seven backends, SQLite knowledge graph (`graph-memory`)
+adk-graph/         Graph workflows: checkpoints, durable resume, interrupts, action nodes, functional API
+adk-realtime/      Realtime audio/video: OpenAI, Gemini Live, Vertex Live, LiveKit, WebRTC, avatars
+adk-browser/       Browser automation tools over WebDriver
+adk-computer-use/  Governed graph, auth and wire contracts for computer-use-mcp; performs no actuation
+adk-eval/          Evaluation: trajectory, rubric, LLM judge, personas, baselines, experiments
+adk-telemetry/     OpenTelemetry 0.32: OTLP, SQLite and GCP export, GenAI semantic conventions
+adk-guardrail/     Input, output, tool-call and tool-result guardrails, PII redaction
+adk-auth/          API keys, JWT, OAuth2/OIDC/SSO, secret providers, RBAC, signed audit, Web Bot Auth
+adk-plugin/        EnhancedPlugin lifecycle hooks with tool and model interception
+adk-retry-reflect/ Retry & Reflect plugin: reflection prompts, backoff, circuit breaking on tool failure
+adk-skill/         AgentSkills parsing, index and injection; Vertex Skill Registry client
+adk-cli/           The `adk-rust` binary (REPL, server, harness, website, site, awp) and `Launcher`
+adk-rust-macros/   `#[tool]`, and `#[entrypoint]`/`#[task]` for the graph functional API
+adk-code/          Code execution substrate: executors, sandbox policy, Vertex sandbox (`vertex-sandbox`)
+adk-codeact-monty/ Python `CodeRuntime` for CodeActAgent on the Monty interpreter
+adk-devtools/      Coding-agent file, search and edit tools scoped to a sandboxed workspace
+adk-harness/       Governed harness agent: modes, standing approvals, shell, goals, memory, presets
+adk-kernel/        Agent kernel: supervisor, process table, wake sources, event bus, control plane
+adk-surface/       Agent surfaces: SurfaceEngine, web API (`web`), agent-drawn UI (`genui`)
+adk-site/          AWP website pipeline: content, generator, launch gate, signed releases, hosts
+adk-drivers/       Website service drivers (DNS, email, analytics, social) with conformance suites
+adk-website/       The prebuilt AWP website product and the `adk-website` binary
+adk-bench/         Runtime benchmarks with real LLM APIs and a Python ADK comparison
+adk-sandbox/       Process/WASM sandboxes; Seatbelt, bubblewrap and Windows restricted-token enforcers
+adk-audio/         STT/TTS providers, desktop audio, ONNX models (Whisper, Kokoro, ...)
+adk-rag/           Retrieval-augmented generation pipelines and vector store backends
+adk-action/        Action node types and variable interpolation for adk-graph
+adk-enterprise/    HTTP/SSE client for the ADK-Rust Enterprise Managed Agent Service
+adk-managed/       Provider-neutral managed agent runtime with durable, parked turns
+adk-deploy/        Deployment manifests, bundling, and the Agent Engine client (`gcp`)
+adk-payments/      Agentic commerce (ACP, AP2) and the owner-funded wallet (`wallet`)
+cargo-adk/         `cargo adk`: project templates, builds, eval runs, deployment
+adk-mistralrs/     In-process local inference via mistral.rs 0.8; GPU features opt-in
+adk-rust/          Umbrella crate: re-exports everything behind tiered features
 ```
 
 ### Protocol crates
 
 ```
-awp-types/       Agentic Web Protocol types — TrustLevel, RequesterType, AwpVersion,
-                 BusinessContext, PaymentIntent, CapabilityManifest. Zero adk-* dependencies.
-adk-awp/         AWP implementation (Axum 0.8): discovery, rate limiting, consent (GDPR/KPA),
-                 event subscriptions (HMAC-SHA256 webhooks), health state machine, A2A messages
-adk-acp/         Agent Client Protocol — connect to external ACP agents (Claude Code, Codex,
-                 Kiro CLI) as tools. AcpAgentTool, AcpToolset, AcpServer (expose ADK agents
-                 as ACP-compatible), StdioTransport for IDE connections.
+awp-types/         AWP 1.x and 2.0 protocol types and JSON Schemas; no adk-* dependencies
+adk-awp/           AWP implementation: /awp/v2/ routes, `signing`, `verify`, the 1.x routes (`awp-v1`)
+adk-acp/           Agent Client Protocol: ACP agents as tools, and ADK agents served over ACP
 ```
 
 ### Excluded from workspace
 
 ```
-adk-mistralrs/   Local LLM inference via mistral.rs v0.8 (Gemma 4, Qwen 3.5, Voxtral, Llama 4, GPT-OSS — 50+ architectures)
-                 Now a workspace member (mistralrs published to crates.io). GPU features are opt-in.
-                 Has its own CI workflow (.github/workflows/mistralrs-tests.yml).
-
-adk-studio/      Visual agent builder — extracted to standalone repo.
+adk-studio/      Retired in favour of adk-surface's workflow observer
+                 (docs/official_docs/surfaces/workflow.md).
                  Repo: https://github.com/zavora-ai/adk-studio
-                 Local dev: ../adk-studio/ with path deps back to this workspace.
-                 Build: cargo check --manifest-path ../adk-studio/Cargo.toml
 
-adk-ui/          Dynamic UI generation (forms, cards, tables, charts) — extracted to standalone repo.
+adk-ui/          Retired, for ADK-Rust 2 only (spec 3.3 decision 11): agent-drawn UI is
+                 adk-surface's `genui` feature. Do not add code to it or depend on it.
                  Repo: https://github.com/zavora-ai/adk-ui
-                 Local dev: ../adk-ui/ with git dep on adk-core.
-                 UI protocol constants are inlined in adk-server/src/ui_protocol.rs.
+                 UI protocol constants stay in adk-server/src/ui_protocol.rs for the
+                 deprecated `adk_ui` profile and the /api/ui bridge.
 ```
 
 ### Examples and docs
 
 ```
-examples/              97 standalone example crates (each with own Cargo.toml) covering all major
-                       features. Additional 120+ examples in the adk-playground repo.
+examples/              Standalone example crates, each with its own Cargo.toml and outside the
+                       workspace. More examples live in the adk-playground repo.
 docs/official_docs/    Comprehensive documentation site content
 ```
 
@@ -373,10 +328,13 @@ docs/official_docs/    Comprehensive documentation site content
 
 `gemini` is the default. All others are opt-in:
 
-- `gemini` (default), `openai`, `anthropic`, `deepseek`, `ollama`, `groq`
+- `gemini` (default), `openai`, `anthropic`, `deepseek`, `ollama`, `groq`, `muse`
 - `gemini-vertex` — Gemini via Vertex AI (Studio + Vertex backends)
 - `gemini-interactions` — Gemini Interactions API (Beta); re-exports `adk_model::gemini::interactions` AND provides the runtime transport toggle on `GeminiModel` (`use_interactions_api`) that drives the standard `LlmAgent`/`Runner`/tool loop through the Interactions endpoint (allowlist, stateful continuity, `bypass_multi_tools_limit`)
 - `openrouter` — OpenRouter native chat, responses, routing, discovery, and credits APIs
+- `muse-realtime` — `MuseRealtimeAsrClient`: live `muse-voice-transcribe-1.0` over Meta's realtime WebSocket (implies `muse`)
+- `muse-responses` — `MuseApi::Responses`: Muse over `/responses` through the shared Open Responses engine, streamed, attributed and priced as `muse` (implies `muse`, `openai`)
+- `opencode` — OpenCode Go and Zen: `OpenCodeClient` routes each model through Chat Completions, Responses, Anthropic Messages, or Gemini `generateContent` with the application's identity headers (implies `openai`, `anthropic`, `gemini`)
 - `bedrock` — Amazon Bedrock via AWS SDK Converse API
 - `azure-ai` — Azure AI Inference endpoints
 - `all-providers` — enables all real feature flags
@@ -414,56 +372,16 @@ All opt-in, no defaults:
 
 Four tiered presets control which crates are compiled:
 
-- `minimal` **(default)** — agents, models, gemini, runner, sessions. Fastest possible build for a single Gemini-powered agent.
-- `standard` — minimal + openai, anthropic, tools, memory, telemetry, skills, graph, auth, server, eval, guardrail, plugin, artifacts. Production deployment with server and auth.
-- `enterprise` — standard + realtime, browser, rag, payments, awp. Full-featured production.
-- `full` — enterprise + audio, code, sandbox, code-tools. Everything.
+- `minimal` **(default)** — agents, models, gemini, runner, sessions.
+- `standard` — minimal + openai, anthropic, anthropic-client, tools, memory, telemetry, skills, graph, auth, server, eval, guardrail, plugin, artifacts, computer-use.
+- `enterprise` — standard + realtime, browser, rag, payments, awp.
+- `full` — enterprise + audio, code, sandbox, code-tools, graph-functional, graph-node-cache, graph-delta, graph-time-travel, harness, harness-kernel, website. Everything that needs no external infrastructure.
 
-Domain add-ons are composable with any tier: `features = ["minimal", "audio"]`.
-
-Platform meta-features (composable with any tier):
-- `gemini-agent-platform` — every Gemini Enterprise Agent Platform (Vertex/EAP) integration except realtime transports: `gemini-vertex`, `vertex-session`, `gcp-secrets`, `gcs-artifacts`, `gcp-telemetry`, `agent-engine`, `example-store` (grows as later integrations land). The right default for ReasoningEngine BYOC deployments. Deploy-time tooling is host-side and excluded.
-- `gemini-agent-platform` — every Gemini Enterprise Agent Platform (Vertex/EAP) integration except realtime transports: `gemini-vertex`, `vertex-session`, `gcp-secrets`, `gcs-artifacts`, `gcp-telemetry`, `agent-engine`, `vertex-memory` (grows as later integrations land). The right default for ReasoningEngine BYOC deployments. Deploy-time tooling is host-side and excluded.
-- `gemini-agent-platform-full` — `gemini-agent-platform` + `vertex-live` (Vertex AI Live API, pulls in the adk-realtime stack)
-
-Graph capability features (forwarded to `adk-graph`, which has no default features):
-- `graph-functional` — the functional API (`#[entrypoint]`/`#[task]`), in `full`
-- `graph-node-cache` — node result caching with content keys, in `full`
-- `graph-delta` — delta checkpoints, in `full`
-- `graph-time-travel` — step, fork and state history, in `full`
-- `graph-sqlite` — the SQLite checkpointer; needs a database, so not in `full`
-- `graph-redis-cache` — Redis-backed node cache; needs a server, so not in `full`
-
-Production backend features (require external infrastructure, NOT included in `full`):
-- `postgres-session`, `redis-session`, `mongodb-session`, `firestore-session`, `neo4j-session`,
-  `vertex-session`
-- `sqlite-memory`, `database-memory`, `redis-memory`, `mongodb-memory`, `neo4j-memory`,
-  `vertex-memory`
-- `auth-bridge`
-- `managed-runtime` — Managed agent runtime (adk-managed): durable sessions, event streaming, provider parity
-
-Specialist opt-in features:
-- `yaml-agent`, `agent-registry` — YAML agent config and registry REST API
-- `gcp-deploy` — Agent Engine (ReasoningEngine) BYOC deployment client (adk-deploy): create/poll/get/delete; host-side tooling, deliberately excluded from `gemini-agent-platform`. The same name on adk-cli enables `adk-rust deploy agent-engine`
-- `agent-engine` — Agent Engine runtime contract (adk-server): class-method dispatch endpoints and the turnkey `serve_agent_engine` entrypoint for Gemini Enterprise Agent Platform BYOC containers
-- `example-store` — Vertex AI Example Store client (adk-tool): v1beta1 data-plane upsert/search/fetch against a pre-provisioned store, plus `ExampleStoreProvider` for dynamic few-shot retrieval via a `BeforeModelCallback`
-- `vertex-sandbox` — Vertex AI Agent Engine managed code-execution sandbox (adk-code): v1beta1 sandboxEnvironments lifecycle (create/get/list/delete with LRO polling), synchronous `:execute` chunk protocol, `SandboxCodeExecutor` with per-session lazy create/recreate (adk-python parity), and `VertexSandboxTool` for LLM agents; part of `gemini-agent-platform`
-- `gemini-interactions` — Gemini Interactions API (Beta): wire client surface (server-side history, step timeline) plus the runtime transport on `GeminiModel` (`use_interactions_api`) driving the standard `LlmAgent`/`Runner`
-- `mcp`, `mcp-http`, `mcp-sampling` — MCP transport and sampling support
-- `code-tools` — Code execution tools over the adk-code substrate (`CodeTool`, `PythonCodeTool`, `JavaScriptCodeTool`, `MontyPythonCodeTool`; forwarded to adk-tool; included in `full`)
-- `code-embedded-js` — Embedded JavaScript execution via boa_engine — the `JavaScriptCodeTool` live path (forwarded to adk-tool and adk-code)
-- `code-embedded-python` — In-process Python execution via the Monty interpreter (`MontyPythonCodeTool`, forwarded to adk-tool and adk-code)
-- `code-docker` — Docker SDK-based persistent container execution (forwarded to adk-tool and adk-code)
-- `codeact` — CodeAct agents: the model acts by writing code (forwarded to adk-agent)
-- `codeact-monty` — Python `CodeRuntime` for the CodeActAgent via the Monty interpreter (adk-codeact-monty; implies `codeact`)
-- `slack`, `bigquery`, `spanner` — Native toolsets
-- `action`, `action-http`, `action-trigger`, `action-db`, `action-code`, `action-email`, `action-rss`, `action-full` — Action node executors
-- `video-avatar` — HeyGen/D-ID avatar providers
-- `acp` — Agent Client Protocol integration
-- `openrouter` — OpenRouter native APIs
-- Audio ONNX models: `whisper-onnx`, `distil-whisper`, `moonshine`, `kokoro`, `chatterbox`, `qwen3-tts`
-
-Individual features (`agents`, `models`, `tools`, `sessions`, `server`, `graph`, `realtime`, `eval`, `browser`, `auth`, `guardrail`, `plugin`, `telemetry`, `cli`, `skills`, `artifacts`, `memory`, `code`, `sandbox`, `audio`, `awp`, `acp`, `rag`, `payments`, etc.) can be selected independently.
+Every other feature composes with any tier (`features = ["minimal", "audio"]`).
+`adk-rust/Cargo.toml` lists each one with what it forwards to; production backends
+(`postgres-session`, `graph-postgres`, ...) need external infrastructure and are in no tier.
+A new feature must change what links or carry a recorded decision — see
+[docs/feature-surface.md](docs/feature-surface.md).
 
 ## Rust conventions
 
@@ -511,6 +429,9 @@ When implementing `Agent`:
 - `sub_agents()` is required — return `&[]` for leaf agents with no children.
 - `description()` returns `&str` (not `Option<&str>`).
 - `run()` returns `Result<EventStream>` where `EventStream = Pin<Box<dyn Stream<Item = Result<Event>> + Send>>`.
+- `screen_user_input()` defaults to screening with `sub_agents()`. The runner calls it on the root
+  before saving a user message, so an agent with input guardrails applies them there, and a
+  wrapper whose inner agent is not in `sub_agents()` delegates to it.
 
 When implementing `Tool`:
 - `execute()` takes `Arc<dyn ToolContext>` and `Value`, returns `Result<Value>`.
@@ -571,41 +492,27 @@ Use `adk_core::AdkError` (not `adk_core::Error`) when returning errors from agen
 
 ## Tool authorization
 
-Four mechanisms for controlling tool execution, composable in any combination:
+Five mechanisms control tool execution and compose in any combination:
 
-1. **`ToolConfirmationPolicy`** — built-in HITL. Pauses execution, emits a `ToolConfirmationRequest` event, waits for `Approve`/`Deny` on the next run. Works in CLI and web server via SSE events.
+| Mechanism | Set with | Decides |
+|-----------|----------|---------|
+| `ToolPolicy` | `Runner::builder().tool_policy(..)`, `RunConfig::tool_policy` | Allow, deny, or require approval per call; `DeclarativePolicy` denies any tool no rule permits |
+| `ToolConfirmationPolicy` | `.require_tool_confirmation(name)` on the agent builder | Human approval — a `ToolConfirmationHandler` in the run, or a held call a later run resumes |
+| `BeforeToolCallback` | `.before_tool_callback(..)` | Skips a call by returning content |
+| `adk-auth` RBAC | `ProtectedTool`, `ScopeGuard` wrappers | Role and scope checks inside `execute()`, as a tool error |
+| Graph interrupts | `adk-graph` | Checkpointed pauses for multi-step approval workflows |
 
-```rust
-let agent = LlmAgentBuilder::new("assistant")
-    .model(model)
-    .tool(Arc::new(delete_tool))
-    .require_tool_confirmation("delete_file")  // per-tool
-    // .require_tool_confirmation_for_all()     // or all tools
-    .build()?;
-```
+`GovernanceControl` is the kill switch over all of them: `runner.governance().freeze(reason)`,
+or `POST /api/admin/freeze` on `adk-server`. A confirmation decision binds to the call's
+fingerprint — acting agent, tool origin, tool name, and canonical arguments — not its call ID.
 
-The agent emits `event.actions.tool_confirmation = Some(ToolConfirmationRequest { tool_name, args, function_call_id })`. Pass the decision back via `RunConfig::tool_confirmation_decisions`.
-
-2. **`BeforeToolCallback`** — programmatic gate. Return `Ok(Some(content))` to skip, `Ok(None)` to allow.
-
-```rust
-.before_tool_callback(Box::new(|ctx| {
-    Box::pin(async move {
-        if ctx.tool_name().unwrap_or("") == "admin_action" {
-            return Ok(Some(Content::new("tool").with_text("denied")));
-        }
-        Ok(None)
-    })
-}))
-```
-
-3. **`adk-auth` RBAC** — role-based access control with `ProtectedTool` wrapper and audit logging.
-
-4. **Graph interrupts** (`adk-graph`) — checkpoint-based pauses with durable state for complex approval workflows.
-
-Evaluation order: RBAC → BeforeToolCallback → ToolConfirmationPolicy → execute → AfterToolCallback.
-
-See `docs/official_docs/security/tool-authorization.md` for full documentation with CLI and web server examples.
+`adk_core::authorize_tool_call` is the one governed path. `LlmAgent`
+(`adk-agent/src/llm_agent.rs`), `CodeActAgent`, and the realtime runners dispatch through it, and
+`adk-agent/src/tool_ledger.rs` is the shared action-ledger step. A change to the tool path keeps
+both agents in step and updates `docs/official_docs/security/tool-authorization.md`, whose
+"Combining Mechanisms" and "Resuming a Held Call" sections are the reference for evaluation order,
+held calls, and resume. Every run carries an acting agent (`ActingContext`) — see
+`docs/official_docs/security/agent-identity.md`; context wrappers must forward `acting_context()`.
 
 ## Logging
 
@@ -623,6 +530,8 @@ See `adk-gemini/AGENTS.md` for the full tracing conventions. The key rules:
 cargo nextest run --workspace                                # full workspace (parallel)
 cargo nextest run -p adk-core                                # single crate
 cargo nextest run -p adk-realtime --features full            # with features
+DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres \
+  scripts/test-postgres.sh                                     # PostgreSQL suites (pgvector server)
 ```
 
 - Prefer `cargo nextest run` over `cargo test` for speed (~10x faster via parallel test binary execution).
@@ -634,15 +543,19 @@ cargo nextest run -p adk-realtime --features full            # with features
 - Doc examples: Cargo snippets, feature names, and package/example references in `README.md` and `docs/official_docs/` are validated against `cargo metadata` by `scripts/check-doc-examples.sh`.
 - When writing tests, prefer comparing equality of entire objects over fields one by one.
 - Tests that require API keys or external services should be `#[ignore]`.
-- Run the test for the specific crate you changed first (`cargo test -p adk-<crate>`), then run the full workspace if you changed shared crates like `adk-core`.
-- Crate-specific or individual tests can be run without asking the user, but ask before running the full workspace test suite.
+- Run the tests of each crate you changed (`cargo nextest run -p adk-<crate>`) without asking.
+- Ask before running the full workspace suite, even after changing a shared crate such as `adk-core`;
+  the PR tier runs `nextest --workspace` on every pull request.
 
 ## Documentation
 
 - When making a change that adds or changes an API, ensure that `docs/official_docs/` is up to date.
 - Documented examples (Cargo snippets, feature names, and package/example references in `README.md` and `docs/official_docs/`) are validated in CI by `scripts/check-doc-examples.sh` against `cargo metadata`. The PR tier compiles the standalone example workspaces and cargo-adk templates, so if you change a public API, keep those in sync.
 - Update the crate's `README.md` if capabilities changed.
-- Update `CHANGELOG.md` for user-facing changes.
+- Keep `AGENTS.md` under 60 KB — agent harnesses truncate larger instruction files. Detail about a
+  crate belongs in its README, and about a feature in `adk-rust/Cargo.toml`.
+- Add a changelog fragment under `changelog.d/` for user-facing changes (`<section>.<slug>.md`,
+  see `changelog.d/README.md`). `CHANGELOG.md` itself changes only in release commits.
 
 ## Adding new code
 
@@ -653,7 +566,6 @@ cargo nextest run -p adk-realtime --features full            # with features
 3. Re-export from `adk-model/src/lib.rs` behind the feature
 4. Implement `schema_adapter()` if the provider has specific schema requirements
 5. Add example in [adk-playground](https://github.com/zavora-ai/adk-playground) or as a standalone crate in `examples/`
-6. Update `adk-studio` codegen if the provider should be available in Studio (separate repo: `../adk-studio/`)
 
 ### New tool
 
@@ -670,25 +582,11 @@ Pattern for a new example crate:
 ```
 examples/my_example/
 ├── Cargo.toml          # [workspace] key, path deps to workspace crates
+├── Cargo.lock          # committed; the examples gate checks with --locked
 ├── src/main.rs         # Entry point with dotenvy, tracing, banner
 ├── README.md           # Documentation
 └── .env.example        # Required env vars
 ```
-
-## Commit messages
-
-Use conventional commits:
-
-```
-feat(gemini): add Vertex AI streaming backend
-fix(realtime): correct audio delta byte handling
-docs: update CONTRIBUTING.md
-refactor(ui): extract validation into per-type trait impls
-test(eval): add trajectory property tests
-```
-
-Subject line only, unless the change is not self-evident from the subject. See
-[Writing style](#writing-style) for body, register, and issue-reference rules.
 
 ## Writing style
 
@@ -722,7 +620,15 @@ The house register:
 ### Commit messages
 
 - Conventional-commit subject, imperative, under ~70 characters:
-  `fix(rag): upgrade lancedb to 0.31, unbreak and cover the backend`.
+  `fix(rag): upgrade lancedb to 0.31, unbreak and cover the backend`. More examples:
+
+  ```
+  feat(gemini): add Vertex AI streaming backend
+  fix(realtime): correct audio delta byte handling
+  docs: update CONTRIBUTING.md
+  test(eval): add trajectory property tests
+  ```
+
 - Body only when the change is not self-evident from the subject. When present, keep it short and
   factual, prefer bullets over paragraphs, and state what changed and why in as few lines as
   possible.
@@ -783,7 +689,7 @@ pub async fn swap_adapter(&self, adapter_name: &str) -> Result<()> { ... }
 - **Branch naming**: Use `prefix/short-description`. Allowed prefixes: `feat/`, `fix/`, `docs/`, `refactor/`, `test/`, `chore/`.
 - **Reference**: Include `Fixes #123` or similar in the PR description.
 - **Scope**: Keep PRs focused — one logical change per PR. Don't mix unrelated changes.
-- **Local gates before pushing**: Run `fmt`, `clippy`, `test`, and `check` via `devenv shell`. These are local shorthand, not CI job names — `check` has no CI job at all.
+- **Local gates before pushing**: the [quality gates](#quality-gates). `scripts/validate-pr.sh` runs the PR tier scoped to the branch's changes (see CONTRIBUTING.md, "Validating a Branch Locally").
 - **CI gates that block merge**: `pr-gate` (all `ci.yml` PR-tier jobs) and `semver`; see [CI cost tiers](#ci-cost-tiers). CONTRIBUTING.md ("Branch Protection — Required Status Checks") is authoritative.
 
 ### PR Checklist requirements
@@ -798,7 +704,7 @@ pub async fn swap_adapter(&self, adapter_name: &str) -> Result<()> { ... }
    - Commit messages follow conventional format.
    - Branch targets `main` branch.
 3. **Documentation**:
-   - `CHANGELOG.md` updated for user-facing changes.
+   - Changelog fragment added under `changelog.d/` for user-facing changes.
    - `README.md` updated if crate capabilities changed.
    - Examples added or updated for new features.
 
@@ -814,25 +720,10 @@ Always verify builds during publish — never use `--no-verify`. Verification en
 
 ### Publish order
 
-Crates must be published in dependency order. `cargo xtask publish` (via
-`./publish.sh`) computes the order from the workspace graph, so this list is
-documentation rather than configuration — `scripts/check-publish-order.sh` is the
-gate that keeps it satisfiable. The current 8 tiers over 43 publishable crates:
-
-```
-Tier 1: adk-core, adk-anthropic, adk-deploy, adk-enterprise, adk-rust-macros,
-        adk-telemetry, awp-types
-Tier 2: adk-action, adk-artifact, adk-awp, adk-browser, adk-devtools, adk-gcp,
-        adk-gemini, adk-guardrail, adk-memory, adk-mistralrs, adk-plugin,
-        adk-sandbox, adk-session
-Tier 3: adk-code, adk-graph, adk-model, adk-rag, adk-realtime, adk-retry-reflect,
-        adk-skill
-Tier 4: adk-agent, adk-audio, adk-runner, adk-tool
-Tier 5: adk-acp, adk-codeact-monty, adk-eval, adk-managed, adk-server
-Tier 6: adk-auth, adk-bench, adk-cli
-Tier 7: adk-computer-use, adk-payments, cargo-adk
-Tier 8: adk-rust (umbrella — always last)
-```
+Crates publish in dependency order, which `cargo xtask publish` (via `./publish.sh`) computes from
+`cargo metadata` at run time; `cargo xtask publish --resume --dry-run` prints it.
+`scripts/check-publish-order.sh` is the gate that keeps it satisfiable, and `adk-rust` always
+publishes last.
 
 > **Note:** internal **dev**-dependencies are declared path-only (no version) so
 > they do not constrain this order. Adding a versioned internal dev-dependency can
@@ -842,20 +733,19 @@ Tier 8: adk-rust (umbrella — always last)
 
 1. Ensure all quality gates pass and the version is bumped in `[workspace.package]` and all `[workspace.dependencies]` entries.
 2. Tag the release: `git tag v<version> && git push origin v<version>`.
-4. Publish one crate at a time with verification:
+3. Publish one crate at a time with verification:
 
 ```bash
 cargo publish -p <crate-name>
 ```
 
-5. Cargo waits for crates.io indexing automatically after upload. If a dependent crate fails with "failed to select a version", wait a minute and retry.
-6. `adk-mistralrs` is now publishable (mistralrs on crates.io). Include it in the publish order after Tier 2.
+4. Cargo waits for crates.io indexing automatically after upload. If a dependent crate fails with "failed to select a version", wait a minute and retry.
 
 ### Version checklist
 
 - [ ] `[workspace.package] version` in root `Cargo.toml`
 - [ ] All `adk-*` entries in `[workspace.dependencies]`
-- [ ] `CHANGELOG.md` updated
+- [ ] Changelog fragments assembled into `CHANGELOG.md` (`bash scripts/changelog-assemble.sh --into <version>`)
 - [ ] Git tag created and pushed
 - [ ] GitHub release created with release notes
 
@@ -863,45 +753,3 @@ cargo publish -p <crate-name>
 
 - `adk-gemini/AGENTS.md` — Gemini client tracing conventions and instrumentation patterns
 - `STABILITY.md` — Crate stability tiers (Stable/Beta/Experimental), deprecation policy, 1.0 milestone
-
-## Convenience APIs (0.5.0+)
-
-- `adk_rust::provider_from_env()` — auto-detect LLM provider from `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GOOGLE_API_KEY`
-- `adk_rust::run(instructions, input)` — single-function agent invocation with auto provider detection
-- `Runner::builder()` — typestate builder enforcing required fields at compile time
-- `Runner::run_str()` — convenience accepting `&str` for user/session IDs
-- `Runner::interrupt(session_id)` — cancel a running agent mid-execution
-- Prompt caching is enabled by default for Anthropic and Bedrock. Gemini explicit caching activates when `cache_capable` is set on the runner.
-- Pricing modules: `adk_gemini::pricing`, `adk_model::openai::pricing`, `adk_anthropic::pricing`
-- `EncryptedSession<S>` in `adk-session` (behind `encrypted-session` feature) — AES-256-GCM encryption with key rotation
-- `InterruptionDetection` enum in `adk-realtime` — `Manual` (default) or `Automatic` VAD-based interruption
-- `ToolSearchConfig` in `adk-anthropic` — regex-based tool filtering for the Anthropic provider
-- MCP Resource API: `McpToolset::list_resources()`, `list_resource_templates()`, `read_resource(uri)`
-- MCP Elicitation: `McpToolset::with_elicitation_handler()` for form/URL-based elicitation
-- `McpServerManager` — lifecycle management for multiple MCP server processes with auto-restart
-- Graph durable resume: `PregelExecutor` resumes from last checkpoint on startup
-- `ServerBuilder` — register custom Axum controllers alongside built-in routes
-- `ToolExecutionStrategy` — `Sequential`, `Parallel`, or `Auto` dispatch for tool calls
-- `StatefulTool<S>` — generic wrapper for stateful tool closures
-- `SimpleToolContext` — lightweight context for non-agent callers (testing, MCP servers)
-- `SchemaAdapter` trait — provider-aware schema normalization (Gemini, OpenAI strict/non-strict, Anthropic, Generic)
-- `parse_text_tool_calls()` — detect tool calls in text from 7 model formats (Qwen, Llama, Mistral, DeepSeek, Gemma 4, etc.)
-- `SharedState` — thread-safe key-value store for parallel agent coordination
-- Project-scoped memory: `MemoryService::add_session_to_project()`, `search_in_project()`
-
-## adk-studio (separate repo)
-
-`adk-studio` has been extracted to a standalone repository at `../adk-studio/` (or `https://github.com/zavora-ai/adk-studio`). It depends on ADK crates via local path references for development.
-
-```bash
-# Build the studio
-cargo check --manifest-path ../adk-studio/Cargo.toml
-
-# Frontend (Vite + React + TypeScript + ReactFlow)
-cd ../adk-studio/ui
-pnpm install          # install deps
-pnpm run dev          # dev server
-pnpm run build        # production build (tsc + vite)
-pnpm run lint         # eslint
-pnpm run test         # vitest (single run)
-```

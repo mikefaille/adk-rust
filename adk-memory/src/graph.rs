@@ -433,7 +433,7 @@ CREATE INDEX IF NOT EXISTS idx_kg_epi ON kg_episodic(app_name, user_id);",
     /// Score entities against a free-text query, returning the best matches with
     /// their current relations. Only currently-valid facts are considered.
     ///
-    /// The query is split into content tokens (see [`tokenize`]); an entity
+    /// The query is split into content tokens (see `tokenize`); an entity
     /// scores per token found in its name (×3), type (×2), or observations (×1),
     /// so a multi-word recall query like "dietary notes and allergies" matches an
     /// entity whose facts mention "allergic" or "peanuts" — which a whole-string
@@ -694,7 +694,7 @@ CREATE INDEX IF NOT EXISTS idx_kg_epi ON kg_episodic(app_name, user_id);",
                 ))
             })
             .collect();
-        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
         Ok(scored.into_iter().take(limit).map(|(_, m)| m).collect())
     }
 }
@@ -844,11 +844,94 @@ impl MemoryService for GraphMemoryService {
         Ok(SearchResponse { memories })
     }
 
-    /// GDPR erasure: drop the user's entire graph + episodic log.
+    /// Every row of the user's graph and episodic log, oldest first: one entry per entity,
+    /// observation, relation (superseded ones included, marked with when they ended), and
+    /// turn, authored `graph` except for turns.
+    async fn export_user(&self, app_name: &str, user_id: &str) -> Result<Vec<UserMemory>> {
+        let graph_entry = |text: String, timestamp: &str| UserMemory {
+            entry: MemoryEntry {
+                content: Content::new("model").with_text(text),
+                author: "graph".to_string(),
+                timestamp: parse_ts(timestamp),
+            },
+            session_id: None,
+            project_id: None,
+        };
+        let until = |valid_to: Option<String>| {
+            valid_to.map(|to| format!(" (until {to})")).unwrap_or_default()
+        };
+        let query = |sql: &'static str| sqlx::query(sql).bind(app_name).bind(user_id);
+        let mut memories = Vec::new();
+        for row in query(
+            "SELECT name, entity_type, updated_at FROM kg_entities \
+             WHERE app_name=?1 AND user_id=?2",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sql)?
+        {
+            let (name, kind): (String, String) = (row.get("name"), row.get("entity_type"));
+            memories
+                .push(graph_entry(format!("{name} ({kind})"), &row.get::<String, _>("updated_at")));
+        }
+        for row in query(
+            "SELECT entity_name, content, valid_from, valid_to FROM kg_observations \
+             WHERE app_name=?1 AND user_id=?2",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sql)?
+        {
+            let (entity, content): (String, String) = (row.get("entity_name"), row.get("content"));
+            let text = format!("{entity}: {content}{}", until(row.get("valid_to")));
+            memories.push(graph_entry(text, &row.get::<String, _>("valid_from")));
+        }
+        for row in query(
+            "SELECT source, relation_type, target, valid_from, valid_to FROM kg_relations \
+             WHERE app_name=?1 AND user_id=?2",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sql)?
+        {
+            let (source, relation, target): (String, String, String) =
+                (row.get("source"), row.get("relation_type"), row.get("target"));
+            let text = format!("{source} {relation} {target}{}", until(row.get("valid_to")));
+            memories.push(graph_entry(text, &row.get::<String, _>("valid_from")));
+        }
+        for row in query(
+            "SELECT session_id, author, text, timestamp FROM kg_episodic \
+             WHERE app_name=?1 AND user_id=?2",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sql)?
+        {
+            let author: String = row.get("author");
+            memories.push(UserMemory {
+                entry: MemoryEntry {
+                    content: Content::new(author.clone()).with_text(row.get::<String, _>("text")),
+                    author,
+                    timestamp: parse_ts(&row.get::<String, _>("timestamp")),
+                },
+                session_id: Some(row.get("session_id")),
+                project_id: None,
+            });
+        }
+        memories.sort_by_key(|memory| memory.entry.timestamp);
+        Ok(memories)
+    }
+
+    /// Drops the user's entire graph and episodic log.
     async fn delete_user(&self, app_name: &str, user_id: &str) -> Result<()> {
         let mut tx = self.begin().await?;
-        for table in ["kg_entities", "kg_observations", "kg_relations", "kg_episodic"] {
-            sqlx::query(&format!("DELETE FROM {table} WHERE app_name=?1 AND user_id=?2"))
+        for delete in [
+            "DELETE FROM kg_entities WHERE app_name=?1 AND user_id=?2",
+            "DELETE FROM kg_observations WHERE app_name=?1 AND user_id=?2",
+            "DELETE FROM kg_relations WHERE app_name=?1 AND user_id=?2",
+            "DELETE FROM kg_episodic WHERE app_name=?1 AND user_id=?2",
+        ] {
+            sqlx::query(delete)
                 .bind(app_name)
                 .bind(user_id)
                 .execute(&mut *tx)

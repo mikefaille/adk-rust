@@ -25,10 +25,8 @@
 //!         api_key: std::env::var("GOOGLE_API_KEY")?
 //!     };
 //!
-//!     let model = GeminiRealtimeModel::new(
-//!         backend,
-//!         "models/gemini-live-2.5-flash-native-audio",
-//!     );
+//!     // Only Gemini 3.8 Live is supported; see `DEFAULT_MODEL`.
+//!     let model = GeminiRealtimeModel::new(backend, "models/gemini-3.8-live");
 //!
 //!     let config = RealtimeConfig::default()
 //!         .with_instruction("You are a helpful assistant.");

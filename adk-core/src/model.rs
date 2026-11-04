@@ -15,7 +15,7 @@ pub type LlmResponseStream = Pin<Box<dyn Stream<Item = Result<LlmResponse>> + Se
 /// and produce a stream of responses for a given request.
 #[async_trait]
 pub trait Llm: Send + Sync {
-    /// Returns the model identifier (e.g., "gemini-2.5-flash").
+    /// Returns the model identifier (e.g., "gemini-3.7-flash").
     fn name(&self) -> &str;
     /// Generates content from the given request, optionally streaming.
     async fn generate_content(&self, req: LlmRequest, stream: bool) -> Result<LlmResponseStream>;
@@ -45,6 +45,56 @@ pub trait Llm: Send + Sync {
     fn uses_interactions_api(&self) -> bool {
         false
     }
+
+    /// Returns an upper bound, in micro-USD, on what `request` can cost on this model.
+    ///
+    /// The spend ledger reserves this amount before the call, so the call's committed
+    /// cost never exceeds its reservation and a hard cap is never overshot. Providers
+    /// derive it from the request's size, its output cap (or the model's maximum output),
+    /// and the highest per-token rate that can apply. `None` means the call cannot be
+    /// bounded — an unpriced model, or a request whose size is unknown; see
+    /// [`ModelCallScope`](crate::ModelCallScope) for how such calls are reserved.
+    ///
+    /// The default returns `None`. Wrappers forward to the model they wrap.
+    fn max_cost_micro_usd(&self, request: &LlmRequest) -> Option<u64> {
+        let _ = request;
+        None
+    }
+
+    /// The provider-executed web search this model's transport serves, if any (spec 3.1
+    /// §7.20 "Provider-native search and fetch").
+    ///
+    /// Read from the client, never from the model's output: an agent that wants the
+    /// provider's search declares the built-in tool this names, and a model that returns
+    /// `None` gets web search only through a tool the application runs itself.
+    ///
+    /// The default returns `None`. Wrappers forward to the model they wrap.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_core::{Llm, LlmRequest, LlmResponseStream, NativeWebSearch, NativeWebSearchTool};
+    ///
+    /// struct Hosted;
+    ///
+    /// #[async_trait::async_trait]
+    /// impl Llm for Hosted {
+    ///     fn name(&self) -> &str {
+    ///         "hosted"
+    ///     }
+    ///     async fn generate_content(&self, _: LlmRequest, _: bool) -> adk_core::Result<LlmResponseStream> {
+    ///         unimplemented!()
+    ///     }
+    ///     fn native_web_search(&self) -> Option<NativeWebSearch> {
+    ///         Some(NativeWebSearch::new("anthropic", NativeWebSearchTool::AnthropicWebSearch, true))
+    ///     }
+    /// }
+    ///
+    /// assert_eq!(Hosted.native_web_search().unwrap().provider, "anthropic");
+    /// ```
+    fn native_web_search(&self) -> Option<NativeWebSearch> {
+        None
+    }
 }
 
 /// A request to an LLM provider.
@@ -65,6 +115,66 @@ pub struct LlmRequest {
     /// ignored by transports that do not support response chaining.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub previous_response_id: Option<String>,
+}
+
+/// How much reasoning effort a model spends (spec 3.1 §7.23, §10 C4).
+///
+/// Each provider maps a level to its own control: Anthropic `output_config.effort` with
+/// adaptive thinking, OpenAI `reasoning_effort`, Gemini `thinking_level`. Levels above
+/// `High` (`xhigh`, `max`) and below `Low` (`minimal`, `none`) are reachable only through a
+/// provider's own configuration.
+///
+/// # Example
+///
+/// ```rust
+/// use adk_core::Effort;
+///
+/// assert_eq!("high".parse::<Effort>(), Ok(Effort::High));
+/// assert_eq!(Effort::Low.to_string(), "low");
+/// assert!(Effort::Low < Effort::High);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Effort {
+    /// The least reasoning a provider offers short of none.
+    Low,
+    /// Balanced reasoning.
+    Medium,
+    /// Thorough reasoning.
+    High,
+}
+
+impl Effort {
+    /// Every level, lowest first.
+    pub const ALL: [Effort; 3] = [Effort::Low, Effort::Medium, Effort::High];
+
+    /// The level's name as flags and configuration files spell it.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Effort::Low => "low",
+            Effort::Medium => "medium",
+            Effort::High => "high",
+        }
+    }
+}
+
+impl std::fmt::Display for Effort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for Effort {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "low" => Ok(Effort::Low),
+            "medium" => Ok(Effort::Medium),
+            "high" => Ok(Effort::High),
+            other => Err(format!("unknown effort '{other}'; use low, medium or high")),
+        }
+    }
 }
 
 /// Configuration for LLM content generation.
@@ -97,10 +207,47 @@ pub struct GenerateContentConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_schema: Option<serde_json::Value>,
 
+    /// Output modalities requested from Gemini, such as `["TEXT", "IMAGE"]`.
+    /// Other clients reject this field rather than silently dropping it.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use adk_core::GenerateContentConfig;
+    /// let config = GenerateContentConfig {
+    ///     response_modalities: Some(vec!["TEXT".into(), "IMAGE".into()]),
+    ///     ..Default::default()
+    /// };
+    /// assert_eq!(config.response_modalities.as_ref().unwrap().len(), 2);
+    /// ```
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub response_modalities: Option<Vec<String>>,
+
     /// Optional cached content name for Gemini provider.
     /// When set, the Gemini provider attaches this to the generation request.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub cached_content: Option<String>,
+
+    /// The reasoning effort of this call (spec 3.1 §7.23, §10 C4).
+    ///
+    /// A set value wins over the effort the client was built with: Anthropic sends it as
+    /// `output_config.effort` with adaptive thinking, OpenAI as `reasoning_effort` (Chat
+    /// Completions) or `reasoning.effort` (Responses), Gemini as `thinking_level`, and
+    /// OpenRouter and DeepSeek as their reasoning effort. A provider or model with no effort
+    /// control ignores it and logs at debug level. `None` keeps the client's own
+    /// configuration.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use adk_core::{Effort, GenerateContentConfig};
+    ///
+    /// let config = GenerateContentConfig { effort: Some(Effort::High), ..Default::default() };
+    /// assert_eq!(serde_json::to_value(&config).unwrap()["effort"], "high");
+    /// assert!(serde_json::to_value(GenerateContentConfig::default()).unwrap().get("effort").is_none());
+    /// ```
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<Effort>,
 
     /// Provider-specific request options keyed by provider namespace.
     #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
@@ -130,6 +277,11 @@ pub struct LlmResponse {
     /// Error message from the provider, if any.
     pub error_message: Option<String>,
     /// Provider-specific metadata (e.g., response IDs, routing info).
+    ///
+    /// `LlmAgent` recognizes two optional boolean fields: `content_complete`
+    /// on a non-partial response replaces accumulated deltas with authoritative
+    /// content; `continue_turn` requests another bounded model iteration for
+    /// a provider-native tool pause without a client function call.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub provider_metadata: Option<serde_json::Value>,
     /// Interactions API: the server-assigned interaction id for this turn, used
@@ -137,6 +289,20 @@ pub struct LlmResponse {
     /// the generateContent transport and non-Gemini providers.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub interaction_id: Option<String>,
+    /// Model that produced this response: the version the provider reports when
+    /// it reports one, otherwise the identifier the request was sent to.
+    ///
+    /// Set by every `adk-model` provider. Budgets and pricing read it to
+    /// attribute usage and cost; `None` means the producer did not attribute it.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub model: Option<String>,
+    /// Provider that served this response, such as `"gemini"`, `"openai"`,
+    /// `"anthropic"` or `"bedrock"`.
+    ///
+    /// Set by every `adk-model` provider; `None` means the producer did not
+    /// attribute it.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub provider: Option<String>,
 }
 
 /// Trait for LLM providers that support prompt caching.
@@ -247,6 +413,10 @@ pub struct UsageMetadata {
     pub audio_output_token_count: Option<i32>,
 
     /// Estimated cost in USD for this request.
+    ///
+    /// `adk-model` providers fill this from the provider's own report when it
+    /// sends one (OpenRouter), otherwise from `adk_model::pricing::PricingCatalog`.
+    /// `None` means the cost is unknown, never that the request was free.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub cost: Option<f64>,
 
@@ -254,9 +424,169 @@ pub struct UsageMetadata {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub is_byok: Option<bool>,
 
-    /// Provider-specific usage details (e.g., server tool use, video tokens).
+    /// Provider-native usage data retained when available, including fields
+    /// that are not yet projected into the normalized counters above.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub provider_usage: Option<serde_json::Value>,
+
+    /// Provider-executed built-in tool uses the provider reported for this request.
+    ///
+    /// Each use counts as one tool call against a
+    /// [`RunBudget`](crate::RunBudget), and priced kinds add their per-use fee to
+    /// [`cost`](Self::cost). See [`BuiltinToolUse`] for the kinds providers report.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub builtin_tool_uses: Vec<BuiltinToolUse>,
+}
+
+impl UsageMetadata {
+    /// Total number of provider-executed built-in tool uses across all kinds.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use adk_core::{BuiltinToolUse, UsageMetadata};
+    ///
+    /// let usage = UsageMetadata {
+    ///     builtin_tool_uses: vec![BuiltinToolUse::new("web_search", 2), BuiltinToolUse::new("web_fetch", 1)],
+    ///     ..Default::default()
+    /// };
+    /// assert_eq!(usage.builtin_tool_use_count(), 3);
+    /// ```
+    pub fn builtin_tool_use_count(&self) -> u64 {
+        self.builtin_tool_uses.iter().map(|used| u64::from(used.count)).sum()
+    }
+}
+
+/// Deserializes a token count that a provider may report as `null`, reading `null` as zero.
+///
+/// Pair it with `#[serde(default)]` so that a missing count is zero too. Compatible endpoints
+/// report a count they did not compute as `null` or leave it out, and that must not fail the
+/// model turn the usage belongs to. Fields typed `Option<_>` need no helper: serde already
+/// reads `null` there as `None`.
+///
+/// # Example
+///
+/// ```
+/// use serde::Deserialize;
+///
+/// #[derive(Deserialize)]
+/// struct Usage {
+///     #[serde(default, deserialize_with = "adk_core::nullable_count")]
+///     input_tokens: u32,
+/// }
+///
+/// let usage: Usage = serde_json::from_str(r#"{"input_tokens": null}"#).unwrap();
+/// assert_eq!(usage.input_tokens, 0);
+/// let usage: Usage = serde_json::from_str("{}").unwrap();
+/// assert_eq!(usage.input_tokens, 0);
+/// let usage: Usage = serde_json::from_str(r#"{"input_tokens": 12}"#).unwrap();
+/// assert_eq!(usage.input_tokens, 12);
+/// ```
+///
+/// # Errors
+///
+/// Returns the deserializer's error when the value is neither `null` nor a `T`.
+pub fn nullable_count<'de, D, T>(deserializer: D) -> std::result::Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+/// How many times the provider ran one kind of built-in tool for a request.
+///
+/// Kinds are provider-neutral names:
+///
+/// | Kind | Reported by |
+/// |------|-------------|
+/// | `web_search` | Anthropic `usage.server_tool_use.web_search_requests`, OpenAI `web_search_call` items |
+/// | `web_fetch` | Anthropic `usage.server_tool_use.web_fetch_requests` |
+/// | `code_execution` | Anthropic `usage.server_tool_use.code_execution_requests`, OpenAI `code_interpreter_call` items, Gemini `executableCode` parts |
+/// | `file_search` | OpenAI `file_search_call` items |
+/// | `image_generation` | OpenAI `image_generation_call` items |
+/// | `mcp` | OpenAI `mcp_call` items |
+/// | `google_search` | Gemini `groundingMetadata.webSearchQueries` (one per query) |
+/// | `google_maps` | Gemini grounding chunks with a `maps` source (one per grounded response) |
+///
+/// # Example
+///
+/// ```
+/// use adk_core::BuiltinToolUse;
+///
+/// let used = BuiltinToolUse::new("web_search", 3);
+/// assert_eq!(used.kind, "web_search");
+/// assert_eq!(used.count, 3);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuiltinToolUse {
+    /// Provider-neutral tool kind, such as `web_search`.
+    pub kind: String,
+    /// Number of uses the provider reported.
+    pub count: u32,
+}
+
+impl BuiltinToolUse {
+    /// Creates a record of `count` uses of `kind`.
+    pub fn new(kind: impl Into<String>, count: u32) -> Self {
+        Self { kind: kind.into(), count }
+    }
+}
+
+/// The wire form of a provider-executed web search tool (spec 3.1 §7.20).
+///
+/// Each variant names the `adk-tool` built-in that declares it.
+///
+/// | Variant | Built-in | Request entry |
+/// |---------|----------|---------------|
+/// | `GoogleSearch` | `GoogleSearchTool` | Gemini `tools[].google_search` |
+/// | `AnthropicWebSearch` | `WebSearchTool` | Messages `web_search_20250305` server tool |
+/// | `OpenAiWebSearch` | `OpenAIWebSearchTool` | Responses `{"type": "web_search"}` |
+/// | `DeepSeekWebSearch` | `DeepSeekWebSearchTool` | DeepSeek Responses `{"type": "web_search"}` |
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum NativeWebSearchTool {
+    /// Gemini `google_search` grounding.
+    GoogleSearch,
+    /// The Anthropic Messages `web_search` server tool.
+    AnthropicWebSearch,
+    /// The OpenAI Responses `web_search` tool.
+    OpenAiWebSearch,
+    /// The `web_search` tool of DeepSeek's Responses endpoint.
+    DeepSeekWebSearch,
+}
+
+/// The provider-executed web search a model's transport serves (spec 3.1 §7.20), as
+/// [`Llm::native_web_search`] reports it.
+///
+/// # Example
+///
+/// ```rust
+/// use adk_core::{NativeWebSearch, NativeWebSearchTool};
+///
+/// let search = NativeWebSearch::new("gemini", NativeWebSearchTool::GoogleSearch, false);
+/// assert_eq!(search.provider, "gemini");
+/// assert!(!search.allowed_domains, "google_search takes no domain allowlist");
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[non_exhaustive]
+pub struct NativeWebSearch {
+    /// Provider that runs the search, such as `"gemini"`, `"anthropic"`, `"openai"` or
+    /// `"deepseek"`.
+    pub provider: &'static str,
+    /// The tool the request declares.
+    pub tool: NativeWebSearchTool,
+    /// Whether the provider honours a domain allowlist on the tool.
+    pub allowed_domains: bool,
+}
+
+impl NativeWebSearch {
+    /// Describes the search `provider` runs through `tool`, with or without a domain
+    /// allowlist.
+    pub fn new(provider: &'static str, tool: NativeWebSearchTool, allowed_domains: bool) -> Self {
+        Self { provider, tool, allowed_domains }
+    }
 }
 
 /// Citation metadata emitted by model providers for source attribution.
@@ -342,6 +672,8 @@ impl LlmResponse {
             error_message: None,
             provider_metadata: None,
             interaction_id: None,
+            model: None,
+            provider: None,
         }
     }
 }
@@ -451,6 +783,8 @@ mod tests {
             error_message: None,
             provider_metadata: None,
             interaction_id: None,
+            model: None,
+            provider: None,
         };
 
         let encoded = serde_json::to_string(&response).expect("serialize");
@@ -489,7 +823,9 @@ mod tests {
                 "properties": { "answer": { "type": "string" } },
                 "required": ["answer"]
             })),
+            response_modalities: Some(vec!["TEXT".to_string(), "IMAGE".to_string()]),
             cached_content: Some("cachedContents/abc123".to_string()),
+            effort: Some(Effort::Medium),
             extensions,
         };
 
@@ -508,6 +844,19 @@ mod tests {
         assert_eq!(decoded.response_schema, config.response_schema);
         assert_eq!(decoded.cached_content, config.cached_content);
         assert_eq!(decoded.extensions, config.extensions);
+        assert_eq!(decoded.response_modalities, config.response_modalities);
+        assert_eq!(decoded.effort, config.effort);
+    }
+
+    #[test]
+    fn a_config_without_effort_reads_and_writes_as_before() {
+        let legacy: GenerateContentConfig =
+            serde_json::from_value(serde_json::json!({ "temperature": 0.2 })).unwrap();
+        assert_eq!(legacy.effort, None);
+        assert_eq!(serde_json::to_value(&legacy).unwrap().get("effort"), None);
+        let set: GenerateContentConfig =
+            serde_json::from_value(serde_json::json!({ "effort": "low" })).unwrap();
+        assert_eq!(set.effort, Some(Effort::Low));
     }
 
     #[test]
@@ -533,6 +882,7 @@ mod tests {
                         "video_tokens": 8
                     }
                 })),
+                builtin_tool_uses: vec![BuiltinToolUse::new("web_search", 1)],
             }),
             finish_reason: Some(FinishReason::Stop),
             citation_metadata: None,
@@ -548,6 +898,8 @@ mod tests {
                 }
             })),
             interaction_id: None,
+            model: None,
+            provider: None,
         };
 
         let encoded = serde_json::to_string(&response).expect("serialize");
@@ -561,6 +913,10 @@ mod tests {
         assert_eq!(
             decoded.usage_metadata.as_ref().and_then(|u| u.is_byok),
             response.usage_metadata.as_ref().and_then(|u| u.is_byok),
+        );
+        assert_eq!(
+            decoded.usage_metadata.as_ref().map(|u| u.builtin_tool_uses.clone()),
+            Some(vec![BuiltinToolUse::new("web_search", 1)]),
         );
         assert_eq!(
             decoded.usage_metadata.as_ref().and_then(|u| u.provider_usage.clone()),

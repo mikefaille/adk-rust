@@ -17,15 +17,21 @@ categories = ["development-tools", "asynchronous"]
 # with safe archive extraction. Lifecycle operations are platform-owned.
 vertex-skill-registry = [
     "dep:adk-gcp",
+    "dep:async-trait",
     "dep:google-cloud-auth",
     "dep:reqwest",
     "dep:base64",
     "dep:zip",
 ]
+# Google ADK-style skill discovery and on-demand loading tools. This stays
+# opt-in so existing prompt-injection users retain their current behavior.
+progressive-disclosure = ["dep:async-trait", "dep:tokio"]
 
 [dependencies]
 adk-core.workspace = true
 adk-gcp = { workspace = true, optional = true }
+async-trait = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["sync"] }
 adk-plugin.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -48,3 +54,11 @@ axum = "0.8"
 [[test]]
 name = "skill_registry_contract"
 required-features = ["vertex-skill-registry"]
+
+[[test]]
+name = "skill_registry_load"
+required-features = ["vertex-skill-registry"]
+
+# Document every feature-gated API on docs.rs.
+[package.metadata.docs.rs]
+all-features = true

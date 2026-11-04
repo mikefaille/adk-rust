@@ -5,8 +5,8 @@
 //! | Model | Description | Thinking |
 //! |-------|-------------|----------|
 //! | `deepseek-v4-pro` | Strongest reasoning, thinking enabled by default | Yes |
-//! | `deepseek-v4-flash` | Fast, cost-efficient | Optional |
-//! | `deepseek-v4-flash-vision-exp` | Experimental vision | Yes |
+//! | `deepseek-flash` | Fast, cost-efficient, vision-capable | Optional |
+//! | `deepseek-v4-pro` | Strongest reasoning | Yes |
 //!
 //! # Features
 //!
@@ -60,6 +60,16 @@
 //!
 //! In thinking mode, `temperature`, `top_p`, `presence_penalty`, and
 //! `frequency_penalty` are silently ignored by the API.
+//!
+//! # Web search
+//!
+//! The Chat Completions endpoint this client uses accepts function tools only, so
+//! [`Llm::native_web_search`](adk_core::Llm::native_web_search) reports none. DeepSeek runs
+//! web search on its Responses endpoint for `deepseek-v4-pro` (an
+//! `OpenAIResponsesClient` with base URL [`DEEPSEEK_API_BASE`] and
+//! `adk_tool::DeepSeekWebSearchTool`) and on its Anthropic-compatible endpoint (below, with
+//! `adk_tool::WebSearchTool`); both clients report it. See
+//! <https://api-docs.deepseek.com/guides/responses_api>.
 //!
 //! # Anthropic API Compatibility
 //!

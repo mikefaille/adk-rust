@@ -1,21 +1,42 @@
+#[cfg(feature = "mcp-apps")]
+mod apps;
 mod auth;
+mod discovery;
 mod elicitation;
 mod http;
+mod input;
 pub mod manager;
+mod parked;
 mod reconnect;
 mod resource_notifications;
+mod schema_limits;
+#[cfg(feature = "mcp-server")]
+pub mod server;
 mod task;
 mod toolset;
 
+#[cfg(feature = "mcp-apps")]
+pub use apps::{
+    MCP_APP_MIME_TYPE, MCP_APP_STATE_KEY, MCP_APPS_EXTENSION_ID, MCP_APPS_VERSION, McpAppRecord,
+    McpAppResource, McpUiBinding, McpUiCsp, McpUiVisibility,
+};
 pub use auth::{AuthError, McpAuth, OAuth2Config};
-pub use elicitation::{AdkClientHandler, AutoDeclineElicitationHandler, ElicitationHandler};
+pub use discovery::McpDiscoveryLimits;
+pub use elicitation::{
+    AdkClientHandler, AutoDeclineElicitationHandler, ElicitationHandler, ElicitationScope,
+    ElicitationScopeGuard, ElicitationScopes,
+};
 pub use http::McpHttpClientBuilder;
-pub use manager::{McpServerConfig, McpServerManager, RestartPolicy, ServerStatus};
+pub use manager::{
+    McpServerConfig, McpServerManager, RestartPolicy, ServerStatus, ServerStatusTransition,
+};
+pub use parked::{McpCallOutcome, ParkedCallKind, ParkedMcpCall};
 pub use reconnect::{
     ConnectionFactory, ConnectionRefresher, RefreshConfig, RetryResult, SimpleClient,
     should_refresh_connection,
 };
 pub use resource_notifications::ResourceNotificationHandler;
+pub use schema_limits::McpSchemaLimits;
 pub use task::{CreateTaskResult, McpTaskConfig, TaskError, TaskInfo, TaskStatus};
 pub use toolset::{McpToolset, ToolFilter};
 

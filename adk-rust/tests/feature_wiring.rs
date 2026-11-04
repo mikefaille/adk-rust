@@ -3,10 +3,11 @@
 //!
 //! The PR-tier `feature-coverage` matrix compiles and tests the umbrella with
 //! its code-execution opt-ins (`code-tools`, `code-embedded-js`,
-//! `code-embedded-python`, `code-docker`, `codeact-monty`). These tests give
-//! that entry a real signal: a feature that stops forwarding — or a re-export
-//! module that stops compiling — fails here, in the umbrella, rather than in
-//! a downstream consumer.
+//! `code-embedded-python`, `code-docker`, `codeact-monty`) and with the
+//! agent capability features (`guardrail`, `plugin`, `skills`). These tests
+//! give those entries a real signal: a feature that stops forwarding — or a
+//! re-export module that stops compiling — fails here, in the umbrella, rather
+//! than in a downstream consumer.
 
 /// Always present: the `adk-core` root re-export needs no feature.
 #[test]
@@ -92,5 +93,292 @@ mod codeact_monty {
     fn monty_runtime_is_reachable() {
         let runtime = MontyRuntime::new();
         assert!(runtime.capabilities().supports_suspension);
+    }
+}
+
+/// Runs an `LlmAgent` whose model calls one tool, so a test can tell whether the tool ran.
+#[cfg(all(
+    feature = "agents",
+    feature = "runner",
+    feature = "sessions",
+    any(feature = "guardrail", feature = "plugin")
+))]
+mod tool_call_harness {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use adk_rust::agent::LlmAgentBuilder;
+    use adk_rust::futures::{StreamExt, stream};
+    use adk_rust::runner::Runner;
+    use adk_rust::session::{CreateRequest, InMemorySessionService, SessionService};
+    use adk_rust::{
+        Agent, Content, Llm, LlmRequest, LlmResponse, LlmResponseStream, Part, Result, Tool,
+        ToolContext, async_trait,
+    };
+    use serde_json::{Value, json};
+
+    pub const TOOL: &str = "delete_everything";
+
+    /// Calls [`TOOL`] on the first turn and answers with text afterwards.
+    struct CallOnce {
+        turns: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl Llm for CallOnce {
+        fn name(&self) -> &str {
+            "call-once"
+        }
+        async fn generate_content(
+            &self,
+            _req: LlmRequest,
+            _stream: bool,
+        ) -> Result<LlmResponseStream> {
+            let content = if self.turns.fetch_add(1, Ordering::SeqCst) == 0 {
+                Content {
+                    role: "model".to_string(),
+                    parts: vec![Part::FunctionCall {
+                        name: TOOL.to_string(),
+                        args: json!({ "path": "/" }),
+                        id: Some("call_1".to_string()),
+                        thought_signature: None,
+                    }],
+                }
+            } else {
+                Content::new("model").with_text("done")
+            };
+            Ok(Box::pin(stream::iter([Ok(LlmResponse::new(content))])))
+        }
+    }
+
+    struct CountingTool {
+        runs: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Tool for CountingTool {
+        fn name(&self) -> &str {
+            TOOL
+        }
+        fn description(&self) -> &str {
+            "counts its executions"
+        }
+        async fn execute(&self, _ctx: Arc<dyn ToolContext>, _args: Value) -> Result<Value> {
+            self.runs.fetch_add(1, Ordering::SeqCst);
+            Ok(json!({ "status": "ok" }))
+        }
+    }
+
+    /// Runs one turn of the agent `configure` builds and returns how often the tool ran
+    /// and every event serialised as JSON.
+    pub async fn run(
+        configure: impl FnOnce(LlmAgentBuilder) -> LlmAgentBuilder,
+    ) -> (usize, String) {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let builder = LlmAgentBuilder::new("wiring")
+            .model(Arc::new(CallOnce { turns: AtomicUsize::new(0) }))
+            .tool(Arc::new(CountingTool { runs: Arc::clone(&runs) }));
+        let agent: Arc<dyn Agent> = Arc::new(configure(builder).build().expect("agent builds"));
+
+        let sessions = Arc::new(InMemorySessionService::new());
+        sessions
+            .create(CreateRequest {
+                app_name: "wiring".to_string(),
+                user_id: "user".to_string(),
+                session_id: Some("session".to_string()),
+                state: HashMap::new(),
+            })
+            .await
+            .expect("session created");
+        let runner = Runner::builder()
+            .app_name("wiring")
+            .agent(agent)
+            .session_service(sessions as Arc<dyn SessionService>)
+            .build()
+            .expect("runner builds");
+
+        let mut events = runner
+            .run_str("user", "session", Content::new("user").with_text("go"))
+            .await
+            .expect("run starts");
+        let mut transcript = String::new();
+        while let Some(event) = events.next().await {
+            transcript.push_str(&serde_json::to_string(&event.expect("event")).unwrap_or_default());
+        }
+        (runs.load(Ordering::SeqCst), transcript)
+    }
+}
+
+#[cfg(all(feature = "agents", feature = "runner", feature = "sessions", feature = "guardrail"))]
+mod guardrail {
+    use adk_rust::async_trait;
+    use adk_rust::guardrail::{
+        GuardrailSet, Severity, ToolGuardrail, ToolGuardrailResult, ToolGuardrailSet,
+    };
+    use serde_json::Value;
+
+    use super::tool_call_harness::{TOOL, run};
+
+    struct DenyEverything;
+
+    #[async_trait]
+    impl ToolGuardrail for DenyEverything {
+        fn name(&self) -> &str {
+            "deny-everything"
+        }
+        async fn validate_call(&self, _tool: &str, _args: &Value) -> ToolGuardrailResult {
+            ToolGuardrailResult::deny("refused by the wiring test", Severity::Critical)
+        }
+    }
+
+    /// `guardrail` forwards `adk-agent/guardrails`. Without it `LlmAgentBuilder` takes
+    /// placeholder guardrail sets that never run, and these `adk_guardrail` sets do not
+    /// type-check against it.
+    #[tokio::test]
+    async fn llm_agent_enforces_tool_guardrails() {
+        let (runs, transcript) = run(|builder| {
+            builder
+                .input_guardrails(GuardrailSet::new())
+                .output_guardrails(GuardrailSet::new())
+                .tool_guardrails(ToolGuardrailSet::new().with(DenyEverything))
+        })
+        .await;
+
+        assert_eq!(runs, 0, "a denied {TOOL} call must not execute");
+        assert!(transcript.contains("deny-everything"), "got {transcript}");
+    }
+}
+
+#[cfg(all(feature = "agents", feature = "runner", feature = "sessions", feature = "plugin"))]
+mod plugin {
+    use std::sync::Arc;
+
+    use adk_rust::plugin::{BeforeToolCallResult, EnhancedPlugin, PluginContext};
+    use adk_rust::{CallbackContext, Result, Tool, async_trait};
+    use serde_json::{Value, json};
+
+    use super::tool_call_harness::{TOOL, run};
+
+    struct ShortCircuit;
+
+    #[async_trait]
+    impl EnhancedPlugin for ShortCircuit {
+        fn name(&self) -> &str {
+            "short-circuit"
+        }
+        async fn before_tool_call(
+            &self,
+            _tool: Arc<dyn Tool>,
+            _args: Value,
+            _ctx: Arc<dyn CallbackContext>,
+            _plugin_ctx: &PluginContext,
+        ) -> Result<BeforeToolCallResult> {
+            Ok(BeforeToolCallResult::ShortCircuit(json!({ "intercepted_by": "short-circuit" })))
+        }
+    }
+
+    /// `plugin` forwards `adk-agent/enhanced-plugins`, which adds
+    /// `LlmAgentBuilder::enhanced_plugin` and runs the plugin's tool hooks.
+    #[tokio::test]
+    async fn llm_agent_runs_enhanced_plugins() {
+        let (runs, transcript) =
+            run(|builder| builder.enhanced_plugin(Arc::new(ShortCircuit))).await;
+
+        assert_eq!(runs, 0, "a short-circuited {TOOL} call must not execute");
+        assert!(transcript.contains("intercepted_by"), "got {transcript}");
+    }
+}
+
+#[cfg(all(feature = "agents", feature = "skills"))]
+mod skills {
+    use adk_rust::agent::LlmAgentBuilder;
+    use adk_rust::skill::{SelectionPolicy, SkillIndex};
+
+    /// `skills` forwards `adk-agent/skills`, which adds the skill methods on
+    /// `LlmAgentBuilder`; without it this does not compile.
+    #[test]
+    fn llm_agent_builder_accepts_skills() {
+        let builder = LlmAgentBuilder::new("skilled")
+            .with_skills(SkillIndex::default())
+            .with_skill_policy(SelectionPolicy::default())
+            .with_skill_budget(1_000);
+        drop(builder);
+    }
+}
+
+#[cfg(feature = "harness")]
+mod harness {
+    use adk_rust::futures::StreamExt;
+    use adk_rust::harness::InstructionsConfig;
+    use adk_rust::model::{ScriptedLlm, ScriptedResponse};
+    use adk_rust::prelude::*;
+    use adk_rust::serde_json::json;
+    use adk_rust::session::InMemorySessionService;
+    use adk_rust::{SessionId, UserId};
+
+    /// A fresh directory under the system temp dir; no `tempfile` dev-dependency here.
+    fn workspace() -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or_default();
+        let dir = std::env::temp_dir()
+            .join(format!("adk-rust-harness-wiring-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn agent(dir: &std::path::Path, script: Vec<ScriptedResponse>) -> HarnessAgent {
+        let builder: HarnessAgentBuilder = HarnessAgent::builder("harness");
+        builder
+            .model(Arc::new(ScriptedLlm::new("scripted", script)))
+            .workspace(adk_devtools::Workspace::new(dir))
+            .project_instructions(InstructionsConfig {
+                user_file: None,
+                ..InstructionsConfig::default()
+            })
+            .mode(HarnessMode::Plan)
+            .build()
+            .unwrap()
+    }
+
+    /// `harness` links `adk-harness` behind `adk_rust::harness` and the prelude
+    /// (spec 3.1 §8.4); a harness built through it governs its calls: Plan mode
+    /// refuses a write.
+    #[tokio::test]
+    async fn the_prelude_builds_a_governed_harness() {
+        let dir = workspace();
+        let script = vec![
+            ScriptedResponse::function_call(
+                "write_file",
+                json!({ "path": "notes.txt", "content": "hi" }),
+            ),
+            ScriptedResponse::text("Planned."),
+        ];
+        let harness = agent(&dir, script)
+            .into_harness("wiring", Arc::new(InMemorySessionService::new()))
+            .unwrap();
+        let user = UserId::new("alice").unwrap();
+        let session = harness.open_session(&user, Some(&SessionId::new("s1").unwrap())).await;
+        let session = session.unwrap();
+        let mut events = harness.send(&user, &session, "write a note").await.unwrap();
+        while let Some(event) = events.next().await {
+            event.unwrap();
+        }
+        assert!(!dir.join("notes.txt").exists(), "Plan mode wrote a file");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// With `cli`, the module also re-exports the CLI's launcher and prompter.
+    #[cfg(feature = "cli")]
+    #[test]
+    fn the_cli_launcher_is_re_exported() {
+        let dir = workspace();
+        let launcher = adk_rust::harness::HarnessLauncher::new(agent(&dir, vec![]));
+        assert_eq!(launcher.session_id(), None);
+        let console = adk_rust::harness::ConsoleIo::scripted([], false);
+        let _prompter = adk_rust::harness::ConsolePrompter::new(console);
+        std::fs::remove_dir_all(dir).ok();
     }
 }

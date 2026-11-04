@@ -5,22 +5,22 @@
 //! [![License](https://img.shields.io/crates/l/adk-rust.svg)](https://github.com/zavora-ai/adk-rust/blob/main/LICENSE)
 //!
 //! A flexible and modular framework for developing and deploying AI agents in Rust.
-//! While optimized for Gemini and the Google ecosystem, ADK is model-agnostic,
-//! deployment-agnostic, and compatible with other frameworks.
+//! ADK-Rust is model-agnostic and deployment-agnostic: this umbrella crate re-exports the
+//! ADK-Rust crates behind feature flags grouped into four tiers.
 //!
 //! ## Quick Start
 //!
 //! Create your first AI agent in minutes:
 //!
-//! ```ignore
+//! ```no_run
 //! use adk_rust::prelude::*;
 //! use adk_rust::Launcher;
 //! use std::sync::Arc;
 //!
 //! #[tokio::main]
-//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 //!     let api_key = std::env::var("GOOGLE_API_KEY")?;
-//!     let model = GeminiModel::new(&api_key, "gemini-2.5-flash")?;
+//!     let model = GeminiModel::new(&api_key, "gemini-3.7-flash")?;
 //!
 //!     let agent = LlmAgentBuilder::new("assistant")
 //!         .description("A helpful AI assistant")
@@ -40,7 +40,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! adk-rust = "2.1.0"
+//! adk-rust = "3.0.0"
 //! tokio = { version = "1.40", features = ["full"] }
 //! dotenvy = "0.15"  # For loading .env files
 //! ```
@@ -49,20 +49,21 @@
 //!
 //! ```toml
 //! # Minimal (default) — agents, Gemini, runner, sessions (fastest build)
-//! adk-rust = "2.1.0"
+//! adk-rust = "3.0.0"
 //!
-//! # Standard — minimal + tools, memory, OpenAI, Anthropic, server, auth,
-//! # graph, eval, guardrails, skills, plugins, artifacts, telemetry
-//! adk-rust = { version = "2.1.0", features = ["standard"] }
+//! # Standard — minimal + OpenAI, Anthropic (and the adk-anthropic client), skills, graph,
+//! # auth, server, eval, guardrail, plugin, artifacts, tools, memory, telemetry, computer-use
+//! adk-rust = { version = "3.0.0", features = ["standard"] }
 //!
 //! # Enterprise — standard + realtime, browser, rag, payments, awp
-//! adk-rust = { version = "2.1.0", features = ["enterprise"] }
+//! adk-rust = { version = "3.0.0", features = ["enterprise"] }
 //!
-//! # Full — enterprise + experimental crates (audio, code, sandbox)
-//! adk-rust = { version = "2.1.0", features = ["full"] }
+//! # Full — enterprise + audio, code, sandbox, code-tools, the harness and its kernel, and
+//! # the graph-functional, graph-node-cache, graph-delta, and graph-time-travel capabilities
+//! adk-rust = { version = "3.0.0", features = ["full"] }
 //!
 //! # Custom — pick exactly what you need
-//! adk-rust = { version = "2.1.0", default-features = false, features = [
+//! adk-rust = { version = "3.0.0", default-features = false, features = [
 //!     "agents", "gemini", "tools", "sessions", "openai", "openrouter"
 //! ] }
 //! ```
@@ -78,12 +79,13 @@
 //! `standard` and above); the agent itself needs only the default tier:
 //!
 //! ```no_run
+//! # #[cfg(feature = "tools")]
+//! # async fn example() -> adk_rust::Result<()> {
 //! use adk_rust::prelude::*;
 //! use std::sync::Arc;
 //!
-//! # async fn example() -> Result<()> {
 //! let api_key = std::env::var("GOOGLE_API_KEY").map_err(|e| AdkError::config(e.to_string()))?;
-//! let model = GeminiModel::new(&api_key, "gemini-2.5-flash")?;
+//! let model = GeminiModel::new(&api_key, "gemini-3.7-flash")?;
 //!
 //! let agent = LlmAgentBuilder::new("researcher")
 //!     .description("Research assistant with web search")
@@ -162,6 +164,8 @@
 //! Convert any async function into a tool:
 //!
 //! ```no_run
+//! # #[cfg(feature = "tools")]
+//! # fn example() -> adk_rust::Result<()> {
 //! use adk_rust::prelude::*;
 //! use adk_rust::serde_json::{json, Value};
 //! use std::sync::Arc;
@@ -176,7 +180,6 @@
 //!     }))
 //! }
 //!
-//! # fn example() -> Result<()> {
 //! let weather_tool = FunctionTool::new(
 //!     "get_weather",
 //!     "Get current weather for a city",
@@ -209,7 +212,7 @@
 //! let client = ().serve(TokioChildProcess::new(
 //!     Command::new("npx")
 //!         .arg("-y")
-//!         .arg("@anthropic/mcp-server-filesystem")
+//!         .arg("@modelcontextprotocol/server-filesystem")
 //!         .arg("/path/to/dir")
 //! )?).await?;
 //!
@@ -287,10 +290,11 @@
 //! `artifacts` feature (included in `standard` and above):
 //!
 //! ```no_run
+//! # #[cfg(feature = "artifacts")]
+//! # async fn example() -> adk_rust::Result<()> {
 //! use adk_rust::prelude::*;
 //! use adk_rust::artifact::{ArtifactService, SaveRequest, LoadRequest};
 //!
-//! # async fn example() -> Result<()> {
 //! let artifact_service = InMemoryArtifactService::new();
 //!
 //! // Save an artifact
@@ -334,15 +338,18 @@
 //!
 //! ### Server Mode (REST API)
 //!
+//! With the `cli` feature, [`Launcher`] is `adk_cli::Launcher`, which also serves the agent
+//! over HTTP on `127.0.0.1`:
+//!
 //! ```bash
-//! # Run your agent as a web server
 //! cargo run -- serve --port 8080
 //! ```
 //!
-//! Provides endpoints:
-//! - `POST /chat` - Send messages
-//! - `GET /sessions` - List sessions
-//! - `GET /health` - Health check
+//! The server exposes `GET /api/health`, the session endpoints under `/api/sessions` and
+//! `/api/apps/{app}/users/{user}/sessions`, `POST /api/run/{app}/{user}/{session}` (SSE),
+//! and `POST /api/run_sse`. See `adk-server` for the full list. The web home of `adk-surface`
+//! (feature `surface`) is served by the harness launcher, or mounted on a server you build
+//! (spec 3.3 §5.1).
 //!
 //! ### Agent-to-Agent (A2A) Protocol
 //!
@@ -350,10 +357,11 @@
 //! feature (included in `standard` and above):
 //!
 //! ```no_run
+//! # #[cfg(feature = "server")]
+//! # async fn example() -> adk_rust::Result<()> {
 //! use adk_rust::server::{create_app_with_a2a, ServerConfig};
 //! use adk_rust::AgentLoader;
 //!
-//! # async fn example() -> adk_rust::Result<()> {
 //! # let agent_loader: std::sync::Arc<dyn AgentLoader> = todo!();
 //! # let session_service: std::sync::Arc<dyn adk_rust::session::SessionService> = todo!();
 //! // Create server with A2A protocol support
@@ -361,7 +369,7 @@
 //! let app = create_app_with_a2a(config, Some("http://localhost:8080"));
 //!
 //! // Run the server (requires axum dependency)
-//! // let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
+//! // let listener = tokio::net::TcpListener::bind("127.0.0.1:8080").await?;
 //! // axum::serve(listener, app).await?;
 //! # Ok(())
 //! # }
@@ -374,9 +382,10 @@
 //! `telemetry-otlp`:
 //!
 //! ```no_run
+//! # #[cfg(feature = "telemetry")]
+//! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use adk_rust::telemetry::init_telemetry;
 //!
-//! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // Basic telemetry with console logging
 //! init_telemetry("my-agent-service")?;
 //!
@@ -417,6 +426,8 @@
 //! | `gemini` | Gemini model support | minimal (default) |
 //! | `runner` | Execution runtime | minimal (default) |
 //! | `sessions` | Session management | minimal (default) |
+//! | `openai` | OpenAI model support | standard |
+//! | `anthropic` / `anthropic-client` | Anthropic model support / the `adk-anthropic` client | standard |
 //! | `tools` | Tool system | standard |
 //! | `skills` | Skill discovery | standard |
 //! | `artifacts` | Artifact storage | standard |
@@ -428,25 +439,27 @@
 //! | `server` | HTTP server + A2A | standard |
 //! | `graph` | Graph workflows | standard |
 //! | `eval` | Agent evaluation | standard |
-//! | `openai` | OpenAI model support | standard |
-//! | `anthropic` | Anthropic model support | standard |
+//! | `computer-use` | Governed desktop-automation orchestration | standard |
 //! | `realtime` | Voice/audio streaming | enterprise |
 //! | `browser` | Browser automation | enterprise |
 //! | `rag` | RAG pipeline | enterprise |
 //! | `payments` | Agentic commerce (ACP/AP2) | enterprise |
 //! | `awp` | Agentic Web Protocol | enterprise |
-//! | `code` | Code execution | full (experimental) |
-//! | `sandbox` | Sandboxed execution | full (experimental) |
-//! | `audio` | Audio processing | full (experimental) |
-//! | `cli` | CLI launcher | (opt-in, any preset) |
-//! | `agent-engine` | Agent Engine runtime contract: dispatch endpoints + `serve_agent_engine` entrypoint | (opt-in, any preset) |
-//! | `example-store` | Vertex AI Example Store client + few-shot retrieval provider | (opt-in, any preset) |
-//! | `vertex-sandbox` | Vertex AI Agent Engine managed code-execution sandbox (adk-code) | (opt-in, any preset) |
-//! | `gemini-agent-platform` | Gemini Enterprise Agent Platform integrations (Vertex model backend, managed Sessions, GCP Secret Manager, GCS artifacts, Cloud telemetry, Agent Engine runtime contract, Example Store, code-execution Sandbox); excludes realtime transports and host-side deploy tooling | (opt-in, any preset) |
-//! | `vertex-memory` | Vertex AI Memory Bank backend for adk-memory | (opt-in, any preset) |
-//! | `gcp-deploy` | Agent Engine deployment client (host-side; not part of `gemini-agent-platform`) | (opt-in, any preset) |
-//! | `gemini-agent-platform` | Gemini Enterprise Agent Platform integrations (Vertex model backend, managed Sessions, GCP Secret Manager, GCS artifacts, Cloud telemetry, Agent Engine runtime contract, Memory Bank); excludes realtime transports and host-side deploy tooling | (opt-in, any preset) |
-//! | `gemini-agent-platform-full` | `gemini-agent-platform` + Vertex AI Live API (realtime stack) | (opt-in, any preset) |
+//! | `code`, `sandbox`, `code-tools` | Code execution and sandboxed execution | full |
+//! | `audio` | Audio processing | full |
+//! | `graph-functional`, `graph-node-cache`, `graph-delta`, `graph-time-travel` | Graph capabilities | full |
+//! | `harness` | The governed, durable harness agent (`adk-harness`) | full |
+//! | `harness-kernel` | The agent kernel, the harness's always-on form (`adk-kernel`) | full |
+//! | `harness-browser`, `harness-computer-use`, `harness-payments`, `harness-voice`, `harness-managed` | Harness packs | opt-in |
+//! | `cli` | CLI launcher with serve mode | opt-in |
+//! | `managed-runtime` | Managed agent runtime (`adk-managed`) | opt-in |
+//! | `enterprise-client` | Enterprise client SDK (`adk-enterprise`) | opt-in |
+//! | `gemini-agent-platform` | Every Gemini Enterprise Agent Platform integration except realtime transports and host-side deploy tooling | opt-in |
+//! | `gemini-agent-platform-full` | `gemini-agent-platform` + Vertex AI Live API (realtime stack) | opt-in |
+//! | `gcp-deploy` | Agent Engine deployment client (host-side; not part of `gemini-agent-platform`) | opt-in |
+//!
+//! Production backends (`postgres-session`, `redis-memory`, ...), additional providers,
+//! and specialist integrations are opt-in features as well; `Cargo.toml` lists every one.
 //!
 //! ## Examples
 //!
@@ -626,7 +639,7 @@ pub mod runner {
 /// Deploy agents as web services:
 /// - REST API for chat interactions
 /// - A2A (Agent-to-Agent) protocol support
-/// - Web UI integration
+/// - Routes of your own beside them, such as the web home of `adk-surface`
 ///
 /// Available with feature: `server`
 #[cfg(feature = "server")]
@@ -687,6 +700,42 @@ pub mod computer_use {
     pub use adk_computer_use::*;
 }
 
+/// Agent Client Protocol: external ACP agents as tools, and ADK agents as ACP agents.
+///
+/// - [`AcpAgentTool`](acp::AcpAgentTool) - An external ACP agent (Claude Code, Codex,
+///   Kiro CLI) as a tool
+/// - [`AcpSession`](acp::AcpSession) - A persistent session with an external ACP agent
+/// - [`agent_client_protocol`](acp::agent_client_protocol) - The official ACP SDK
+///
+/// Exposing an ADK agent over ACP needs `adk-acp`'s `server` feature.
+///
+/// Available with feature: `acp`
+///
+/// # Example
+///
+/// ```rust
+/// use adk_rust::acp::AcpAgentTool;
+///
+/// let reviewer = AcpAgentTool::new("claude-code --acp")
+///     .name("code_reviewer")
+///     .description("Reviews a change and reports problems");
+/// ```
+#[cfg(feature = "acp")]
+#[cfg_attr(docsrs, doc(cfg(feature = "acp")))]
+pub mod acp {
+    pub use adk_acp::*;
+}
+
+/// Agentic Web Protocol: discovery, capability manifests, trust, consent, and events for
+/// agent-facing websites.
+///
+/// Available with feature: `awp`
+#[cfg(feature = "awp")]
+#[cfg_attr(docsrs, doc(cfg(feature = "awp")))]
+pub mod awp {
+    pub use adk_awp::*;
+}
+
 /// Code execution substrate (experimental — `full` preset).
 ///
 /// First-class code execution for agents, Studio, and generated projects:
@@ -743,7 +792,7 @@ pub use adk_runner::Launcher;
 
 /// Full-featured CLI launcher with console and serve modes.
 ///
-/// Requires the `cli` feature (included in `standard` tier).
+/// Requires the `cli` feature, which no tier includes; add it to any preset.
 /// Provides `--serve` mode, `rustyline` history, and `clap` CLI parsing.
 #[cfg(feature = "cli")]
 #[cfg_attr(docsrs, doc(cfg(feature = "cli")))]
@@ -1054,6 +1103,136 @@ pub mod managed {
     pub use adk_managed::*;
 }
 
+/// The governed, durable harness agent (spec 3.1 §8.4).
+///
+/// Everything `adk-harness` exports: [`HarnessAgent`](harness::HarnessAgent) and its
+/// builder, the modes, standing approvals, the shell, todos, instructions, skills, team
+/// members, plan graphs and goals. With the `cli` feature it also re-exports the CLI's
+/// `HarnessLauncher`, which runs a harness at the console or behind the server,
+/// `ConsolePrompter`, which asks for approvals at the terminal, and the `ConsoleIo` it
+/// reads from.
+///
+/// Available with feature: `harness` (included in `full`)
+///
+/// # Example
+///
+/// ```rust
+/// use adk_rust::harness::{HarnessAgent, HarnessMode, InstructionsConfig};
+/// use adk_rust::model::{ScriptedLlm, ScriptedResponse};
+/// use std::sync::Arc;
+///
+/// # fn main() -> adk_rust::Result<()> {
+/// let model = Arc::new(ScriptedLlm::new("scripted", vec![ScriptedResponse::text("done")]));
+/// let harness = HarnessAgent::builder("harness")
+///     .model(model)
+///     .workspace(adk_devtools::Workspace::new(std::env::temp_dir()))
+///     .project_instructions(InstructionsConfig { user_file: None, ..InstructionsConfig::default() })
+///     .mode(HarnessMode::Plan)
+///     .build()?;
+/// assert_eq!(harness.info().default_mode, HarnessMode::Plan);
+/// # Ok(())
+/// # }
+/// ```
+#[cfg(feature = "harness")]
+#[cfg_attr(docsrs, doc(cfg(feature = "harness")))]
+pub mod harness {
+    #[cfg(feature = "cli")]
+    pub use adk_cli::console::ConsoleIo;
+    #[cfg(feature = "cli")]
+    pub use adk_cli::harness::{ConsolePrompter, HarnessLauncher};
+    pub use adk_harness::*;
+}
+
+/// The agent kernel, the always-on form of the harness (spec 3.2 §8.2).
+///
+/// Everything `adk-kernel` exports: the [`Kernel`](kernel::Kernel) supervisor and its
+/// builder, the process table, wake sources, the event bus and the
+/// [`control`](kernel::control) plane `adk-rust up` serves.
+///
+/// Available with feature: `harness-kernel` (included in `full`)
+///
+/// # Example
+///
+/// ```rust
+/// use std::sync::Arc;
+/// use adk_rust::kernel::{Kernel, KernelConfig, QueueClass};
+///
+/// let kernel = Kernel::builder()
+///     .config(KernelConfig::default().with_app_name("ops"))
+///     .run_store(Arc::new(adk_rust::InMemoryRunStore::new()))
+///     .build()
+///     .unwrap();
+/// assert_eq!(kernel.config().queues, QueueClass::defaults());
+/// ```
+#[cfg(feature = "harness-kernel")]
+#[cfg_attr(docsrs, doc(cfg(feature = "harness-kernel")))]
+pub mod kernel {
+    pub use adk_kernel::*;
+}
+
+/// Agent surfaces: the engine every surface runs on, and the web home (spec 3.3).
+///
+/// Everything `adk-surface` exports: the [`SurfaceEngine`](surface::SurfaceEngine) with its
+/// sources, decision cards in the words of spec 3.3 §8, the rules of what each surface may
+/// decide, [`web::router`](surface::web::router) for `ServerBuilder::add_api_routes`, and
+/// [`web::home`](surface::web::home), the page, for `ServerBuilder::add_root_routes`.
+///
+/// Available with feature: `surface` (opt-in, in no tier)
+///
+/// # Example
+///
+/// ```rust
+/// use adk_rust::surface::{Caller, Origin, SurfaceKind, rules};
+///
+/// let chat = Caller::human("ana", SurfaceKind::Chat, Origin::Chat { channel: "Telegram".into() });
+/// assert!(!rules::may_resume(&chat));
+/// ```
+#[cfg(feature = "surface")]
+#[cfg_attr(docsrs, doc(cfg(feature = "surface")))]
+pub mod surface {
+    pub use adk_surface::*;
+}
+
+/// The AWP 2.0 website product (spec 3.5 Part C, §7.1, D-14): site kinds and their charter
+/// templates, the team of eight agents, onboarding, jobs, incidents, alarms and the weekly
+/// review.
+///
+/// Available with feature: `website` (in `full`).
+///
+/// # Example
+///
+/// ```rust
+/// use adk_rust::website::onboarding::{StartingPoint, plan};
+///
+/// // The onboarding plan for a site that starts from nothing.
+/// let steps = plan(&StartingPoint::Nothing, None);
+/// assert!(!steps.is_empty());
+/// ```
+#[cfg(feature = "website")]
+#[cfg_attr(docsrs, doc(cfg(feature = "website")))]
+pub mod website {
+    pub use adk_website::*;
+}
+
+/// The site pipeline of an AWP 2.0 website (spec 3.5 §7.8): content as files, the built-in
+/// generator, the launch gate, signed releases in the site log, hosts, migration and freeze.
+///
+/// Available with feature: `website` (in `full`).
+///
+/// # Example
+///
+/// ```rust
+/// use adk_rust::site::content::SiteConfig;
+///
+/// let config = SiteConfig::from_toml("name = \"Example\"\ndomain = \"example.com\"\nlanguages = [\"en\"]\n").unwrap();
+/// assert_eq!(config.base_url(), "https://example.com");
+/// ```
+#[cfg(feature = "website")]
+#[cfg_attr(docsrs, doc(cfg(feature = "website")))]
+pub mod site {
+    pub use adk_site::*;
+}
+
 // ============================================================================
 // Enterprise Client SDK (feature-gated, experimental)
 // ============================================================================
@@ -1209,6 +1388,10 @@ pub async fn run(instructions: &str, input: &str) -> Result<String> {
 
     let (model, cache_capable): ProviderPair = {
         #[allow(unused_assignments)]
+        #[cfg_attr(
+            not(any(feature = "anthropic", feature = "openai", feature = "gemini")),
+            allow(unused_mut)
+        )]
         let mut result: Option<ProviderPair> = None;
 
         #[cfg(feature = "anthropic")]
@@ -1280,8 +1463,10 @@ pub async fn run(instructions: &str, input: &str) -> Result<String> {
     let mut stream = runner.run(UserId::new("user")?, session_id, content).await?;
 
     let mut result = String::new();
+    let mut text_deltas = adk_core::EventTextDeltas::default();
     while let Some(event) = stream.next().await {
         let event = event?;
+        let event = text_deltas.push(&event);
         if let Some(content) = &event.llm_response.content {
             for part in &content.parts {
                 if let Some(text) = part.text() {
@@ -1314,6 +1499,7 @@ pub async fn run(instructions: &str, input: &str) -> Result<String> {
 /// - Tools: `FunctionTool`, `GoogleSearchTool`, `McpToolset`
 /// - Services: `InMemorySessionService`, `InMemoryArtifactService`
 /// - Runtime: `Runner`, `RunnerConfig`
+/// - Harness (feature `harness`): `HarnessAgent`, `HarnessAgentBuilder`, `HarnessMode`
 /// - Common types: `Arc`, `Result`, `Content`, `Event`
 pub mod prelude {
     // Core types (always available)
@@ -1345,6 +1531,11 @@ pub mod prelude {
         OpenRouterResponseTool,
     };
 
+    #[cfg(feature = "opencode")]
+    pub use crate::model::opencode::{
+        OpenCodeApi, OpenCodeClient, OpenCodeConfig, OpenCodeService,
+    };
+
     #[cfg(feature = "anthropic")]
     pub use crate::model::anthropic::{AnthropicClient, AnthropicConfig, Effort, ThinkingMode};
 
@@ -1353,6 +1544,12 @@ pub mod prelude {
 
     #[cfg(feature = "groq")]
     pub use crate::model::groq::{GroqClient, GroqConfig};
+
+    #[cfg(feature = "muse")]
+    pub use crate::model::muse::{
+        MuseAsrClient, MuseClient, MuseConfig, MuseFilesClient, MuseImagesClient,
+        MuseResponsesClient,
+    };
 
     #[cfg(feature = "ollama")]
     pub use crate::model::ollama::{OllamaConfig, OllamaModel};
@@ -1380,6 +1577,8 @@ pub mod prelude {
     // Skills
     #[cfg(feature = "skills")]
     pub use crate::skill::{SelectionPolicy, SkillInjector, SkillInjectorConfig, load_skill_index};
+    #[cfg(feature = "skills-progressive-disclosure")]
+    pub use crate::skill::{SkillToolset, SkillToolsetConfig};
 
     // Sessions
     #[cfg(feature = "sessions")]
@@ -1400,6 +1599,10 @@ pub mod prelude {
     // Graph workflows
     #[cfg(feature = "graph")]
     pub use crate::graph::{END, GraphAgent, NodeOutput, Router, START, StateGraph};
+
+    // Harness
+    #[cfg(feature = "harness")]
+    pub use crate::harness::{HarnessAgent, HarnessAgentBuilder, HarnessMode};
 
     // Realtime
     #[cfg(feature = "realtime")]

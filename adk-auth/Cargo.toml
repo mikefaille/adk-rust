@@ -6,16 +6,23 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 description = "Access control and authentication for Rust Agent Development Kit (ADK-Rust)"
-repository = "https://github.com/zavora-ai/adk-rust"
+homepage.workspace = true
+repository.workspace = true
 documentation = "https://docs.rs/adk-auth"
 keywords = ["ai", "agent", "adk", "auth", "security"]
 categories = ["authentication", "api-bindings"]
 readme = "README.md"
 
+[package.metadata.docs.rs]
+all-features = true
+
 [features]
 default = []
 sso = ["jsonwebtoken", "reqwest", "dashmap", "base64"]
-auth-bridge = ["sso", "adk-server", "axum"]
+auth-bridge = ["sso", "adk-core/auth-bridge", "axum"]
+# Kept so manifests that name it still resolve; `auth-bridge` no longer needs `adk-server`,
+# which lets `adk-server` depend on this crate (spec 3.5 §7.3).
+adk-server = []
 # Cloud secret manager providers
 aws-secrets = ["dep:aws-sdk-secretsmanager", "dep:aws-config"]
 azure-keyvault = ["dep:azure_security_keyvault_secrets", "dep:azure_identity", "dep:azure_core"]
@@ -23,10 +30,15 @@ gcp-secrets = ["dep:google-cloud-secretmanager-v1", "dep:google-cloud-gax"]
 # Enterprise audit sinks
 postgres-audit = ["dep:sqlx"]
 otlp-audit = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp"]
+# Signed, Merkle-hashed audit log with Ed25519 checkpoints and offline verification
+signed-audit = ["dep:aws-lc-rs", "base64", "dep:ryu-js", "serde_json/float_roundtrip", "tokio/rt"]
+# RFC 8693 token-exchange credential broker
+token-exchange = ["reqwest"]
+# Web Bot Auth: RFC 9421 Ed25519 request signatures, key directories, signer and verifier (spec 3.5 §7.3)
+web-bot-auth = ["dep:aws-lc-rs", "base64", "reqwest", "dep:http", "dep:httpdate", "adk-core/webhook-delivery", "tokio/net"]
 
 [dependencies]
 adk-core.workspace = true
-adk-server = { workspace = true, optional = true }
 async-trait.workspace = true
 tokio = { workspace = true, features = ["sync", "time"] }
 zeroize = "1.8.2"
@@ -37,7 +49,16 @@ tracing.workspace = true
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = { workspace = true }
 hex = { workspace = true }
+hmac = "0.12"
 axum = { version = "0.8", optional = true }
+
+# Signed audit log (optional)
+aws-lc-rs = { version = "1.18", optional = true }
+ryu-js = { version = "1.0", optional = true }
+
+# Web Bot Auth (optional)
+http = { version = "1", optional = true }
+httpdate = { version = "1", optional = true }
 
 # SSO dependencies (optional)
 jsonwebtoken = { version = "11", features = ["aws_lc_rs"], optional = true }
@@ -59,11 +80,13 @@ google-cloud-secretmanager-v1 = { version = "1", optional = true }
 google-cloud-gax = { version = "1.9", default-features = false, optional = true }
 
 # Enterprise audit sinks (optional)
-sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono", "json"], optional = true }
+sqlx = { workspace = true, features = ["runtime-tokio", "postgres", "chrono", "json", "derive", "tls-rustls-aws-lc-rs"], optional = true }
 opentelemetry = { version = "0.33", optional = true }
 opentelemetry_sdk = { version = "0.33", features = ["rt-tokio"], optional = true }
 opentelemetry-otlp = { version = "0.33", features = ["grpc-tonic"], optional = true }
 
 [dev-dependencies]
+aws-lc-rs = "1.18"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "test-util"] }
 proptest = "1.5"
+wiremock = "0.6"

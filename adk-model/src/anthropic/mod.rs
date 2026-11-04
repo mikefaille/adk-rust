@@ -87,9 +87,12 @@ mod client;
 mod config;
 mod convert;
 mod error;
+mod history;
 mod models;
 mod rate_limit;
+mod request;
 pub mod schema_adapter;
+mod streaming;
 mod token_count;
 
 pub use client::AnthropicClient;
@@ -97,8 +100,10 @@ pub use config::{AnthropicConfig, Effort, ThinkingMode};
 pub use error::{AnthropicApiError, ConversionError};
 pub use models::ModelInfo;
 pub use rate_limit::RateLimitInfo;
+pub use request::RequestAdapter;
 pub use schema_adapter::AnthropicSchemaAdapter;
 pub use token_count::TokenCount;
 
 // Re-export ToolSearchConfig from adk-anthropic for convenience.
-pub use adk_anthropic::ToolSearchConfig;
+pub use adk_anthropic::CacheTtl;
+pub use adk_anthropic::{ThinkingDisplay, ToolSearchConfig};

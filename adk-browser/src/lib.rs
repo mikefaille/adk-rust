@@ -11,43 +11,43 @@
 //!
 //! ## Quick Start
 //!
-//! ```rust,ignore
-//! use adk_browser::{BrowserSession, BrowserConfig, BrowserToolset};
-//! use adk_agent::LlmAgentBuilder;
+//! ```rust,no_run
+//! use adk_browser::{BrowserConfig, BrowserProfile, BrowserSession, BrowserToolset};
 //! use std::sync::Arc;
 //!
-//! async fn example() -> anyhow::Result<()> {
-//!     // Create browser session
-//!     let config = BrowserConfig::new()
-//!         .headless(true)
-//!         .viewport(1920, 1080);
+//! # async fn example() -> adk_core::Result<()> {
+//! // Create a browser session; it starts on first use
+//! let config = BrowserConfig::new().headless(true).viewport(1920, 1080);
+//! let browser = Arc::new(BrowserSession::new(config));
 //!
-//!     let browser = Arc::new(BrowserSession::new(config));
-//!     browser.start().await?;
+//! // Create a toolset and register it with `LlmAgentBuilder::toolset`
+//! let toolset = BrowserToolset::with_profile(browser.clone(), BrowserProfile::Scraping);
+//! assert_eq!(toolset.all_tools().len(), 13);
 //!
-//!     // Create toolset
-//!     let toolset = BrowserToolset::new(browser.clone());
-//!
-//!     // Add tools to agent (example - requires model)
-//!     // let agent = LlmAgentBuilder::new("browser_agent")
-//!     //     .model(model)
-//!     //     .instruction("You are a web automation assistant.")
-//!     //     .tools(toolset.all_tools())
-//!     //     .build()?;
-//!
-//!     // Clean up
-//!     browser.stop().await?;
-//!     Ok(())
-//! }
+//! // Clean up
+//! browser.stop().await?;
+//! # Ok(())
+//! # }
 //! ```
+//!
+//! `BrowserToolset::new` offers 44 tools. `browser_evaluate_js` and `browser_file_upload` are
+//! opt-in, navigation accepts only `http` and `https`, and private network addresses are refused.
 //!
 //! ## Available Tools
 //!
 //! ### Navigation
-//! - `browser_navigate` - Navigate to a URL
+//! - `browser_navigate` - Navigate to a URL (`http`/`https` unless
+//!   `BrowserToolset::with_allowed_schemes` says otherwise; private network
+//!   addresses, including redirect targets, refused unless
+//!   `BrowserToolset::with_private_network_access` permits them; host names that
+//!   do not resolve on the agent host refused unless
+//!   `BrowserToolset::with_unresolved_hosts` permits them)
 //! - `browser_back` - Go back in history
 //! - `browser_forward` - Go forward in history
 //! - `browser_refresh` - Refresh the page
+//!
+//! The history tools check the page they land on against the same private
+//! network policy.
 //!
 //! ### Interaction
 //! - `browser_click` - Click on an element
@@ -73,7 +73,8 @@
 //! - `browser_wait_for_text` - Wait for text to appear
 //!
 //! ### JavaScript
-//! - `browser_evaluate_js` - Execute JavaScript code
+//! - `browser_evaluate_js` - Execute JavaScript code (opt-in via
+//!   `BrowserToolset::with_evaluate_js(true)`)
 //! - `browser_scroll` - Scroll the page
 //! - `browser_hover` - Hover over an element
 //! - `browser_handle_alert` - Handle JavaScript alerts
@@ -106,7 +107,8 @@
 //! - `browser_focus` - Focus on an element
 //! - `browser_element_state` - Check element state
 //! - `browser_press_key` - Press keyboard keys
-//! - `browser_file_upload` - Upload files
+//! - `browser_file_upload` - Upload files from allowed directories (opt-in via
+//!   `BrowserToolset::with_file_upload(roots)`)
 //! - `browser_print_to_pdf` - Print page to PDF
 //!
 //! ## Requirements
@@ -188,6 +190,8 @@ pub use tools::{
     ClickTool,
     // Windows/Tabs
     CloseWindowTool,
+    // Navigation scheme allowlist
+    DEFAULT_ALLOWED_SCHEMES,
     DeleteAllCookiesTool,
     DeleteCookieTool,
     DoubleClickTool,

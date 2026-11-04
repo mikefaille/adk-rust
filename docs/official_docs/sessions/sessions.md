@@ -47,7 +47,7 @@ The `SessionService` trait defines operations for managing sessions:
 
 ```rust
 use adk_session::{CreateRequest, GetRequest, ListRequest, DeleteRequest, Event, Session};
-use adk_core::Result;
+use adk_core::{AdkIdentity, Result};
 use async_trait::async_trait;
 
 #[async_trait]
@@ -66,8 +66,114 @@ pub trait SessionService: Send + Sync {
     
     /// Append an event to a session
     async fn append_event(&self, session_id: &str, event: Event) -> Result<()>;
+
+    /// Rewind a session to an event, or by a number of events (default: Unsupported)
+    async fn rewind(&self, identity: &AdkIdentity, target_event_id: &str) -> Result<Box<dyn Session>>;
+    async fn rewind_steps(&self, identity: &AdkIdentity, steps: usize) -> Result<Box<dyn Session>>;
 }
 ```
+
+The trait also has identity-addressed methods (`get_for_identity`, `append_event_for_identity`,
+`delete_for_identity`), `delete_all_sessions`, and `health_check`; see
+[Typed Session Identity](#typed-session-identity).
+
+### Behaviour Every Backend Follows
+
+| Operation | Behaviour |
+|-----------|-----------|
+| `create` with an existing `(app_name, user_id, session_id)` | Fails with `session.already_exists` (`Conflict`, HTTP 409) and writes nothing: the existing session keeps its events and state, and the app and user tiers are untouched |
+| `get` of a missing session | Fails with `session.not_found` (`NotFound`, HTTP 404); a backend failure is never reported as not found |
+| `append_event`, `append_event_for_identity` to a missing session | Fails with `session.not_found` |
+| Event order | Timestamp order; events with equal timestamps keep their append order |
+| `list` | Most recently updated first; equal update times by session ID, descending, so `offset`/`limit` pages are stable |
+| `rewind`, `rewind_steps` | Change only the session the identity names, and rebuild its state from the state it was created with plus the remaining events' deltas; app and user state are not rewound |
+| `delete_all_sessions(app, user)` | Erases every session of the user in the app with its events, and the user's `user:` tier, also when no session is left; the `app:` tier, the user's data in other apps and other users' data stay; a repeated call succeeds |
+
+`delete_all_sessions` is the call that erases a user's session data: no other method removes
+the `user:` tier. Each backend erases as follows:
+
+| Backend | How |
+|---------|-----|
+| In-memory, SQLite, PostgreSQL, Neo4j | One lock or transaction over the sessions, events, and user tier |
+| MongoDB | One transaction where the deployment supports transactions, else one delete per collection |
+| Redis | One `MULTI`/`EXEC` on a standalone server; on a cluster, each session, then the indexes and the user tier |
+| Firestore | Each session, then the user's state document |
+| Vertex AI | Each session `list` returns; the Session API keeps `user:` keys in each session, so they go with it |
+| `EncryptedSession` | The inner backend's |
+
+Where the erasure is not one transaction, an error can leave part of the data; calling
+again finishes the erasure. A backend that does not implement the method returns
+`session.delete_all.unsupported` (`Unsupported`).
+
+Strings containing U+0000 in event content and state read back unchanged. PostgreSQL stores
+them in an escaped form, since `JSONB` cannot hold U+0000; strings without U+0000 are stored as
+they are.
+
+Rewind is implemented by `InMemorySessionService`, `SqliteSessionService`, and
+`EncryptedSession` over either; the other backends return `session.rewind.unsupported`.
+
+```rust
+use adk_core::identity::{AdkIdentity, AppName, SessionId, UserId};
+use adk_session::{InMemorySessionService, SessionService};
+
+async fn drop_last_turn(service: &InMemorySessionService) -> adk_core::Result<()> {
+    let identity = AdkIdentity::new(
+        AppName::try_from("my_app")?,
+        UserId::try_from("user_123")?,
+        SessionId::try_from("session_abc")?,
+    );
+    // The last turn is the user message and the model's reply.
+    let session = service.rewind_steps(&identity, 2).await?;
+    println!("{} events remain", session.events().len());
+    Ok(())
+}
+```
+
+### Get or Create
+
+Create a session only when `get` reports it missing, and read it again when `create` loses a
+race to a concurrent request. Creating on any `get` error turns one transient backend failure
+into an attempt to replace the session.
+
+```rust
+use adk_session::{CreateRequest, GetRequest, Session, SessionService};
+use std::collections::HashMap;
+
+async fn get_or_create(
+    service: &dyn SessionService,
+    app_name: &str,
+    user_id: &str,
+    session_id: &str,
+) -> adk_core::Result<Box<dyn Session>> {
+    let get = || GetRequest {
+        app_name: app_name.to_string(),
+        user_id: user_id.to_string(),
+        session_id: session_id.to_string(),
+        num_recent_events: None,
+        after: None,
+    };
+    match service.get(get()).await {
+        Err(error) if error.is_not_found() => {
+            let created = service
+                .create(CreateRequest {
+                    app_name: app_name.to_string(),
+                    user_id: user_id.to_string(),
+                    session_id: Some(session_id.to_string()),
+                    state: HashMap::new(),
+                })
+                .await;
+            match created {
+                Err(error) if error.is_conflict() => service.get(get()).await,
+                other => other,
+            }
+        }
+        other => other,
+    }
+}
+```
+
+`adk-server`'s `/api/run` and `/api/run_sse`, both A2A executors, the background worker, and
+the runner's externally triggered invocations follow this pattern.
 
 ## Request Types
 
@@ -107,6 +213,8 @@ use adk_session::ListRequest;
 let request = ListRequest {
     app_name: "my_app".to_string(),
     user_id: "user_123".to_string(),
+    limit: Some(20), // None returns every session
+    offset: None,    // Sessions to skip, for paging
 };
 ```
 
@@ -121,6 +229,27 @@ let request = DeleteRequest {
     session_id: "session_abc".to_string(),
 };
 ```
+
+### Identifier Validation
+
+Every backend validates the identifiers a call carries before it reads or writes storage, and
+rejects an invalid one with `session.invalid_identifier` (`ErrorCategory::InvalidInput`,
+HTTP 400). An identifier is valid when it is non-empty, at most `MAX_ID_LEN` (512) bytes, and
+free of NUL characters — the `AppName`, `UserId`, and `SessionId` rules. `Runner::run_str`
+and every conversion of an `IdentityError` into `AdkError` return the same code. A backend
+with stricter rules of its own reports them under its own code after these checks pass, such
+as `session.firestore.invalid_identifier` for an ID Firestore cannot use as a document ID.
+
+| Method | Validated identifiers |
+|--------|-----------------------|
+| `create` | `app_name`, `user_id`, and `session_id` when one is given |
+| `get`, `delete` | `app_name`, `user_id`, `session_id` |
+| `list`, `delete_all_sessions` | `app_name`, `user_id` |
+| `append_event` | `session_id` |
+| `append_event_for_identity`, `get_for_identity`, `delete_for_identity` | Validated when the `AdkIdentity` is built |
+
+`CreateRequest::try_identity()` validates `app_name` and `user_id` even when `session_id` is
+`None`, so a custom backend can validate a create request with one call.
 
 ## SessionService Implementations
 
@@ -161,7 +290,7 @@ ADK-Rust provides multiple session service implementations:
 
 ```toml
 [dependencies]
-adk-rust = { version = "2.1.0", features = ["vertex-session"] }
+adk-rust = { version = "3.0.0", features = ["vertex-session"] }
 ```
 
 ### VertexAiSessionService
@@ -425,7 +554,7 @@ async fn main() -> anyhow::Result<()> {
 
 > **Note**: The `SqliteSessionService` requires the `sqlite` feature flag:
 > ```toml
-> adk-session = { version = "2.1.0", features = ["sqlite"] }
+> adk-session = { version = "3.0.0", features = ["sqlite"] }
 > ```
 
 ### PostgresSessionService
@@ -458,14 +587,14 @@ async fn main() -> anyhow::Result<()> {
 
 > **Note**: Requires the `postgres` feature flag:
 > ```toml
-> adk-session = { version = "2.1.0", features = ["postgres"] }
+> adk-session = { version = "3.0.0", features = ["postgres"] }
 > ```
 
 ### MongoSessionService
 
 Stores sessions in MongoDB. Supports both standalone and replica-set deployments out of the box.
 
-On startup, `MongoSessionService::new()` auto-detects whether the connected MongoDB instance is part of a replica set by issuing a `hello` command. If a replica set (or sharded cluster) is detected, all multi-document writes use transactions for atomicity. On standalone deployments, operations execute sequentially without transactions — the upsert-based writes are idempotent, so partial failures leave state recoverable.
+On startup, `MongoSessionService::new()` issues a `hello` command and enables transactions when the reply names a replica set (`setName`) or comes from a sharded cluster's `mongos` router (`msg: "isdbgrid"`). Multi-document writes then run in one transaction; otherwise they execute one after another without a transaction.
 
 ```rust
 use adk_session::{MongoSessionService, SessionService, CreateRequest};
@@ -503,18 +632,16 @@ async fn main() -> anyhow::Result<()> {
 
 > **Note**: Requires the `mongodb` feature flag:
 > ```toml
-> adk-session = { version = "2.1.0", features = ["mongodb"] }
+> adk-session = { version = "3.0.0", features = ["mongodb"] }
 > ```
 
 #### MongoDB deployment modes
 
-| Deployment | Transactions | Behavior |
-|------------|-------------|----------|
-| Standalone | No | Sequential upserts, idempotent writes |
-| Replica Set | Yes | Multi-document ACID transactions |
-| Sharded Cluster | Yes | Multi-document ACID transactions |
-
-The `retryWrites=false` connection string parameter is no longer required for standalone deployments. The service handles this transparently.
+| Deployment | `hello` reply | Transactions | Behavior |
+|------------|---------------|--------------|----------|
+| Standalone | Neither `setName` nor `msg: "isdbgrid"` | No | Sequential writes |
+| Replica set | `setName` | Yes | Multi-document transactions |
+| Sharded cluster (`mongos`) | `msg: "isdbgrid"` | Yes | Multi-document transactions |
 
 #### MongoDB collections
 
@@ -557,7 +684,7 @@ async fn main() -> anyhow::Result<()> {
 
 > **Note**: Requires the `neo4j` feature flag:
 > ```toml
-> adk-session = { version = "2.1.0", features = ["neo4j"] }
+> adk-session = { version = "3.0.0", features = ["neo4j"] }
 > ```
 
 ### RedisSessionService
@@ -565,33 +692,151 @@ async fn main() -> anyhow::Result<()> {
 Stores sessions in Redis. Ideal for low-latency, high-throughput deployments.
 
 ```rust
-use adk_session::{RedisSessionService, RedisSessionConfig};
+use adk_session::{RedisSessionConfig, RedisSessionService};
 
-let config = RedisSessionConfig::new("redis://localhost:6379");
-let session_service = RedisSessionService::new(config).await?;
+// Standalone server (or Sentinel)
+let session_service = RedisSessionService::new(RedisSessionConfig {
+    url: "redis://localhost:6379".to_string(),
+    ttl: None,
+    cluster_nodes: None,
+})
+.await?;
+
+// Redis Cluster: seed nodes as host:port
+let cluster_service = RedisSessionService::new(RedisSessionConfig {
+    url: "redis-cluster://10.0.0.1:6379".to_string(),
+    ttl: None,
+    cluster_nodes: Some(vec!["10.0.0.1:6379".to_string(), "10.0.0.2:6379".to_string()]),
+})
+.await?;
 ```
 
 > **Note**: Requires the `redis` feature flag:
 > ```toml
-> adk-session = { version = "2.1.0", features = ["redis"] }
+> adk-session = { version = "3.0.0", features = ["redis"] }
 > ```
+
+The service picks its key layout from the connection. A standalone server keeps the key names
+earlier releases wrote, so existing sessions stay readable. A cluster connection (`cluster_nodes`,
+or a `redis-cluster://` URL) puts each session's hash and event set under one hash tag, with `{`
+and `}` in identifiers percent-encoded so no identifier can move a key's slot:
+
+| Data | Standalone key | Cluster key |
+|------|----------------|-------------|
+| Session hash | `<app>:<user>:<session>` | `adk:session:{<app>:<user>:<session>}` |
+| Events | `<app>:<user>:<session>:events` | `adk:session:{<app>:<user>:<session>}:events` |
+| App state | `app_state:<app>` | `adk:app_state:{<app>}` |
+| User state | `user_state:<app>:<user>` | `adk:user_state:{<app>:<user>}` |
+| Session index | `sessions_idx:<app>:<user>` | `adk:sessions_idx:{<app>:<user>}` |
+| Session index by update time | `sessions_idx:<app>:<user>:updated` | `adk:sessions_idx:{<app>:<user>}:updated` |
+| Session lookup | `session_lookup:<session>` | `adk:session_lookup:{<session>}` |
+
+Each event is scored one above the highest score in its set, so events keep their append order,
+and `get` then orders them by timestamp. Events written by earlier releases are scored by their
+millisecond timestamp and keep their order; events appended to such a session sort after them.
+`list` pages through the update-time index, newest first. Sessions created by earlier releases
+are only in the set index; the first `list` of their user adds them to the update-time index.
+
+Moving existing data from a standalone server to a cluster means copying its keys to the
+cluster names.
+
+| Operation | Standalone | Cluster |
+|-----------|------------|---------|
+| Append | One Lua script (`EVAL`) writes the event, the update-time index entry, and the session, user, and app state fields | One script writes the event and the session tier; the update-time index entry and the user and app tier fields follow, one command each |
+| Create | One script, which writes nothing when the session exists | A check that the session is absent; index entries, lookup, and tier fields; the session hash last, in a script that writes nothing when it exists |
+| Delete | One `MULTI`/`EXEC` | Session hash and events in one `DEL`; then the lookup and the index entries |
+
+Redis Cluster runs a script or transaction only when all its keys share one slot, and the app
+and user tiers are shared by many sessions, so in cluster mode:
+
+- A reader can see an appended event before its app and user tier fields.
+- An append that fails after its script returns an error with the event already stored.
+- A create that fails part-way can leave its app and user tier fields, and index entries and a
+  lookup for a session that does not exist; `list` skips and removes them, and `get` reports the
+  session as not found.
+- Of two creates racing for one identity, the one that loses fails with `session.already_exists`
+  after writing its app and user tier fields.
+
+The session tier keeps its compare-and-swap in both layouts, and tier fields are written one
+field at a time, so concurrent writers of different fields keep each other's values. The server
+must allow scripting.
+
+### FirestoreSessionService
+
+Stores sessions in Google Cloud Firestore using Application Default Credentials.
+
+```rust
+use adk_session::{FirestoreSessionConfig, FirestoreSessionService};
+
+let config = FirestoreSessionConfig {
+    project_id: "my-gcp-project".to_string(),
+    root_collection: None, // defaults to "adk_sessions"
+};
+let session_service = FirestoreSessionService::new(config).await?;
+```
+
+| Data | Document path |
+|------|---------------|
+| Session | `{root}/{app_name}/sessions/{session_id}` |
+| Event | `{root}/{app_name}/sessions/{session_id}/events/{event_id}` |
+| App state | `{root}/{app_name}/app_state/current` |
+| User state | `{root}/{app_name}/users/{user_id}/state/current` |
+
+A session ID is unique within an app, and the owning `user_id` is a field of the session document. Every write re-reads that document inside its transaction and applies only when the app, user, and session ID match the request:
+
+| Operation | Session missing, or owned by another user |
+|-----------|-------------------------------------------|
+| `create` | Fails with `session.already_exists` (`Conflict`) when the ID is taken in the app |
+| `get`, `append_event_for_identity` | Fails with `session.not_found` |
+| `delete` | No-op, identical to deleting a missing session |
+| `list`, `delete_all_sessions` | Only the caller's own sessions are returned or removed; `delete_all_sessions` then deletes the user's state document |
+
+A new session never inherits events left under its path. App names, user IDs, and session IDs are document IDs, so they must not contain `/`.
+
+> **Note**: Requires the `firestore` feature flag:
+> ```toml
+> adk-session = { version = "3.0.0", features = ["firestore"] }
+> ```
+
+## Subject Export and Erasure
+
+`SessionSubjectData` adapts any `SessionService` to `adk_core::subject::SubjectDataStore`, so
+`SubjectRights` exports and erases a person's sessions alongside their other data:
+
+| Operation | Per application and user id of the subject |
+|-----------|---------------------------------------------|
+| Export | Every session with its events and state, the `user:` tier included and the `app:` tier left out |
+| Erase | `delete_all_sessions`: every session, its events, and the `user:` tier |
+
+Every backend also ships a `SubjectRegistry` and a `ConsentStore`
+(`SqliteSubjectRegistry`, `PostgresConsentStore`, `RedisSubjectRegistry`, and so on). See
+[Subject Rights](../security/subject-rights.md).
 
 ## Schema Migrations
 
-All database-backed session services (SQLite, PostgreSQL, MongoDB, Neo4j) include a versioned, forward-only migration system. Migrations are tracked in a `_schema_migrations` registry table.
+All database-backed session services (SQLite, PostgreSQL, MongoDB, Neo4j) include a versioned, forward-only migration system. Applied versions are recorded in the `_adk_session_migrations` table (SQLite, PostgreSQL) or collection (MongoDB), or as `_AdkSessionMigration` nodes (Neo4j).
+
+| Backend | Version 2 |
+|---------|-----------|
+| SQLite | Adds `sessions.initial_state`, the state a session was created with, which rewind rebuilds from. Sessions created before it rewind to their keys that no event has written |
+| PostgreSQL | Adds `events.seq`, an insertion sequence that orders events with equal timestamps; existing rows are numbered in their physical order |
+| MongoDB | Adds the `idx_events_read_order` index on the event read order (timestamp, then `seq`) |
 
 ### Encrypted Sessions
 
-Wrap any `SessionService` with `EncryptedSession` to encrypt session state at rest using AES-256-GCM. Requires the `encrypted-session` feature flag.
+Wrap any `SessionService` with `EncryptedSession` to encrypt session state and event payloads at rest using AES-256-GCM. Requires the `encrypted-session` feature flag.
 
 ```toml
-adk-session = { version = "2.1.0", features = ["encrypted-session"] }
+adk-session = { version = "3.0.0", features = ["encrypted-session"] }
 ```
 
 #### Basic Usage
 
 ```rust
-use adk_session::{EncryptedSession, EncryptionKey, InMemorySessionService};
+use adk_session::{
+    CreateRequest, EncryptedSession, EncryptionKey, InMemorySessionService, SessionService,
+};
+use std::collections::HashMap;
 
 // Generate a random 256-bit key
 let key = EncryptionKey::generate();
@@ -604,27 +849,65 @@ let inner = InMemorySessionService::new();
 let service = EncryptedSession::new(inner, key, vec![]);
 
 // Use exactly like any other SessionService — encryption is transparent
-let session = service.create(CreateRequest { /* ... */ }).await?;
+let session = service
+    .create(CreateRequest {
+        app_name: "my_app".to_string(),
+        user_id: "user_123".to_string(),
+        session_id: None,
+        state: HashMap::new(),
+    })
+    .await?;
 ```
 
-State is serialized to JSON, encrypted with a random 96-bit nonce, and stored as `[nonce || ciphertext]` in the inner service. Decryption happens transparently on read.
+Each value is serialized to JSON, encrypted with a random 96-bit nonce, and stored as an `adk-enc:v1:` envelope (base64 of `[nonce || ciphertext]`). Decryption happens transparently on `create`, `get`, and `list`.
+
+| Data | Stored in the inner service as |
+|------|--------------------------------|
+| State values (create state and event `state_delta`) | Encrypted per value; key names stay in plaintext |
+| Event content, LLM response metadata, actions, long-running tool IDs | One encrypted envelope in the event content |
+| Event ID, timestamp, invocation ID, branch, author | Plaintext, so the inner service can order and filter events |
+| `llm_request`, event `provider_metadata` | Not persisted |
+
+- **Identity binding**: the associated data of each ciphertext names its app, user, session, and state key or event ID. A value or event copied to another session fails with `session.encryption.decrypt_failed`.
+- **State tiers**: `app:` and `user:` values are stored encrypted in the shared app and user tiers, so they stay visible to every session of that app or user. `temp:` keys are dropped before encryption.
+- **Addressing**: `append_event(session_id, ..)` returns `session.encryption.identity_required` because a bare session ID does not identify the ciphertext binding. Use `append_event_for_identity()`, which the runner uses.
 
 #### Key Rotation
 
 Pass previous keys to support reading data encrypted with older keys:
 
 ```rust
+use adk_session::{EncryptedSession, EncryptionKey};
+
 let new_key = EncryptionKey::generate();
 let old_key = EncryptionKey::from_env("OLD_SESSION_KEY")?;
 
 let service = EncryptedSession::new(inner, new_key, vec![old_key]);
 ```
 
-On read, the current key is tried first. If decryption fails, each previous key is tried in order. On success with a previous key, the data is automatically re-encrypted with the current key.
+On read, the current key is tried first, then each previous key in order. When `get` finds state values under a previous key, it re-encrypts them with the current key by appending a state-only event (hidden from returned events) and returns any failure.
+
+> **Note:** `SessionService` cannot rewrite stored events, so events written under a previous key stay readable only while that key remains in `previous_keys`. Keep a retired key until the sessions that used it are deleted or expire. In a rolling deployment, first add the new key to `previous_keys` everywhere, then make it the current key.
+
+#### Migrating Data From Earlier Releases
+
+Releases before the per-value format stored `create` state as one `__encrypted_state` blob and passed event content and state deltas through in plaintext. Reads reject such data with `session.encryption.unencrypted_data`. Enable migration while existing sessions are converted:
+
+```rust
+use adk_session::{EncryptedSession, EncryptionKey, InMemorySessionService};
+
+let key = EncryptionKey::from_env("SESSION_ENCRYPTION_KEY")?;
+let service = EncryptedSession::new(InMemorySessionService::new(), key, vec![])
+    .with_legacy_migration(true);
+```
+
+`get` then decrypts the legacy blob, accepts plaintext values and events, and re-encrypts the state into the current format. Plaintext events stay plaintext in the inner service, so a session that holds them stays readable only with migration enabled.
 
 #### Key Management
 
 ```rust
+use adk_session::EncryptionKey;
+
 // Generate random key
 let key = EncryptionKey::generate();
 
@@ -656,16 +939,22 @@ let version = service.schema_version().await?;
 println!("Current schema version: {version}");
 ```
 
+`schema_version()` returns 0 when the migration registry table does not exist yet.
+Any other failure to read it, such as a lost connection or a missing privilege, is
+returned as an error.
+
 ### Baseline Detection
 
 If you have an existing database created before the migration system was added, `migrate()` detects the pre-existing tables and registers them as already applied. This avoids destructive re-creation and allows incremental adoption.
+
+On PostgreSQL only tables in the connection's current schema (`current_schema()`) count, so tables that another deployment created in a different schema of the same database are not taken as a baseline.
 
 ### Migration Guarantees
 
 - **Forward-only**: Migrations are applied in order and never rolled back
 - **Idempotent**: Running `migrate()` multiple times is safe
-- **Checksummed**: Each migration is tracked with a SHA-256 checksum to detect tampering
-- **Atomic**: PostgreSQL migrations use advisory locks to prevent concurrent execution
+- **Transactional**: Each SQL step runs in its own transaction and is recorded with its version, description, and time
+- **Serialized**: PostgreSQL `migrate()` holds an advisory lock (`PostgresSessionService::ADVISORY_LOCK_KEY`) on one connection for the whole run, so instances starting together do not race
 
 ## Session Lifecycle
 
@@ -695,6 +984,9 @@ let session = service.create(CreateRequest {
     state: HashMap::new(),
 }).await?;
 ```
+
+A second `create` with the same app, user, and session ID fails with `session.already_exists`
+and leaves the first session as it was; see [Get or Create](#get-or-create).
 
 ### 2. Retrieval
 
@@ -726,6 +1018,10 @@ let event = Event::new("invocation_123");
 service.append_event(session.id(), event).await?;
 ```
 
+On `InMemorySessionService`, a bare session ID that more than one app or user holds fails
+with `session.ambiguous_id`; `append_event_for_identity` (see
+[Typed Session Identity](#typed-session-identity)) names the session unambiguously.
+
 ### 4. Listing
 
 List all sessions for a user:
@@ -736,6 +1032,8 @@ use adk_session::ListRequest;
 let sessions = service.list(ListRequest {
     app_name: "my_app".to_string(),
     user_id: "user_123".to_string(),
+    limit: None,
+    offset: None,
 }).await?;
 
 for session in sessions {
@@ -764,16 +1062,16 @@ service.delete(DeleteRequest {
 
 Sessions are typically managed by the `Runner` when executing agents. The Runner:
 
-1. Creates or retrieves a session
-2. Passes session context to the agent
+1. Retrieves the session; a run for a session that does not exist fails with `session.not_found`, so create it first (see [Get or Create](#get-or-create))
+2. Screens and saves the user message, then passes the session context to the agent
 3. Appends events as the conversation progresses
 4. Updates session state based on agent actions
 
 ```rust
 use adk_rust::prelude::*;
 use adk_rust::{SessionId, UserId};
-use adk_runner::{Runner, RunnerConfig};
-use adk_session::InMemorySessionService;
+use adk_session::{CreateRequest, InMemorySessionService, SessionService};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 #[tokio::main]
@@ -788,16 +1086,21 @@ async fn main() -> anyhow::Result<()> {
         .build()?;
 
     let session_service = Arc::new(InMemorySessionService::new());
+    session_service
+        .create(CreateRequest {
+            app_name: "my_app".to_string(),
+            user_id: "user_123".to_string(),
+            session_id: Some("session_abc".to_string()),
+            state: HashMap::new(),
+        })
+        .await?;
 
     // Create runner with session service
-    let runner = Runner::new(RunnerConfig {
-        app_name: "my_app".to_string(),
-        agent: Arc::new(agent),
-        session_service,
-        artifact_service: None,
-        memory_service: None,
-        run_config: None,
-    })?;
+    let runner = Runner::builder()
+        .app_name("my_app")
+        .agent(Arc::new(agent))
+        .session_service(session_service)
+        .build()?;
 
     // Run with user and session IDs
     let user_content = Content::new("user").with_text("Hello!");
@@ -841,9 +1144,9 @@ let session = service.get_for_identity(&identity).await?;
 service.delete_for_identity(&identity).await?;
 ```
 
-All session backends (in-memory, SQLite, PostgreSQL, Redis, MongoDB, Firestore, Neo4j, Vertex) support the typed identity path. The legacy `append_event(&str, ...)` method remains available for backward compatibility.
+All session backends (in-memory, SQLite, PostgreSQL, Redis, MongoDB, Firestore, Neo4j, Vertex) support the typed identity path. The legacy `append_event(&str, ...)` method remains available for backward compatibility, except on `EncryptedSession`, which binds ciphertext to the full identity and requires `append_event_for_identity()`.
 
-For new code, prefer `append_event_for_identity()` and the other typed identity helpers. The legacy `append_event(&str, ...)` path is retained only for migration and is the first legacy identity API intended for future deprecation once internal callers have fully moved to `AdkIdentity`.
+For new code, prefer `append_event_for_identity()` and the other typed identity helpers.
 
 ### Multi-Tenant Safety
 
@@ -899,7 +1202,7 @@ pub trait Events: Send + Sync {
     /// Get event at index
     fn at(&self, index: usize) -> Option<&Event>;
     
-    /// Check if empty
+    /// Check if empty (default: `len() == 0`)
     fn is_empty(&self) -> bool;
 }
 ```
@@ -972,6 +1275,8 @@ async fn main() -> anyhow::Result<()> {
     let sessions = service.list(ListRequest {
         app_name: "demo".to_string(),
         user_id: "alice".to_string(),
+        limit: None,
+        offset: None,
     }).await?;
     
     println!("Total sessions: {}", sessions.len());

@@ -16,6 +16,10 @@
 //! service.migrate().await?;
 //! ```
 
+use crate::service::{
+    session_already_exists, session_id_not_found, session_not_found_for, validate_scope,
+    validate_session_id,
+};
 use crate::{
     AppendEventRequest, CreateRequest, DeleteRequest, Event, Events, GetRequest, KEY_PREFIX_TEMP,
     ListRequest, Session, SessionService, State, state_utils,
@@ -24,14 +28,22 @@ use adk_core::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use mongodb::bson::{self, Document, doc};
-use mongodb::options::{FindOptions, IndexOptions, UpdateOptions};
+use mongodb::options::{FindOptions, IndexOptions, ReturnDocument, UpdateOptions};
 use mongodb::{Client, Database, IndexModel};
 use serde_json::Value;
 use std::collections::HashMap;
 use tracing::instrument;
 use uuid::Uuid;
 
-/// MongoDB-backed session service implementing [`SessionService`](crate::SessionService).
+/// Whether the deployment that sent `reply` to `hello` runs multi-document transactions.
+///
+/// A replica set member names its set (`setName`), and the `mongos` router of a sharded
+/// cluster answers `msg: "isdbgrid"`; a standalone `mongod` does neither.
+pub(crate) fn hello_supports_transactions(reply: &Document) -> bool {
+    reply.contains_key("setName") || reply.get_str("msg") == Ok("isdbgrid")
+}
+
+/// MongoDB-backed session service implementing [`SessionService`].
 ///
 /// Uses four collections for the three-tier state model:
 /// - `sessions` — session documents with session-level state
@@ -50,8 +62,9 @@ pub struct MongoSessionService {
 impl MongoSessionService {
     /// Connect to MongoDB using a connection string and database name.
     ///
-    /// Automatically detects whether the deployment supports transactions
-    /// by checking for replica set membership via the `hello` command.
+    /// Automatically detects whether the deployment supports transactions from the
+    /// `hello` command: a replica set member and a sharded cluster's `mongos` router do,
+    /// a standalone server does not. A failed `hello` is treated as standalone.
     pub async fn new(connection_string: &str, database_name: &str) -> Result<Self> {
         let client_options = mongodb::options::ClientOptions::parse(connection_string)
             .await
@@ -60,17 +73,19 @@ impl MongoSessionService {
             .map_err(|e| adk_core::AdkError::session(format!("mongodb connection failed: {e}")))?;
         let db = client.database(database_name);
 
-        // Detect replica set support via hello command.
         let supports_transactions = match db.run_command(doc! { "hello": 1 }).await {
-            Ok(reply) => reply.get_str("setName").is_ok(),
-            Err(_) => false,
+            Ok(reply) => hello_supports_transactions(&reply),
+            Err(error) => {
+                tracing::warn!(error = %error, "mongodb hello failed; writing without transactions");
+                false
+            }
         };
 
         if supports_transactions {
-            tracing::info!("MongoDB replica set detected — transactions enabled");
+            tracing::info!("mongodb replica set or sharded cluster detected; transactions enabled");
         } else {
             tracing::info!(
-                "MongoDB standalone detected — using sequential writes (no transactions)"
+                "mongodb standalone detected; writing sequentially without transactions"
             );
         }
 
@@ -85,7 +100,7 @@ impl MongoSessionService {
     const REGISTRY_COLLECTION: &'static str = "_adk_session_migrations";
 
     const MONGO_SESSION_MIGRATIONS: &'static [(i64, &'static str)] =
-        &[(1, "create initial indexes")];
+        &[(1, "create initial indexes"), (2, "index events in read order")];
 
     /// Run versioned migrations for MongoDB session storage.
     pub async fn migrate(&self) -> Result<()> {
@@ -228,6 +243,7 @@ impl MongoSessionService {
 async fn run_mongo_session_step(db: &Database, version: i64) -> Result<()> {
     match version {
         1 => mongo_session_v1(db).await,
+        2 => mongo_session_v2(db).await,
         _ => Err(adk_core::AdkError::session(format!("unknown migration version: {version}"))),
     }
 }
@@ -291,6 +307,31 @@ async fn mongo_session_v1(db: &Database) -> Result<()> {
     Ok(())
 }
 
+/// Indexes events by session and read order: timestamp, then the append sequence `seq`.
+async fn mongo_session_v2(db: &Database) -> Result<()> {
+    db.collection::<Document>("events")
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {
+                    "app_name": 1, "user_id": 1, "session_id": 1, "timestamp": 1, "seq": 1,
+                })
+                .options(IndexOptions::builder().name("idx_events_read_order".to_string()).build())
+                .build(),
+        )
+        .await
+        .map_err(|e| adk_core::AdkError::session(format!("index creation failed: {e}")))?;
+    Ok(())
+}
+
+/// Whether `error` is a duplicate-key violation of a unique index.
+fn is_duplicate_key(error: &mongodb::error::Error) -> bool {
+    use mongodb::error::{ErrorKind, WriteFailure};
+    match &*error.kind {
+        ErrorKind::Write(WriteFailure::WriteError(write)) => write.code == 11000,
+        _ => false,
+    }
+}
+
 // ── BSON helpers ──
 
 fn state_to_bson(
@@ -323,6 +364,23 @@ fn bson_dt_to_chrono(dt: bson::DateTime) -> DateTime<Utc> {
     DateTime::from_timestamp_millis(millis).unwrap_or_default()
 }
 
+/// Builds an update pipeline that merges `delta` into a document's `state` and sets
+/// `updated_at`.
+///
+/// `$mergeObjects` runs against the stored document while the write holds it, so
+/// concurrent writers of different keys never overwrite each other. `$literal` keeps
+/// keys and values that would otherwise parse as expressions (a leading `$`) as data.
+fn merge_state_pipeline(
+    delta: &HashMap<String, Value>,
+    updated_at: bson::DateTime,
+) -> std::result::Result<Vec<Document>, adk_core::AdkError> {
+    let delta = state_to_bson(delta)?;
+    Ok(vec![doc! { "$set": {
+        "state": { "$mergeObjects": [{ "$ifNull": ["$state", {}] }, { "$literal": delta }] },
+        "updated_at": updated_at,
+    } }])
+}
+
 // ── Session-optional DB operation helpers ──
 // Each helper accepts Option<&mut ClientSession>. When Some, the op runs
 // inside the transaction; when None, it runs standalone.
@@ -336,72 +394,189 @@ macro_rules! with_optional_session {
     };
 }
 
+impl MongoSessionService {
+    /// Reads the current app and user state tiers.
+    async fn read_tiers(
+        &self,
+        txn: &mut Option<mongodb::ClientSession>,
+        app_name: &str,
+        user_id: &str,
+    ) -> Result<(HashMap<String, Value>, HashMap<String, Value>)> {
+        let app_coll = self.db.collection::<Document>("app_states");
+        let user_coll = self.db.collection::<Document>("user_states");
+
+        let app_state =
+            with_optional_session!(app_coll.find_one(doc! { "app_name": app_name }), txn.as_mut())
+                .map_err(|e| adk_core::AdkError::session(format!("query failed: {e}")))?
+                .and_then(|d| d.get_document("state").ok().map(bson_to_state))
+                .unwrap_or_default();
+        let user_state = with_optional_session!(
+            user_coll.find_one(doc! { "app_name": app_name, "user_id": user_id }),
+            txn.as_mut()
+        )
+        .map_err(|e| adk_core::AdkError::session(format!("query failed: {e}")))?
+        .and_then(|d| d.get_document("state").ok().map(bson_to_state))
+        .unwrap_or_default();
+
+        Ok((app_state, user_state))
+    }
+
+    /// Merges each non-empty tier delta into the stored tier.
+    async fn apply_tier_deltas(
+        &self,
+        txn: &mut Option<mongodb::ClientSession>,
+        app_name: &str,
+        user_id: &str,
+        app_delta: &HashMap<String, Value>,
+        user_delta: &HashMap<String, Value>,
+        updated_at: bson::DateTime,
+    ) -> Result<()> {
+        let upsert = UpdateOptions::builder().upsert(true).build();
+        if !app_delta.is_empty() {
+            let app_coll = self.db.collection::<Document>("app_states");
+            with_optional_session!(
+                app_coll
+                    .update_one(
+                        doc! { "app_name": app_name },
+                        merge_state_pipeline(app_delta, updated_at)?
+                    )
+                    .with_options(upsert.clone()),
+                txn.as_mut()
+            )
+            .map_err(|e| adk_core::AdkError::session(format!("insert failed: {e}")))?;
+        }
+        if !user_delta.is_empty() {
+            let user_coll = self.db.collection::<Document>("user_states");
+            with_optional_session!(
+                user_coll
+                    .update_one(
+                        doc! { "app_name": app_name, "user_id": user_id },
+                        merge_state_pipeline(user_delta, updated_at)?
+                    )
+                    .with_options(upsert),
+                txn.as_mut()
+            )
+            .map_err(|e| adk_core::AdkError::session(format!("insert failed: {e}")))?;
+        }
+        Ok(())
+    }
+
+    /// Applies `event` to the session `(app_name, user_id, session_id)`: merges each
+    /// tier's delta, bumps `updated_at`, and inserts the event.
+    async fn apply_event(
+        &self,
+        txn: &mut Option<mongodb::ClientSession>,
+        app_name: &str,
+        user_id: &str,
+        session_id: &str,
+        event: &Event,
+    ) -> Result<()> {
+        let sess_coll = self.db.collection::<Document>("sessions");
+        let ev_coll = self.db.collection::<Document>("events");
+
+        let (app_delta, user_delta, session_delta) =
+            state_utils::extract_state_deltas(&event.actions.state_delta);
+        let bson_ts = chrono_to_bson_dt(event.timestamp);
+
+        // `event_seq` counts the session's appends; it orders events with equal timestamps,
+        // which millisecond BSON dates make common.
+        let mut pipeline = merge_state_pipeline(&session_delta, bson_ts)?;
+        if let Some(set) =
+            pipeline.first_mut().and_then(|stage| stage.get_document_mut("$set").ok())
+        {
+            set.insert(
+                "event_seq",
+                doc! { "$add": [{ "$toLong": { "$ifNull": ["$event_seq", 0] } }, 1] },
+            );
+        }
+        let updated = with_optional_session!(
+            sess_coll
+                .find_one_and_update(
+                    doc! { "app_name": app_name, "user_id": user_id, "session_id": session_id },
+                    pipeline
+                )
+                .return_document(ReturnDocument::After)
+                .projection(doc! { "event_seq": 1 }),
+            txn.as_mut()
+        )
+        .map_err(|e| adk_core::AdkError::session(format!("update failed: {e}")))?
+        .ok_or_else(|| session_not_found_for(app_name, user_id, session_id))?;
+        let seq = updated
+            .get_i64("event_seq")
+            .or_else(|_| updated.get_i32("event_seq").map(i64::from))
+            .unwrap_or_default();
+
+        self.apply_tier_deltas(txn, app_name, user_id, &app_delta, &user_delta, bson_ts).await?;
+
+        let llm_bson = bson::to_bson(&event.llm_response)
+            .map_err(|e| adk_core::AdkError::session(format!("serialize failed: {e}")))?;
+        let act_bson = bson::to_bson(&event.actions)
+            .map_err(|e| adk_core::AdkError::session(format!("serialize failed: {e}")))?;
+        let tid_bson = bson::to_bson(&event.long_running_tool_ids)
+            .map_err(|e| adk_core::AdkError::session(format!("serialize failed: {e}")))?;
+        with_optional_session!(
+            ev_coll.insert_one(doc! {
+                "id": &event.id, "session_id": session_id, "app_name": app_name, "user_id": user_id,
+                "invocation_id": &event.invocation_id, "branch": &event.branch, "author": &event.author,
+                "timestamp": bson_ts, "seq": seq, "llm_response": llm_bson, "actions": act_bson, "long_running_tool_ids": tid_bson,
+            }), txn.as_mut()
+        ).map_err(|e| adk_core::AdkError::session(format!("insert failed: {e}")))?;
+
+        Ok(())
+    }
+}
+
 // ── SessionService implementation ──
 
 #[async_trait]
 impl SessionService for MongoSessionService {
     #[instrument(skip_all, fields(app_name = %req.app_name, user_id = %req.user_id))]
     async fn create(&self, req: CreateRequest) -> Result<Box<dyn Session>> {
+        req.try_identity()?;
         let session_id = req.session_id.unwrap_or_else(|| Uuid::new_v4().to_string());
         let now = Utc::now();
         let bson_now = chrono_to_bson_dt(now);
         let (app_delta, user_delta, session_state) = state_utils::extract_state_deltas(&req.state);
 
-        let app_coll = self.db.collection::<Document>("app_states");
-        let user_coll = self.db.collection::<Document>("user_states");
         let sess_coll = self.db.collection::<Document>("sessions");
 
+        let conflict = || session_already_exists(&req.app_name, &req.user_id, &session_id);
+        let identity = doc! {
+            "app_name": &req.app_name, "user_id": &req.user_id, "session_id": &session_id,
+        };
         let mut txn = self.maybe_start_transaction().await?;
 
-        // App state
-        let existing_app: HashMap<String, Value> = with_optional_session!(
-            app_coll.find_one(doc! { "app_name": &req.app_name }),
-            txn.as_mut()
-        )
-        .map_err(|e| adk_core::AdkError::session(format!("query failed: {e}")))?
-        .and_then(|d| d.get_document("state").ok().map(bson_to_state))
-        .unwrap_or_default();
-        let mut new_app = existing_app;
-        new_app.extend(app_delta);
-        let app_bson = state_to_bson(&new_app)?;
-        with_optional_session!(
-            app_coll.update_one(
-                doc! { "app_name": &req.app_name },
-                doc! { "$set": { "app_name": &req.app_name, "state": &app_bson, "updated_at": bson_now } }
-            ).with_options(UpdateOptions::builder().upsert(true).build()),
-            txn.as_mut()
-        ).map_err(|e| adk_core::AdkError::session(format!("insert failed: {e}")))?;
+        // The session document is written before the tiers, so a create that conflicts writes
+        // nothing even without a transaction; the unique index catches a concurrent create.
+        let existing = with_optional_session!(sess_coll.find_one(identity.clone()), txn.as_mut())
+            .map_err(|e| adk_core::AdkError::session(format!("query failed: {e}")))?;
+        if existing.is_some() {
+            return Err(conflict());
+        }
+        let session_bson = state_to_bson(&session_state)?;
+        let mut session_doc = identity;
+        session_doc.insert("state", session_bson);
+        session_doc.insert("created_at", bson_now);
+        session_doc.insert("updated_at", bson_now);
+        with_optional_session!(sess_coll.insert_one(session_doc), txn.as_mut()).map_err(|e| {
+            if is_duplicate_key(&e) {
+                conflict()
+            } else {
+                adk_core::AdkError::session(format!("insert failed: {e}"))
+            }
+        })?;
 
-        // User state
-        let existing_user: HashMap<String, Value> = with_optional_session!(
-            user_coll.find_one(doc! { "app_name": &req.app_name, "user_id": &req.user_id }),
-            txn.as_mut()
+        self.apply_tier_deltas(
+            &mut txn,
+            &req.app_name,
+            &req.user_id,
+            &app_delta,
+            &user_delta,
+            bson_now,
         )
-        .map_err(|e| adk_core::AdkError::session(format!("query failed: {e}")))?
-        .and_then(|d| d.get_document("state").ok().map(bson_to_state))
-        .unwrap_or_default();
-        let mut new_user = existing_user;
-        new_user.extend(user_delta);
-        let user_bson = state_to_bson(&new_user)?;
-        with_optional_session!(
-            user_coll.update_one(
-                doc! { "app_name": &req.app_name, "user_id": &req.user_id },
-                doc! { "$set": { "app_name": &req.app_name, "user_id": &req.user_id, "state": &user_bson, "updated_at": bson_now } }
-            ).with_options(UpdateOptions::builder().upsert(true).build()),
-            txn.as_mut()
-        ).map_err(|e| adk_core::AdkError::session(format!("insert failed: {e}")))?;
-
-        // Session
-        let merged = state_utils::merge_states(&new_app, &new_user, &session_state);
-        let merged_bson = state_to_bson(&merged)?;
-        with_optional_session!(
-            sess_coll.insert_one(doc! {
-                "app_name": &req.app_name, "user_id": &req.user_id, "session_id": &session_id,
-                "state": &merged_bson, "created_at": bson_now, "updated_at": bson_now,
-            }),
-            txn.as_mut()
-        )
-        .map_err(|e| adk_core::AdkError::session(format!("insert failed: {e}")))?;
+        .await?;
+        let (app_state, user_state) =
+            self.read_tiers(&mut txn, &req.app_name, &req.user_id).await?;
 
         MongoSessionService::maybe_commit(&mut txn).await?;
 
@@ -409,7 +584,7 @@ impl SessionService for MongoSessionService {
             app_name: req.app_name,
             user_id: req.user_id,
             session_id,
-            state: merged,
+            state: state_utils::merge_states(&app_state, &user_state, &session_state),
             events: Vec::new(),
             updated_at: now,
         }))
@@ -424,7 +599,9 @@ impl SessionService for MongoSessionService {
             .await.map_err(|e| adk_core::AdkError::session(format!("query failed: {e}")))?
             .ok_or_else(|| crate::service::session_not_found(&req))?;
 
-        let state = session_doc.get_document("state").map(bson_to_state).unwrap_or_default();
+        let stored = session_doc.get_document("state").map(bson_to_state).unwrap_or_default();
+        let (app_state, user_state) =
+            self.read_tiers(&mut None, &req.app_name, &req.user_id).await?;
         let updated_at = session_doc
             .get_datetime("updated_at")
             .map(|dt| bson_dt_to_chrono(*dt))
@@ -433,7 +610,7 @@ impl SessionService for MongoSessionService {
         let events_coll = self.db.collection::<Document>("events");
         let mut cursor = events_coll
             .find(doc! { "app_name": &req.app_name, "user_id": &req.user_id, "session_id": &req.session_id })
-            .with_options(FindOptions::builder().sort(doc! { "timestamp": 1 }).build())
+            .with_options(FindOptions::builder().sort(doc! { "timestamp": 1, "seq": 1 }).build())
             .await.map_err(|e| adk_core::AdkError::session(format!("query failed: {e}")))?;
 
         let mut events: Vec<Event> = Vec::new();
@@ -461,7 +638,7 @@ impl SessionService for MongoSessionService {
             app_name: req.app_name,
             user_id: req.user_id,
             session_id: req.session_id,
-            state,
+            state: state_utils::merge_current_tiers(&app_state, &user_state, &stored),
             events,
             updated_at,
         }))
@@ -469,9 +646,10 @@ impl SessionService for MongoSessionService {
 
     #[instrument(skip_all, fields(app_name = %req.app_name, user_id = %req.user_id))]
     async fn list(&self, req: ListRequest) -> Result<Vec<Box<dyn Session>>> {
+        validate_scope(&req.app_name, &req.user_id)?;
         let sess_coll = self.db.collection::<Document>("sessions");
         let opts = FindOptions::builder()
-            .sort(doc! { "updated_at": -1 })
+            .sort(doc! { "updated_at": -1, "session_id": -1 })
             .limit(req.limit.map(|l| l as i64))
             .skip(req.offset.map(|o| o as u64))
             .build();
@@ -480,6 +658,9 @@ impl SessionService for MongoSessionService {
             .with_options(opts)
             .await
             .map_err(|e| adk_core::AdkError::session(format!("query failed: {e}")))?;
+
+        let (app_state, user_state) =
+            self.read_tiers(&mut None, &req.app_name, &req.user_id).await?;
 
         let mut sessions: Vec<Box<dyn Session>> = Vec::new();
         while cursor
@@ -490,11 +671,12 @@ impl SessionService for MongoSessionService {
             let doc = cursor
                 .deserialize_current()
                 .map_err(|e| adk_core::AdkError::session(format!("deserialize failed: {e}")))?;
+            let stored = doc.get_document("state").map(bson_to_state).unwrap_or_default();
             sessions.push(Box::new(MongoSession {
                 app_name: req.app_name.clone(),
                 user_id: req.user_id.clone(),
                 session_id: doc.get_str("session_id").unwrap_or_default().to_string(),
-                state: doc.get_document("state").map(bson_to_state).unwrap_or_default(),
+                state: state_utils::merge_current_tiers(&app_state, &user_state, &stored),
                 events: Vec::new(),
                 updated_at: doc
                     .get_datetime("updated_at")
@@ -507,6 +689,7 @@ impl SessionService for MongoSessionService {
 
     #[instrument(skip_all, fields(app_name = %req.app_name, user_id = %req.user_id, session_id = %req.session_id))]
     async fn delete(&self, req: DeleteRequest) -> Result<()> {
+        req.try_identity()?;
         let ev_coll = self.db.collection::<Document>("events");
         let sess_coll = self.db.collection::<Document>("sessions");
         let filter = doc! { "app_name": &req.app_name, "user_id": &req.user_id, "session_id": &req.session_id };
@@ -522,12 +705,10 @@ impl SessionService for MongoSessionService {
 
     #[instrument(skip_all, fields(session_id = %session_id))]
     async fn append_event(&self, session_id: &str, mut event: Event) -> Result<()> {
+        validate_session_id(session_id)?;
         event.actions.state_delta.retain(|k, _| !k.starts_with(KEY_PREFIX_TEMP));
 
         let sess_coll = self.db.collection::<Document>("sessions");
-        let app_coll = self.db.collection::<Document>("app_states");
-        let user_coll = self.db.collection::<Document>("user_states");
-        let ev_coll = self.db.collection::<Document>("events");
 
         let mut txn = self.maybe_start_transaction().await?;
 
@@ -536,75 +717,12 @@ impl SessionService for MongoSessionService {
             txn.as_mut()
         )
         .map_err(|e| adk_core::AdkError::session(format!("query failed: {e}")))?
-        .ok_or_else(|| adk_core::AdkError::session("session not found"))?;
+        .ok_or_else(|| session_id_not_found(session_id))?;
 
         let app_name = session_doc.get_str("app_name").unwrap_or_default().to_string();
         let user_id = session_doc.get_str("user_id").unwrap_or_default().to_string();
-        let existing_state =
-            session_doc.get_document("state").map(bson_to_state).unwrap_or_default();
-        let (_, _, mut sess_state) = state_utils::extract_state_deltas(&existing_state);
 
-        let cur_app: HashMap<String, Value> =
-            with_optional_session!(app_coll.find_one(doc! { "app_name": &app_name }), txn.as_mut())
-                .map_err(|e| adk_core::AdkError::session(format!("query failed: {e}")))?
-                .and_then(|d| d.get_document("state").ok().map(bson_to_state))
-                .unwrap_or_default();
-
-        let cur_user: HashMap<String, Value> = with_optional_session!(
-            user_coll.find_one(doc! { "app_name": &app_name, "user_id": &user_id }),
-            txn.as_mut()
-        )
-        .map_err(|e| adk_core::AdkError::session(format!("query failed: {e}")))?
-        .and_then(|d| d.get_document("state").ok().map(bson_to_state))
-        .unwrap_or_default();
-
-        let (app_delta, user_delta, session_delta) =
-            state_utils::extract_state_deltas(&event.actions.state_delta);
-        let bson_ts = chrono_to_bson_dt(event.timestamp);
-
-        let mut new_app = cur_app;
-        new_app.extend(app_delta);
-        let app_bson = state_to_bson(&new_app)?;
-        with_optional_session!(
-            app_coll.update_one(doc! { "app_name": &app_name }, doc! { "$set": { "app_name": &app_name, "state": &app_bson, "updated_at": bson_ts } })
-                .with_options(UpdateOptions::builder().upsert(true).build()),
-            txn.as_mut()
-        ).map_err(|e| adk_core::AdkError::session(format!("insert failed: {e}")))?;
-
-        let mut new_user = cur_user;
-        new_user.extend(user_delta);
-        let user_bson = state_to_bson(&new_user)?;
-        with_optional_session!(
-            user_coll.update_one(doc! { "app_name": &app_name, "user_id": &user_id }, doc! { "$set": { "app_name": &app_name, "user_id": &user_id, "state": &user_bson, "updated_at": bson_ts } })
-                .with_options(UpdateOptions::builder().upsert(true).build()),
-            txn.as_mut()
-        ).map_err(|e| adk_core::AdkError::session(format!("insert failed: {e}")))?;
-
-        sess_state.extend(session_delta);
-        let merged = state_utils::merge_states(&new_app, &new_user, &sess_state);
-        let merged_bson = state_to_bson(&merged)?;
-        with_optional_session!(
-            sess_coll.update_one(
-                doc! { "app_name": &app_name, "user_id": &user_id, "session_id": session_id },
-                doc! { "$set": { "state": &merged_bson, "updated_at": bson_ts } }
-            ),
-            txn.as_mut()
-        )
-        .map_err(|e| adk_core::AdkError::session(format!("update failed: {e}")))?;
-
-        let llm_bson = bson::to_bson(&event.llm_response)
-            .map_err(|e| adk_core::AdkError::session(format!("serialize failed: {e}")))?;
-        let act_bson = bson::to_bson(&event.actions)
-            .map_err(|e| adk_core::AdkError::session(format!("serialize failed: {e}")))?;
-        let tid_bson = bson::to_bson(&event.long_running_tool_ids)
-            .map_err(|e| adk_core::AdkError::session(format!("serialize failed: {e}")))?;
-        with_optional_session!(
-            ev_coll.insert_one(doc! {
-                "id": &event.id, "session_id": session_id, "app_name": &app_name, "user_id": &user_id,
-                "invocation_id": &event.invocation_id, "branch": &event.branch, "author": &event.author,
-                "timestamp": bson_ts, "llm_response": llm_bson, "actions": act_bson, "long_running_tool_ids": tid_bson,
-            }), txn.as_mut()
-        ).map_err(|e| adk_core::AdkError::session(format!("insert failed: {e}")))?;
+        self.apply_event(&mut txn, &app_name, &user_id, session_id, &event).await?;
 
         MongoSessionService::maybe_commit(&mut txn).await?;
         Ok(())
@@ -619,106 +737,33 @@ impl SessionService for MongoSessionService {
         let mut event = req.event;
         event.actions.state_delta.retain(|k, _| !k.starts_with(KEY_PREFIX_TEMP));
 
-        let app_name = req.identity.app_name.as_ref();
-        let user_id = req.identity.user_id.as_ref();
-        let session_id = req.identity.session_id.as_ref();
-
-        let sess_coll = self.db.collection::<Document>("sessions");
-        let app_coll = self.db.collection::<Document>("app_states");
-        let user_coll = self.db.collection::<Document>("user_states");
-        let ev_coll = self.db.collection::<Document>("events");
-
         let mut txn = self.maybe_start_transaction().await?;
-
-        let session_doc = with_optional_session!(
-            sess_coll.find_one(
-                doc! { "app_name": app_name, "user_id": user_id, "session_id": session_id }
-            ),
-            txn.as_mut()
+        self.apply_event(
+            &mut txn,
+            req.identity.app_name.as_ref(),
+            req.identity.user_id.as_ref(),
+            req.identity.session_id.as_ref(),
+            &event,
         )
-        .map_err(|e| adk_core::AdkError::session(format!("query failed: {e}")))?
-        .ok_or_else(|| adk_core::AdkError::session("session not found"))?;
-
-        let existing_state =
-            session_doc.get_document("state").map(bson_to_state).unwrap_or_default();
-        let (_, _, mut sess_state) = state_utils::extract_state_deltas(&existing_state);
-
-        let cur_app: HashMap<String, Value> =
-            with_optional_session!(app_coll.find_one(doc! { "app_name": app_name }), txn.as_mut())
-                .map_err(|e| adk_core::AdkError::session(format!("query failed: {e}")))?
-                .and_then(|d| d.get_document("state").ok().map(bson_to_state))
-                .unwrap_or_default();
-
-        let cur_user: HashMap<String, Value> = with_optional_session!(
-            user_coll.find_one(doc! { "app_name": app_name, "user_id": user_id }),
-            txn.as_mut()
-        )
-        .map_err(|e| adk_core::AdkError::session(format!("query failed: {e}")))?
-        .and_then(|d| d.get_document("state").ok().map(bson_to_state))
-        .unwrap_or_default();
-
-        let (app_delta, user_delta, session_delta) =
-            state_utils::extract_state_deltas(&event.actions.state_delta);
-        let bson_ts = chrono_to_bson_dt(event.timestamp);
-
-        let mut new_app = cur_app;
-        new_app.extend(app_delta);
-        let app_bson = state_to_bson(&new_app)?;
-        with_optional_session!(
-            app_coll.update_one(doc! { "app_name": app_name }, doc! { "$set": { "app_name": app_name, "state": &app_bson, "updated_at": bson_ts } })
-                .with_options(UpdateOptions::builder().upsert(true).build()),
-            txn.as_mut()
-        ).map_err(|e| adk_core::AdkError::session(format!("insert failed: {e}")))?;
-
-        let mut new_user = cur_user;
-        new_user.extend(user_delta);
-        let user_bson = state_to_bson(&new_user)?;
-        with_optional_session!(
-            user_coll.update_one(doc! { "app_name": app_name, "user_id": user_id }, doc! { "$set": { "app_name": app_name, "user_id": user_id, "state": &user_bson, "updated_at": bson_ts } })
-                .with_options(UpdateOptions::builder().upsert(true).build()),
-            txn.as_mut()
-        ).map_err(|e| adk_core::AdkError::session(format!("insert failed: {e}")))?;
-
-        sess_state.extend(session_delta);
-        let merged = state_utils::merge_states(&new_app, &new_user, &sess_state);
-        let merged_bson = state_to_bson(&merged)?;
-        with_optional_session!(
-            sess_coll.update_one(
-                doc! { "app_name": app_name, "user_id": user_id, "session_id": session_id },
-                doc! { "$set": { "state": &merged_bson, "updated_at": bson_ts } }
-            ),
-            txn.as_mut()
-        )
-        .map_err(|e| adk_core::AdkError::session(format!("update failed: {e}")))?;
-
-        let llm_bson = bson::to_bson(&event.llm_response)
-            .map_err(|e| adk_core::AdkError::session(format!("serialize failed: {e}")))?;
-        let act_bson = bson::to_bson(&event.actions)
-            .map_err(|e| adk_core::AdkError::session(format!("serialize failed: {e}")))?;
-        let tid_bson = bson::to_bson(&event.long_running_tool_ids)
-            .map_err(|e| adk_core::AdkError::session(format!("serialize failed: {e}")))?;
-        with_optional_session!(
-            ev_coll.insert_one(doc! {
-                "id": &event.id, "session_id": session_id, "app_name": app_name, "user_id": user_id,
-                "invocation_id": &event.invocation_id, "branch": &event.branch, "author": &event.author,
-                "timestamp": bson_ts, "llm_response": llm_bson, "actions": act_bson, "long_running_tool_ids": tid_bson,
-            }), txn.as_mut()
-        ).map_err(|e| adk_core::AdkError::session(format!("insert failed: {e}")))?;
-
+        .await?;
         MongoSessionService::maybe_commit(&mut txn).await?;
         Ok(())
     }
 
     #[instrument(skip_all, fields(app_name = %app_name, user_id = %user_id))]
     async fn delete_all_sessions(&self, app_name: &str, user_id: &str) -> Result<()> {
+        validate_scope(app_name, user_id)?;
         let filter = doc! { "app_name": app_name, "user_id": user_id };
         let ev_coll = self.db.collection::<Document>("events");
         let sess_coll = self.db.collection::<Document>("sessions");
+        let user_coll = self.db.collection::<Document>("user_states");
 
         let mut txn = self.maybe_start_transaction().await?;
         with_optional_session!(ev_coll.delete_many(filter.clone()), txn.as_mut())
             .map_err(|e| adk_core::AdkError::session(format!("delete_all_sessions failed: {e}")))?;
-        with_optional_session!(sess_coll.delete_many(filter), txn.as_mut())
+        with_optional_session!(sess_coll.delete_many(filter.clone()), txn.as_mut())
+            .map_err(|e| adk_core::AdkError::session(format!("delete_all_sessions failed: {e}")))?;
+        with_optional_session!(user_coll.delete_many(filter), txn.as_mut())
             .map_err(|e| adk_core::AdkError::session(format!("delete_all_sessions failed: {e}")))?;
         MongoSessionService::maybe_commit(&mut txn).await?;
         Ok(())
@@ -821,5 +866,31 @@ impl Events for MongoSession {
     }
     fn at(&self, index: usize) -> Option<&Event> {
         self.events.get(index)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replica_set_members_support_transactions() {
+        let primary = doc! { "isWritablePrimary": true, "setName": "rs0", "hosts": ["a:27017"] };
+        assert!(hello_supports_transactions(&primary));
+        let secondary = doc! { "isWritablePrimary": false, "secondary": true, "setName": "rs0" };
+        assert!(hello_supports_transactions(&secondary));
+    }
+
+    #[test]
+    fn mongos_routers_support_transactions() {
+        let mongos = doc! { "isWritablePrimary": true, "msg": "isdbgrid", "maxWireVersion": 21 };
+        assert!(hello_supports_transactions(&mongos));
+    }
+
+    #[test]
+    fn standalone_servers_do_not_support_transactions() {
+        let standalone = doc! { "isWritablePrimary": true, "maxWireVersion": 21 };
+        assert!(!hello_supports_transactions(&standalone));
+        assert!(!hello_supports_transactions(&doc! { "msg": "not a router" }));
     }
 }

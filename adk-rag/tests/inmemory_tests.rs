@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use adk_rag::document::Chunk;
 use adk_rag::inmemory::InMemoryVectorStore;
-use adk_rag::vectorstore::VectorStore;
+use adk_rag::{CollectionSpec, Scope, VectorQuery, VectorStore};
 use proptest::prelude::*;
 
 /// Generate a non-zero L2-normalized embedding of the given dimension.
@@ -26,15 +26,8 @@ fn arb_normalized_embedding(dim: usize) -> impl Strategy<Value = Vec<f32>> {
 
 /// Generate a chunk with a normalized embedding.
 fn arb_chunk(dim: usize) -> impl Strategy<Value = Chunk> {
-    ("[a-z]{3,8}", "[a-z ]{5,30}", arb_normalized_embedding(dim)).prop_map(
-        |(id, text, embedding)| Chunk {
-            id,
-            text,
-            embedding,
-            metadata: HashMap::new(),
-            document_id: "doc_1".to_string(),
-        },
-    )
+    ("[a-z]{3,8}", "[a-z ]{5,30}", arb_normalized_embedding(dim))
+        .prop_map(|(id, text, embedding)| Chunk::new(id, "doc_1", text).with_embedding(embedding))
 }
 
 /// **Feature: adk-rag, Property 3: In-memory vector store search ordering**
@@ -59,7 +52,7 @@ mod prop_inmemory_search_ordering {
             let rt = tokio::runtime::Runtime::new().unwrap();
             let results = rt.block_on(async {
                 let store = InMemoryVectorStore::new();
-                store.create_collection("test", DIM).await.unwrap();
+                store.create_collection("test", &CollectionSpec::new(DIM)).await.unwrap();
 
                 // Deduplicate chunks by id to avoid upsert overwriting
                 let mut deduped: HashMap<String, Chunk> = HashMap::new();
@@ -69,8 +62,8 @@ mod prop_inmemory_search_ordering {
                 let unique_chunks: Vec<Chunk> = deduped.into_values().collect();
                 let count = unique_chunks.len();
 
-                store.upsert("test", &unique_chunks).await.unwrap();
-                let results = store.search("test", &query, top_k).await.unwrap();
+                store.upsert("test", &Scope::single_tenant(), &unique_chunks).await.unwrap();
+                let results = store.search("test", &Scope::single_tenant(), &VectorQuery::new(&query, top_k)).await.unwrap();
                 (results, count)
             });
 

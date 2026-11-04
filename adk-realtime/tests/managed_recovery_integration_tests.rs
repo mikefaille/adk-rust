@@ -818,6 +818,7 @@ async fn test_tool_future_failure_in_run_with_cancellation_recovers_and_continue
         description: None,
         parameters: None,
         behavior: None,
+        effect: adk_core::ToolEffect::NonIdempotent,
     };
 
     let runner = RealtimeRunner::builder()

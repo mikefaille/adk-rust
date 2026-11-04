@@ -1,669 +1,247 @@
 # UI Tools
 
-The `adk-ui` crate enables AI agents to dynamically generate rich user interfaces through tool calls. Agents can render forms, cards, alerts, tables, charts, and more - all through a type-safe Rust API that serializes to JSON for frontend consumption.
+An agent draws forms, cards, tables and screens in a person's thread with the render tools of
+`adk-surface`'s `genui` feature (spec 3.3 §7.4 rule 5). A drawing never contains approval
+controls or a decision's words, and a form's **Send** never runs a tool: it asks the drawing
+agent for the call, which the agent holds for the person to decide on the home's own card.
+[Agent-Drawn UI](../surfaces/genui.md) covers the whole feature.
 
-## What You'll Build
-
-![ADK UI Agent](images/adk-ui.jpg)
-
-**Key Concepts:**
-- **Forms** - Collect user input with various field types
-- **Cards** - Display information with action buttons
-- **Tables** - Present structured data in rows/columns
-- **Charts** - Visualize data with bar, line, area, pie charts
-- **Alerts** - Show notifications and status messages
-- **Modals** - Confirmation dialogs and focused interactions
-- **Toasts** - Brief status notifications
-- **Protocol Interop** - Emit UI as A2UI, AG-UI, or MCP Apps payloads
-
-### Example: Analytics Dashboard
-
-![ADK UI Analytics](images/adk-ui-agent-analytics.jpg)
-
-### Example: Registration Form
-
-![ADK UI Registration](images/adk-ui-register.jpg)
-
----
-
-## How It Works
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ STEP 1: User requests something                                             │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│   User: "I want to register for an account"                                 │
-│                                                                             │
-│                              ↓                                              │
-│                                                                             │
-│   ┌──────────────────────────────────────┐                                  │
-│   │         AI AGENT (LLM)              │                                  │
-│   │  "I should show a registration form" │                                  │
-│   └──────────────────────────────────────┘                                  │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ STEP 2: Agent calls render_form tool                                        │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│   📞 Tool Call: render_form({                                               │
-│     title: "Registration",                                                  │
-│     fields: [                                                               │
-│       {name: "email", type: "email"},                                       │
-│       {name: "password", type: "password"}                                  │
-│     ]                                                                       │
-│   })                                                                        │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ STEP 3: Frontend renders the form                                           │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│   ┌─────────────────────────────────────────────────┐                       │
-│   │  📋 Registration                               │                       │
-│   │  ────────────────────────────────────────────  │                       │
-│   │  Email:    [________________________]          │                       │
-│   │  Password: [________________________]          │                       │
-│   │                                                │                       │
-│   │  [           Register           ]              │                       │
-│   └─────────────────────────────────────────────────┘                       │
-│                                                                             │
-│   ✅ User sees an interactive form, fills it out, clicks Register           │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ STEP 4: Form submission sent back to agent                                  │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│   📩 Event: {                                                               │
-│     type: "form_submit",                                                    │
-│     data: { email: "user@example.com", password: "***" }                    │
-│   }                                                                         │
-│                                                                             │
-│   Agent: "Great! I'll process your registration and show a success alert"  │
-│                                                                             │
-│   📞 Tool Call: render_alert({                                              │
-│     title: "Registration Complete!",                                        │
-│     variant: "success"                                                      │
-│   })                                                                        │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
----
-
-## Overview
-
-UI tools allow agents to:
-
-- Collect user input through dynamic forms with textarea support
-- Display information with cards, alerts, and notifications
-- Present data in tables and interactive charts (Recharts)
-- Show progress and loading states (spinner, skeleton)
-- Create dashboard layouts with multiple components
-- Request user confirmation via modals
-- Display toast notifications for status updates
-
-## Quick Start
-
-Add to your `Cargo.toml`:
+![A form an agent drew in the web home](../images/surfaces/genui-form-light.png)
 
 ```toml
 [dependencies]
-adk-ui = { git = "https://github.com/zavora-ai/adk-ui" }
-adk-agent = "2.1.0"
-adk-model = "2.1.0"
+adk-surface = { version = "3.0.0", features = ["web", "genui"] }
 ```
 
-### Basic Usage
-
-```rust
-use adk_rust::prelude::*;
-use adk_ui::UiToolset;
+```rust,ignore
 use std::sync::Arc;
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let model = Arc::new(GeminiModel::from_env("gemini-3.7-flash")?);
+use adk_agent::LlmAgentBuilder;
+use adk_surface::genui::DrawToolset;
 
-    // Get all 10 UI tools
-    let ui_tools = UiToolset::all_tools();
-
-    // Create AI agent with UI tools
-    let mut builder = LlmAgentBuilder::new("ui_agent")
-        .model(model)
-        .instruction(r#"
-            You are a helpful assistant that uses UI components to interact with users.
-            Use render_form for collecting information.
-            Use render_card for displaying results.
-            Use render_alert for notifications.
-            Use render_modal for confirmation dialogs.
-            Use render_toast for brief status messages.
-        "#);
-
-    for tool in ui_tools {
-        builder = builder.tool(tool);
-    }
-
-let agent = builder.build()?;
-Ok(())
-}
+let agent = LlmAgentBuilder::new("finance")
+    .model(model)
+    .tool(Arc::new(send_invoice))
+    .toolset(Arc::new(DrawToolset::forms()))
+    .build()?;
 ```
 
-## A2UI JSONL (render_screen / render_page / render_kit)
+| Tool | Purpose |
+|------|---------|
+| `render_form` | Fields and actions: each action asks for one of the agent's tools with constants and field values, and the person decides before it runs |
+| `render_card` | A title and label and value rows |
+| `render_table` | A title, column headings and rows |
+| `render_screen` | A2UI v0.9.1 components of the `forms` 1.0 catalog |
+| `patch_surface` | The next version of a surface drawn earlier |
+| `delete_surface` | Removes a surface from the thread |
 
-These tools emit A2UI v0.9 JSONL for compatibility with A2UI renderers.
+Every drawing is checked on the server before any surface shows it. A refused drawing is a
+tool error that tells the agent why, and the thread shows a plain notice such as "Finance
+tried to show something that looks like a decision. It wasn't shown."
 
-### render_screen (single surface)
+> **Note:** the `adk-ui` crate is retired (spec 3.3 decision 11). Its 2.2.0 release is built on
+> `adk-core` 2, so an ADK-Rust 3 agent cannot register its tools; see
+> [Moving from adk-ui](../surfaces/genui.md#moving-from-adk-ui) for each tool's replacement.
+
+## UI protocols in adk-server
+
+The REST server in ADK-Rust 3.0 negotiates the UI protocol a client renders; the constants
+and capability specs live in `adk_server::ui_protocol`. The `adk_ui` profile is deprecated for
+new integrations, with a sunset target of 2026-12-31.
+
+| Profile | Value |
+|---------|-------|
+| ADK UI (default) | `adk_ui` |
+| A2UI | `a2ui` |
+| AG-UI | `ag_ui` |
+| MCP Apps | `mcp_apps` |
+
+A run request selects a profile with the `x-adk-ui-protocol` header or its `uiProtocol` /
+`ui_protocol` field; an unknown profile is rejected with `400 Bad Request` naming the
+supported ones. `GET /api/ui/capabilities` returns each profile's versions, implementation
+tier, features, and limitations, and the `/api/ui/initialize`, `/api/ui/message`, and
+`/api/ui/notifications/*` routes serve MCP Apps hosts. An `AgUiExtension` set with
+`ServerBuilder::with_ag_ui_extension` adds to protocol-native AG-UI runs; `adk-surface`'s
+`GenuiAgUi` sends drawings as `a2ui-surface` activities and holds a form sent through
+`forwardedProps.a2uiAction` ([Over AG-UI](../surfaces/genui.md#over-ag-ui)). `adk-surface`'s
+`genui-apps` feature is a governed MCP Apps host ([Apps from MCP servers](../surfaces/genui.md#apps-from-mcp-servers)).
+
+## AG-UI decisions
+
+A protocol-native AG-UI run (`uiProtocol: "ag_ui"`, `uiTransport: "protocol_native"`)
+carries calls held for approval as AG-UI interrupts (spec 3.3 §10 S2), following the
+interrupt-aware run lifecycle of the AG-UI 1.1 draft
+([Interrupts](https://docs.ag-ui.com/concepts/interrupts)). With an approval service
+(`ServerBuilder::with_approval_service`), every call the run holds is submitted to the
+inbox, and the run ends with one interrupt per held call instead of a success:
 
 ```json
 {
-  "surface_id": "main",
-  "components": [
-    { "id": "root", "component": "Column", "children": ["title", "cta"] },
-    { "id": "title", "component": "Text", "text": "Welcome", "variant": "h1" },
-    { "id": "cta_label", "component": "Text", "text": "Continue", "variant": "body" },
-    { "id": "cta", "component": "Button", "child": "cta_label", "action": { "event": { "name": "continue" } } }
-  ]
-}
-```
-
-### render_page (multi-section page)
-
-```json
-{
-  "title": "Release Notes",
-  "description": "Highlights for the latest launch.",
-  "sections": [
-    {
-      "heading": "What’s new",
-      "body": "Three big improvements shipped this week.",
-      "bullets": ["Faster onboarding", "Better search", "New dashboards"],
-      "actions": [{ "label": "View details", "action": "view_details", "variant": "borderless" }]
-    }
-  ]
-}
-```
-
-### render_kit (catalog + tokens + templates)
-
-```json
-{
-  "name": "Fintech Pro",
-  "version": "0.1.0",
-  "brand": { "vibe": "trustworthy", "industry": "fintech" },
-  "colors": { "primary": "#2F6BFF" },
-  "typography": { "family": "Source Sans 3" },
-  "templates": ["auth_login", "dashboard"]
-}
-```
-
-Use the React renderer to consume A2UI JSONL:
-
-```tsx
-import {
-  A2uiStore,
-  A2uiSurfaceRenderer,
-  applyParsedMessages,
-  parseJsonl,
-} from "@zavora-ai/adk-ui-react";
-
-const store = new A2uiStore();
-const parsed = parseJsonl(jsonl);
-applyParsedMessages(store, parsed);
-
-export function App() {
-  return <A2uiSurfaceRenderer store={store} surfaceId="main" />;
-}
-```
-
-## Available Tools
-
-### render_form
-
-Render interactive forms to collect user input.
-
-```json
-{
-  "title": "Registration Form",
-  "description": "Create your account",
-  "fields": [
-    {"name": "username", "label": "Username", "type": "text", "required": true},
-    {"name": "email", "label": "Email", "type": "email", "required": true},
-    {"name": "password", "label": "Password", "type": "password", "required": true},
-    {"name": "newsletter", "label": "Subscribe to newsletter", "type": "switch"}
-  ],
-  "submit_label": "Register"
-}
-```
-
-**Renders as:**
-```
-┌─────────────────────────────────────────────────┐
-│  📋 Registration Form                          │
-│  Create your account                           │
-│  ─────────────────────────────────────────────  │
-│                                                │
-│  Username *                                    │
-│  ┌─────────────────────────────────────────┐   │
-│  │                                         │   │
-│  └─────────────────────────────────────────┘   │
-│                                                │
-│  Email *                                       │
-│  ┌─────────────────────────────────────────┐   │
-│  │                                         │   │
-│  └─────────────────────────────────────────┘   │
-│                                                │
-│  Password *                                    │
-│  ┌─────────────────────────────────────────┐   │
-│  │ ••••••••                                │   │
-│  └─────────────────────────────────────────┘   │
-│                                                │
-│  Subscribe to newsletter  [○]                  │
-│                                                │
-│  ┌─────────────────────────────────────────┐   │
-│  │             Register                    │   │
-│  └─────────────────────────────────────────┘   │
-│                                                │
-└─────────────────────────────────────────────────┘
-```
-
-**Field types**: `text`, `email`, `password`, `number`, `date`, `select`, `multiselect`, `switch`, `slider`, `textarea`
-
-### render_card
-
-Display information cards with optional action buttons.
-
-```json
-{
-  "title": "Order Confirmed",
-  "description": "Order #12345",
-  "content": "Your order has been placed successfully. Expected delivery: Dec 15, 2025.",
-  "actions": [
-    {"label": "Track Order", "action_id": "track", "variant": "primary"},
-    {"label": "Cancel", "action_id": "cancel", "variant": "danger"}
-  ]
-}
-```
-
-**Button variants**: `primary`, `secondary`, `danger`, `ghost`, `outline`
-
-### render_alert
-
-Show notifications and status messages.
-
-```json
-{
-  "title": "Payment Successful",
-  "description": "Your payment of $99.00 has been processed.",
-  "variant": "success"
-}
-```
-
-**Variants**: `info`, `success`, `warning`, `error`
-
-### render_confirm
-
-Request user confirmation before actions.
-
-```json
-{
-  "title": "Delete Account",
-  "message": "Are you sure you want to delete your account? This action cannot be undone.",
-  "confirm_label": "Delete",
-  "cancel_label": "Keep Account",
-  "variant": "danger"
-}
-```
-
-### render_table
-
-Display tabular data.
-
-```json
-{
-  "title": "Recent Orders",
-  "columns": [
-    {"header": "Order ID", "accessor_key": "id"},
-    {"header": "Date", "accessor_key": "date"},
-    {"header": "Amount", "accessor_key": "amount"},
-    {"header": "Status", "accessor_key": "status"}
-  ],
-  "data": [
-    {"id": "#12345", "date": "2025-12-10", "amount": "$99.00", "status": "Delivered"},
-    {"id": "#12346", "date": "2025-12-11", "amount": "$149.00", "status": "Shipped"}
-  ]
-}
-```
-
-### render_chart
-
-Create data visualizations.
-
-```json
-{
-  "title": "Monthly Sales",
-  "chart_type": "bar",
-  "x_key": "month",
-  "y_keys": ["revenue", "profit"],
-  "data": [
-    {"month": "Jan", "revenue": 4000, "profit": 2400},
-    {"month": "Feb", "revenue": 3000, "profit": 1398},
-    {"month": "Mar", "revenue": 5000, "profit": 3800}
-  ]
-}
-```
-
-**Chart types**: `bar`, `line`, `area`, `pie`
-
-### render_progress
-
-Show task progress with optional steps.
-
-```json
-{
-  "title": "Installing Dependencies",
-  "value": 65,
-  "description": "Installing package 13 of 20...",
-  "steps": [
-    {"label": "Download", "completed": true},
-    {"label": "Extract", "completed": true},
-    {"label": "Install", "current": true},
-    {"label": "Configure", "completed": false}
-  ]
-}
-```
-
-### render_layout
-
-Create dashboard layouts with multiple sections.
-
-```json
-{
-  "title": "System Status",
-  "description": "Current system health overview",
-  "sections": [
-    {
-      "title": "Services",
-      "type": "stats",
-      "stats": [
-        {"label": "API Server", "value": "Healthy", "status": "operational"},
-        {"label": "Database", "value": "Degraded", "status": "warning"},
-        {"label": "Cache", "value": "Down", "status": "error"}
-      ]
-    },
-    {
-      "title": "Recent Errors",
-      "type": "table",
-      "columns": [{"header": "Time", "key": "time"}, {"header": "Error", "key": "error"}],
-      "rows": [{"time": "10:30", "error": "Connection timeout"}]
-    }
-  ]
-}
-```
-
-**Section types**: `stats`, `table`, `chart`, `alert`, `text`
-
-### render_modal
-
-Display modal dialogs for confirmations or focused interactions.
-
-```json
-{
-  "title": "Confirm Deletion",
-  "message": "Are you sure you want to delete this item? This action cannot be undone.",
-  "size": "medium",
-  "closable": true,
-  "confirm_label": "Delete",
-  "cancel_label": "Cancel",
-  "confirm_action": "delete_confirmed"
-}
-```
-
-**Sizes**: `small`, `medium`, `large`, `full`
-
-### render_toast
-
-Show brief toast notifications for status updates.
-
-```json
-{
-  "message": "Settings saved successfully",
-  "variant": "success",
-  "duration": 5000,
-  "dismissible": true
-}
-```
-
-**Variants**: `info`, `success`, `warning`, `error`
-
-## Filtered Tools
-
-Select only the tools your agent needs:
-
-```rust
-let toolset = UiToolset::new()
-    .without_chart()      // Disable charts
-    .without_table()      // Disable tables
-    .without_progress()   // Disable progress
-    .without_modal()      // Disable modals
-    .without_toast();     // Disable toasts
-
-// Or use forms only
-let forms_only = UiToolset::forms_only();
-```
-
-## Handling UI Events
-
-When users interact with rendered UI (submit forms, click buttons), events are sent back to the agent:
-
-```rust
-use adk_ui::{UiEvent, UiEventType};
-
-// UiEvent structure
-pub struct UiEvent {
-    pub event_type: UiEventType,  // FormSubmit, ButtonClick, InputChange
-    pub action_id: Option<String>,
-    pub data: Option<HashMap<String, Value>>,
-}
-
-// Convert to message for agent
-let message = ui_event.to_message();
-```
-
-## Streaming UI Updates
-
-For real-time UI updates, use `UiUpdate` to patch components by ID:
-
-```rust
-use adk_ui::{UiUpdate, UiOperation};
-
-let update = UiUpdate {
-    target_id: "progress-bar".to_string(),
-    operation: UiOperation::Patch,
-    payload: Some(Component::Progress(Progress {
-        id: Some("progress-bar".to_string()),
-        value: 75,
-        label: Some("75%".to_string()),
-    })),
-};
-```
-
-**Operations**: `Replace`, `Patch`, `Append`, `Remove`
-
-## Component Schema
-
-All 28 component types support optional `id` fields for streaming updates:
-
-**Atoms**: Text, Button, Icon, Image, Badge
-**Inputs**: TextInput, NumberInput, Select, MultiSelect, Switch, DateInput, Slider, Textarea
-**Layouts**: Stack, Grid, Card, Container, Divider, Tabs
-**Data**: Table, List, KeyValue, CodeBlock
-**Visualization**: Chart (bar, line, area, pie via Recharts)
-**Feedback**: Alert, Progress, Toast, Modal, Spinner, Skeleton
-
-## React Client
-
-A reference React implementation is provided in the standalone [adk-ui](https://github.com/zavora-ai/adk-ui) repository:
-
-```bash
-npm install @zavora-ai/adk-ui-react
-```
-
-The React client includes:
-- TypeScript types matching the Rust schema
-- Component renderer for all 28 types
-- Recharts integration for interactive charts
-- Markdown rendering support
-- Dark mode support
-- Form submission handling
-- Modal and toast components
-
-## Architecture
-
-```
-Agent ──[render_* tool]──> UiResponse (JSON)
-                              │
-                              │ SSE
-                              ▼
-                         Client (React)
-                              │
-                              └──> UiEvent (user action) ──> Agent
-```
-
-### Protocol Interop
-
-All 13 render tools support protocol-aware output through the `protocol` argument:
-
-| Protocol | Description |
-|----------|-------------|
-| `a2ui` | A2UI v0.9-aligned JSONL surfaces (default for `render_screen`, `render_page`) |
-| `ag_ui` | Hybrid AG-UI support: compatibility wrappers by default, plus additive protocol-native runtime transport for `adk-server` clients |
-| `mcp_apps` | Compatibility MCP Apps payloads with `ui://` resources, additive bridge helpers, notification flows, runtime request fields, and HTML/resource adapters |
-
-When `protocol` is omitted, tools use their default output format (legacy `UiResponse` JSON for most tools, A2UI for `render_screen`/`render_page`/`render_kit`).
-
-**Example with protocol selection:**
-
-```json
-{
-  "protocol": "mcp_apps",
-  "mcp_apps": {
-    "resource_uri": "ui://demo/surface"
+  "type": "RUN_FINISHED",
+  "threadId": "thread-1",
+  "runId": "run-1",
+  "outcome": {
+    "type": "interrupt",
+    "interrupts": [{
+      "id": "apr_5f0c…",
+      "reason": "tool_call",
+      "message": "Send the October invoice",
+      "toolCallId": "call-1",
+      "responseSchema": {
+        "type": "object",
+        "properties": {
+          "approved": { "type": "boolean" },
+          "editedArgs": { "type": "object" },
+          "reason": { "type": "string" }
+        },
+        "required": ["approved"]
+      },
+      "metadata": {
+        "summary": "Send the October invoice",
+        "agent": "finance",
+        "tool": "send_invoice",
+        "answerable": true,
+        "risk": "medium",
+        "version": 1,
+        "arguments": { "invoice": "INV-10" }
+      }
+    }]
   }
 }
 ```
 
-### Interop Adapters
+| Field | Value |
+|-------|-------|
+| `id` | The inbox entry's ID; for a call with no inbox entry, the call ID |
+| `toolCallId` | The held call, whose `TOOL_CALL_START`, `TOOL_CALL_ARGS` and `TOOL_CALL_END` the run already sent |
+| `metadata.summary`, `risk`, `version` | Drawn from the inbox entry, never from agent output |
+| `metadata.agent` | The acting agent's name, from the identity the inbox entry records (`finance` for `urn:adk:agent:finance/finance`) |
+| `metadata.answerable` | Whether a `resume` from this caller can decide it: `true` when the entry offers it at least one answer |
+| `metadata.arguments` | The arguments the call runs with — another approver's edit in place of the held ones — only when the caller authenticated through the server's `RequestContextExtractor`, so it is the session's owner |
+| `responseSchema` | The answers this caller may give the entry: `approved` carries a `const` when only a yes or only a no is allowed, `editedArgs` appears only when Edit is allowed and `reason` only when Deny is; absent when no answer is |
+| `expiresAt` | The inbox entry's expiry |
 
-`adk-ui` includes adapter primitives for protocol conversion:
+An interrupt offers no answer — `metadata.answerable: false` and no `responseSchema` — when
+no resume from this caller can decide it: a call with no inbox entry (no approval service,
+or a service that leaves the call held in its store only, such as `StoreApprovalService`
+without a router), a server without a `RequestContextExtractor`, or an entry whose policy
+does not let the session's owner decide it, such as the default policy, which forbids
+approving one's own call. It is decided where it is held or by its approvers. A server
+with an approval service accepts it answered `cancelled`; one without accepts no `resume`
+at all. The held call's placeholder result and the hold's placeholder text are not sent.
 
-- `A2uiAdapter` — Converts canonical surfaces to A2UI JSONL
-- `AgUiAdapter` — Converts to AG-UI event payloads
-- `McpAppsAdapter` — Converts to MCP Apps resource payloads
+An AG-UI front end cannot confirm that it is the person, so it answers as the surfaces of
+spec 3.3 §7.2 that cannot: a call whose inbox entry is high or critical risk, or one that
+spends money (a `payments_*` tool), is offered and accepted only as a denial. It is
+approved where the person can confirm it is them, such as the web home after a passkey
+check. An approval sent anyway is refused with `surface.answer_not_allowed`.
 
-These implement a shared `UiProtocolAdapter` trait for consistent conversion across all tools.
+If the inbox cannot be read when the run ends, the stream ends with `RUN_ERROR` carrying
+the store's error code instead of an interrupt that would say the call cannot be decided
+here; the call keeps waiting in the inbox.
 
-### Deprecation Timeline
+### Resume
 
-The legacy `adk_ui` runtime profile carries deprecation metadata:
+The next run on the thread answers the interrupts in `resume`:
 
-| Date | Milestone |
-|------|-----------|
-| 2026-02-07 | Deprecation announced |
-| 2026-12-31 | Sunset target |
-
-Replacements: `a2ui`, `ag_ui`, `mcp_apps`
-
-This metadata is exposed through `UI_PROTOCOL_CAPABILITIES` constants and surfaced by `adk-server` at `/api/ui/capabilities`.
-The capability response also reports `implementationTier`, `specTrack`, `summary`, and `limitations` so clients can distinguish hybrid or compatibility subsets from fully native protocol support.
-
-When `adk-server` is the host-facing boundary, it also exposes additive MCP Apps bridge helpers at `/api/ui/initialize`, `/api/ui/message`, `/api/ui/update-model-context`, `/api/ui/notifications/poll`, `/api/ui/notifications/resources-list-changed`, and `/api/ui/notifications/tools-list-changed`. These endpoints preserve the existing ADK runtime contracts and accept either direct request bodies or JSON-RPC-like envelopes with `ui/...` methods.
-
-For runtime consumers, `adk-server` also supports:
-- `x-adk-ui-transport: protocol_native` or `uiTransport: "protocol_native"` for AG-UI-native SSE serialization
-- AG-UI dual-path request inputs via `input` / `agUiInput` beside the existing `newMessage`
-- MCP Apps bridge envelopes inside `/api/run_sse` via `mcpAppsInitialize`, `mcpAppsRequest`, and `mcpAppsInitialized`
-
-These additions are opt-in. Existing `/api/run` and `/api/run_sse` consumers continue to receive the generic ADK wrapper unless they explicitly request a native AG-UI transport mode.
-
-For framework-owned MCP Apps tool responses, `adk-server::ui_types` now exposes:
-- `McpUiBridgeSnapshot` for typed host/app bridge state
-- `McpUiToolResult` for the additive response envelope
-- `McpUiToolResultBridge` for bridge metadata (`protocolVersion`, `structuredContent`, `hostInfo`, `hostCapabilities`, `hostContext`, `appInfo`, `appCapabilities`, `initialized`)
-
-Prefer `McpUiBridgeSnapshot::build_tool_result(...)` when promoting bridge/session state into a tool response. This standardizes the tool-result shape while preserving `resourceUri` and inline `html` fallbacks for compatibility-oriented hosts.
-
-For embedded or browser-host mappings, the additive HTTP bridge corresponds to host/app flows as follows:
-- `ui/initialize` -> `/api/ui/initialize`
-- `ui/message` -> `/api/ui/message`
-- `ui/update-model-context` -> `/api/ui/update-model-context`
-- `notifications/resources/list_changed` -> `/api/ui/notifications/resources-list-changed`
-- `notifications/tools/list_changed` -> `/api/ui/notifications/tools-list-changed`
-- queued host notifications -> `/api/ui/notifications/poll`
-
-Direct `/api/ui/*` bridge endpoints are the preferred lifecycle path for MCP Apps hosts. Runtime-side MCP Apps request fields remain available as an additive compatibility path for mixed or legacy clients.
-
-## Examples
-
-The standalone [adk-ui](https://github.com/zavora-ai/adk-ui) repo contains the runnable UI examples:
-
-| Example | Description | Run Command |
-|---------|-------------|-------------|
-| `ui_agent` | Console demo | `cargo run --bin ui_agent` |
-| `ui_server` | HTTP server with SSE | `cargo run --bin ui_server` |
-| `ui_react_client` | React frontend | `cd ui_react_client && npm run dev` |
-
-Run those examples from the `adk-ui` repository so the Rust and React packages stay on the same release line.
-
-## Sample Prompts
-
-Test the UI tools with these prompts:
-
-```
-# Forms
-"I want to register for an account"
-"Create a contact form"
-"Create a feedback form with a comments textarea"
-
-# Cards
-"Show me my profile"
-"Display a product card for a laptop"
-
-# Alerts
-"Show a success message"
-"Display a warning about expiring session"
-
-# Modals
-"I want to delete my account" (shows confirmation modal)
-"Show a confirmation dialog before submitting"
-
-# Toasts
-"Show a success toast notification"
-"Display an error toast"
-
-# Tables
-"Show my recent orders"
-"List all users"
-
-# Charts
-"Show monthly sales chart"
-"Display traffic trends as a line chart"
-"Show revenue breakdown as a pie chart"
-
-# Progress & Loading
-"Show upload progress at 75%"
-"Display a loading spinner"
-"Show skeleton loading state"
-
-# Dashboards
-"Show system status dashboard"
+```json
+{
+  "appName": "finance",
+  "userId": "alice",
+  "sessionId": "thread-1",
+  "uiProtocol": "ag_ui",
+  "uiTransport": "protocol_native",
+  "input": {
+    "threadId": "thread-1",
+    "runId": "run-2",
+    "messages": [],
+    "resume": [
+      { "interruptId": "apr_5f0c…", "status": "resolved", "payload": { "approved": true } }
+    ]
+  }
+}
 ```
 
+| `payload` | Decision |
+|-----------|----------|
+| `{"approved": true}` | Allow once |
+| `{"approved": true, "editedArgs": {...}}` | Edit: the call runs with the full replacement arguments after the policy checks them again |
+| `{"approved": false, "reason": "..."}` | Deny, with the reason reported to the model |
+
+A resume is all or nothing. Every entry is checked against its inbox entry first, as
+`ApprovalService::decide` would check it, by the authenticated caller as
+`human(<user id>)` at the version the client echoes in `metadata.version`, or else the
+version read then — unless another approver's edit has replaced the arguments since,
+which is a version conflict, so a yes never approves arguments the person was not shown.
+The answers are recorded only once the rest of the request is valid, the session and the
+agent are loaded, and the server is not frozen, just before the run starts. The run is a
+blank turn that resumes the calls the decisions allow; their results arrive as
+`TOOL_CALL_RESULT` against the original `toolCallId`. One resume of a thread runs at a
+time: a resume sent while an earlier one's run is still going is refused with
+`approval.resume_in_progress`, so two runs never resume the same call.
+
+| Entry | Effect |
+|-------|--------|
+| `resolved`, the inbox entry pending | Decided when the run starts |
+| `resolved`, the inbox entry already resolved and its call not yet run — decided on another surface or by this resume sent before, expired, or withdrawn | Nothing is recorded; the run starts and the call follows that outcome, so an expired or withdrawn call is answered as denied. Another answer — another verdict, or a yes with other `editedArgs` — is reported with `code` and `message` |
+| `resolved`, the inbox entry's call already run, the entry past its expiry but not yet expired by the approval service, or changed since it was shown | The whole resume is refused and nothing is decided |
+| `cancelled` | Nothing is decided: the call keeps waiting in the inbox |
+| Naming no inbox entry of the run's session | Reported as `unknown` and skipped |
+
+Each answered entry is reported after `RUN_STARTED` as a `CUSTOM` event named
+`adk.decision`, with `interruptId`, `state` (`approved`, `rejected`, `responded`,
+`pending`, `expired`, `cancelled`, or `unknown`), `tool`, `version` — the version to
+answer at — `editedArgs` when another approver's edit replaced the call's arguments, and,
+once decided, `decidedBy` and `decidedAt`; an answer not recorded also carries `code` and
+`message`. A refused resume is reported, never retried: the stream is
+`RUN_STARTED`, the `adk.decision` updates, and `RUN_ERROR` with the refusal's code, such
+as `approval.already_resolved` with the message "Already decided by alice" or
+`approval.version_conflict` after an escalation changed the entry, and the run does not
+start. Answering again at the reported `version` decides the entry.
+
+| Request | Answer |
+|---------|--------|
+| `resume` without an approval service, or outside the `ag_ui` profile's `protocol_native` transport | `400` |
+| `resume` without an authenticated caller | `401` |
+| A `resolved` entry whose `payload` is not one of the answers above, or one interrupt answered twice | `400`, and nothing is decided |
+| Any other invalid request, such as a `stateDelta` that is not an object | Its error, and nothing is decided |
+| A frozen server | `403` (`governance.frozen`), and nothing is decided |
+| A resume of a thread whose earlier resume's run is still going | `RUN_ERROR` (`approval.resume_in_progress`), and nothing is decided |
+
+Every answer a resume gives is written to the audit trail attached to the server's
+`GovernanceControl` (`GovernanceControl::attach_audit`), as the surfaces of spec 3.3 record
+theirs: a `surface.decide` record with the caller, the inbox entry, the answer and its
+`outcome` (`decided`, `already_decided`, `changed`, or `refused` with its `code`),
+`surface: "ag_ui"`, and `origin: {"kind": "app", "channel": "another app"}`, so "What your
+agents did" says "You said yes to send_invoice, from another app".
+
+`GET /api/ui/capabilities` lists `interrupt_resume` for `ag_ui` only on a server with an
+approval service and a `RequestContextExtractor`; `tool_call_interrupts` is listed on
+every server.
+
+The inbox's approval policy decides who may answer. For a personal agent whose person
+approves their own agent's calls, route held calls with
+`ApprovalPolicy::allow_self_approval`:
+
+```rust,ignore
+use adk_core::{ApprovalPolicy, ApproverSelector, InMemoryApprovalStore, StoreApprovalService};
+use adk_server::{ServerBuilder, ServerConfig};
+use std::sync::Arc;
+
+let approvals = StoreApprovalService::new(Arc::new(InMemoryApprovalStore::new()))
+    .with_router(ApprovalPolicy::new([ApproverSelector::human("alice")]).allow_self_approval());
+let config = ServerConfig::new(agent_loader, session_service)
+    .with_request_context(Arc::new(extractor));
+let app = ServerBuilder::new(config).with_approval_service(Arc::new(approvals)).build();
+```
+
+`with_approval_service` needs `adk-server`'s `approvals` feature.
+
+## Related
+
+- [Agent-Drawn UI](../surfaces/genui.md) — the `genui` feature end to end
+- [A2UI quickstart](../quickstart-a2ui.md)
+- [Function Tools](function-tools.md) — Creating custom tools
 
 ---
 

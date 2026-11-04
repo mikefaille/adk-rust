@@ -196,10 +196,10 @@ async fn main() -> anyhow::Result<()> {
     // --- Step 2: Build the server with custom routes ---
     //
     // ServerBuilder composes the final Axum router:
-    //   - Built-in routes: /api/health, /api/sessions, /api/run, /ui, etc.
+    //   - Built-in routes: /api/health, /api/sessions, /api/run, etc.
     //   - Custom API routes: merged under /api with the same auth middleware
     //   - Custom root routes: merged at the top level (no auth middleware)
-    //   - Optional A2A protocol: /.well-known/agent.json, /a2a, /a2a/stream
+    //   - Optional A2A protocol: /.well-known/agent-card.json, /a2a, /a2a/stream
     //   - Optional shutdown endpoint: POST /api/shutdown for graceful shutdown
     //
     // All routes share the middleware stack: CORS, tracing, timeout, security

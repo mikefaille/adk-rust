@@ -82,6 +82,10 @@ impl fmt::Display for ErrorComponent {
 /// - [`Cancelled`](Self::Cancelled) — operation was cancelled by caller or system
 /// - [`Internal`](Self::Internal) — unexpected internal error (bugs, invariant violations)
 /// - [`Unsupported`](Self::Unsupported) — requested feature or operation is not supported
+/// - [`ResourceExhausted`](Self::ResourceExhausted) — a configured budget (model calls, tokens,
+///   cost, wall time, tool calls) is used up; not retryable within the same run
+/// - [`Conflict`](Self::Conflict) — the write lost a race or used a stale version; reload and
+///   retry, or stop
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCategory {
@@ -105,6 +109,45 @@ pub enum ErrorCategory {
     Internal,
     /// Requested feature or operation is not supported.
     Unsupported,
+    /// A configured resource budget is used up.
+    ///
+    /// Not retryable within the same run: retrying spends against the same
+    /// exhausted budget. See [`RunBudget`](crate::RunBudget).
+    ResourceExhausted,
+    /// The write lost a race or used a stale version; reload and retry, or stop.
+    ///
+    /// Not retryable as is: repeating the same write with the same stale version or
+    /// epoch fails again. Maps to HTTP 409.
+    Conflict,
+}
+
+impl ErrorCategory {
+    /// Whether the category describes the call rather than what happened upstream.
+    ///
+    /// `InvalidInput`, `Forbidden`, `NotFound`, `Unsupported`, `Conflict` and
+    /// `ResourceExhausted` say what the call asked for and why it was not done, so their
+    /// messages are the guidance the caller needs. The others report an upstream or
+    /// internal failure, whose message can quote credentials, hosts or response bodies.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use adk_core::ErrorCategory;
+    ///
+    /// assert!(ErrorCategory::Forbidden.is_rejection());
+    /// assert!(!ErrorCategory::Unavailable.is_rejection());
+    /// ```
+    pub fn is_rejection(self) -> bool {
+        matches!(
+            self,
+            Self::InvalidInput
+                | Self::Forbidden
+                | Self::NotFound
+                | Self::Unsupported
+                | Self::Conflict
+                | Self::ResourceExhausted
+        )
+    }
 }
 
 impl fmt::Display for ErrorCategory {
@@ -120,6 +163,8 @@ impl fmt::Display for ErrorCategory {
             Self::Cancelled => "cancelled",
             Self::Internal => "internal",
             Self::Unsupported => "unsupported",
+            Self::ResourceExhausted => "resource_exhausted",
+            Self::Conflict => "conflict",
         };
         f.write_str(s)
     }
@@ -174,6 +219,10 @@ pub struct ErrorDetails {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     /// Additional key-value metadata for debugging.
+    ///
+    /// Model providers in `adk-model` store the provider's own error code, such as
+    /// `RATE_LIMIT_EXCEEDED` or `context_length_exceeded`, as a string under
+    /// `"provider_error_code"`.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub metadata: HashMap<String, Value>,
 }
@@ -461,6 +510,151 @@ impl AdkError {
     pub fn is_timeout(&self) -> bool {
         self.category == ErrorCategory::Timeout
     }
+    /// Returns `true` if the write lost a race or used a stale version.
+    pub fn is_conflict(&self) -> bool {
+        self.category == ErrorCategory::Conflict
+    }
+
+    /// Describes the error by its component, category, and code, without its message.
+    ///
+    /// A message can carry credentials, internal hosts, or upstream response bodies, so this
+    /// form is what an agent shows a model for a failure whose message stays local. The code is
+    /// a compile-time constant, never caller data.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_core::{AdkError, ErrorCategory, ErrorComponent};
+    ///
+    /// let err = AdkError::new(
+    ///     ErrorComponent::Tool,
+    ///     ErrorCategory::Unavailable,
+    ///     "tool.orders_db.unavailable",
+    ///     "connect postgres://admin:secret@db.internal/prod failed",
+    /// );
+    /// assert_eq!(err.redacted(), "tool.unavailable (tool.orders_db.unavailable)");
+    /// ```
+    pub fn redacted(&self) -> String {
+        format!("{}.{} ({})", self.component, self.category, self.code)
+    }
+
+    /// Describes the error for a log line or span field without its message.
+    ///
+    /// The form is [`redacted`](Self::redacted) followed by the upstream status, provider,
+    /// provider error code, and request ID when they are set. A provider error code or
+    /// request ID is shown only when it is a short identifier, since both come from the
+    /// upstream response.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_core::{AdkError, ErrorCategory, ErrorComponent};
+    ///
+    /// let err = AdkError::new(
+    ///     ErrorComponent::Model,
+    ///     ErrorCategory::InvalidInput,
+    ///     "model.gemini.bad_request",
+    ///     "Invalid value at 'contents[0]' (acct-7731)",
+    /// )
+    /// .with_upstream_status(400)
+    /// .with_provider("gemini");
+    /// assert_eq!(
+    ///     err.diagnostics().to_string(),
+    ///     "model.invalid_input (model.gemini.bad_request); status 400; provider gemini"
+    /// );
+    /// ```
+    pub fn diagnostics(&self) -> ErrorDiagnostics<'_> {
+        ErrorDiagnostics(self)
+    }
+}
+
+/// An [`AdkError`] described by everything but its message, from [`AdkError::diagnostics`].
+#[derive(Debug, Clone, Copy)]
+pub struct ErrorDiagnostics<'a>(&'a AdkError);
+
+impl fmt::Display for ErrorDiagnostics<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let error = self.0;
+        write!(f, "{}.{} ({})", error.component, error.category, error.code)?;
+        let details = &error.details;
+        if let Some(status) = details.upstream_status_code {
+            write!(f, "; status {status}")?;
+        }
+        if let Some(provider) = details.provider.as_deref().filter(|value| is_identifier(value)) {
+            write!(f, "; provider {provider}")?;
+        }
+        if let Some(code) = details
+            .metadata
+            .get("provider_error_code")
+            .and_then(Value::as_str)
+            .filter(|value| is_identifier(value))
+        {
+            write!(f, "; provider code {code}")?;
+        }
+        if let Some(request_id) = details.request_id.as_deref().filter(|value| is_identifier(value))
+        {
+            write!(f, "; request id {request_id}")?;
+        }
+        Ok(())
+    }
+}
+
+/// Whether `value` is short and limited to ASCII alphanumerics, `_`, `.`, `-`, and `:`.
+fn is_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"_.-:".contains(&byte))
+}
+
+/// Longest excerpt of upstream text, such as a provider's HTTP error body, that an error
+/// message quotes.
+pub const UPSTREAM_EXCERPT_BYTES: usize = 512;
+
+/// Returns `text` trimmed and cut to at most [`UPSTREAM_EXCERPT_BYTES`] at a character
+/// boundary.
+///
+/// Provider error bodies can echo the request — prompts, tool arguments, file contents — and
+/// can be arbitrarily long, so an error message quotes at most this much of one.
+///
+/// # Example
+///
+/// ```rust
+/// use adk_core::{UPSTREAM_EXCERPT_BYTES, upstream_excerpt};
+///
+/// let body = "x".repeat(4 * UPSTREAM_EXCERPT_BYTES);
+/// assert_eq!(upstream_excerpt(&body).len(), UPSTREAM_EXCERPT_BYTES);
+/// assert_eq!(upstream_excerpt("  bad request \n"), "bad request");
+/// ```
+pub fn upstream_excerpt(text: &str) -> &str {
+    let text = text.trim();
+    &text[..text.floor_char_boundary(UPSTREAM_EXCERPT_BYTES)]
+}
+
+/// Describes a JSON decoding error by its class and position, without the text it quotes.
+///
+/// A `serde_json` data error quotes the offending value, such as `invalid type: string
+/// "..."`, and a provider response carries generated text and tool arguments, so an error
+/// message about an undecodable response uses this description instead.
+///
+/// # Example
+///
+/// ```rust
+/// use adk_core::json_error_summary;
+///
+/// let error = serde_json::from_str::<u32>(r#""acct-7731""#).unwrap_err();
+/// assert_eq!(json_error_summary(&error), "schema error at line 1 column 11");
+/// ```
+pub fn json_error_summary(error: &serde_json::Error) -> String {
+    let class = match error.classify() {
+        serde_json::error::Category::Io => "io",
+        serde_json::error::Category::Syntax => "syntax",
+        serde_json::error::Category::Data => "schema",
+        serde_json::error::Category::Eof => "truncated input",
+    };
+    match error.line() {
+        0 => format!("{class} error"),
+        line => format!("{class} error at line {line} column {}", error.column()),
+    }
 }
 
 impl AdkError {
@@ -478,6 +672,8 @@ impl AdkError {
             ErrorCategory::Cancelled => 499,
             ErrorCategory::Internal => 500,
             ErrorCategory::Unsupported => 501,
+            ErrorCategory::ResourceExhausted => 429,
+            ErrorCategory::Conflict => 409,
             _ => 500,
         }
     }
@@ -531,6 +727,57 @@ mod tests {
             "session xyz not found",
         );
         assert_eq!(err.to_string(), "session.not_found: session xyz not found");
+    }
+
+    #[test]
+    fn diagnostics_name_every_detail_but_the_message() {
+        let mut err = AdkError::new(
+            ErrorComponent::Model,
+            ErrorCategory::InvalidInput,
+            "model.openai.bad_request",
+            "Invalid value: 'acct-7731-secret'",
+        )
+        .with_upstream_status(400)
+        .with_provider("openai")
+        .with_request_id("req_123");
+        err.details.metadata.insert("provider_error_code".into(), json!("invalid_value"));
+
+        assert_eq!(
+            err.diagnostics().to_string(),
+            "model.invalid_input (model.openai.bad_request); status 400; provider openai; \
+             provider code invalid_value; request id req_123"
+        );
+    }
+
+    #[test]
+    fn diagnostics_omit_upstream_values_that_are_not_identifiers() {
+        let mut err =
+            AdkError::new(ErrorComponent::Model, ErrorCategory::Internal, "model.x", "boom")
+                .with_request_id("req 1 acct-7731-secret")
+                .with_provider("open\u{1b}]ai");
+        err.details.metadata.insert("provider_error_code".into(), json!("a b"));
+
+        assert_eq!(err.diagnostics().to_string(), "model.internal (model.x)");
+    }
+
+    #[test]
+    fn upstream_excerpt_trims_and_cuts_at_a_character_boundary() {
+        let long = format!("  {}🙂tail", "x".repeat(UPSTREAM_EXCERPT_BYTES - 2));
+        assert_eq!(upstream_excerpt(&long), "x".repeat(UPSTREAM_EXCERPT_BYTES - 2));
+        assert_eq!(upstream_excerpt(" short \n"), "short");
+        assert_eq!(upstream_excerpt(""), "");
+    }
+
+    #[test]
+    fn json_error_summary_never_quotes_the_input() {
+        let data = serde_json::from_str::<u32>(r#""acct-7731-secret""#).unwrap_err();
+        assert_eq!(json_error_summary(&data), "schema error at line 1 column 18");
+        let syntax = serde_json::from_str::<Value>("{acct-7731-secret").unwrap_err();
+        assert_eq!(json_error_summary(&syntax), "syntax error at line 1 column 2");
+        let eof = serde_json::from_str::<Value>(r#"{"a": "acct"#).unwrap_err();
+        assert_eq!(json_error_summary(&eof), "truncated input error at line 1 column 11");
+        let from_value = serde_json::from_value::<u32>(json!("acct-7731-secret")).unwrap_err();
+        assert_eq!(json_error_summary(&from_value), "schema error");
     }
 
     #[test]
@@ -674,6 +921,8 @@ mod tests {
             ErrorCategory::Cancelled,
             ErrorCategory::Internal,
             ErrorCategory::Unsupported,
+            ErrorCategory::ResourceExhausted,
+            ErrorCategory::Conflict,
         ] {
             let err = AdkError::new(ErrorComponent::Model, cat, "test", "msg");
             assert!(!err.is_retryable(), "expected is_retryable() == false for {cat}");
@@ -693,6 +942,8 @@ mod tests {
             (ErrorCategory::Cancelled, 499),
             (ErrorCategory::Internal, 500),
             (ErrorCategory::Unsupported, 501),
+            (ErrorCategory::ResourceExhausted, 429),
+            (ErrorCategory::Conflict, 409),
         ];
         for (cat, expected) in &cases {
             let err = AdkError::new(ErrorComponent::Server, *cat, "test", "msg");
@@ -747,6 +998,21 @@ mod tests {
         assert_eq!(o["category"], "rate_limited");
         assert_eq!(o["requestId"], "req-123");
         assert_eq!(o["upstreamStatusCode"], 429);
+    }
+
+    #[test]
+    fn test_conflict_category() {
+        let err = AdkError::new(
+            ErrorComponent::Agent,
+            ErrorCategory::Conflict,
+            "run_store.stale_epoch",
+            "stale",
+        );
+        assert!(err.is_conflict());
+        assert!(!err.is_retryable());
+        assert_eq!(err.http_status_code(), 409);
+        assert_eq!(ErrorCategory::Conflict.to_string(), "conflict");
+        assert_eq!(err.to_problem_json()["error"]["category"], "conflict");
     }
 
     #[test]

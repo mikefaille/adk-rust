@@ -1,6 +1,6 @@
 use crate::{Event, Session};
 use adk_core::identity::{AdkIdentity, AppName, SessionId, UserId};
-use adk_core::{AdkError, ErrorComponent, Result};
+use adk_core::{AdkError, ErrorCategory, ErrorComponent, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -57,19 +57,16 @@ impl CreateRequest {
     ///
     /// Because `CreateRequest` allows `session_id` to be `None` (the backend
     /// generates one), this returns `Ok(None)` when no session ID is present.
+    /// The app name and user ID are validated either way, so a backend can call
+    /// this once to validate every identifier the request carries.
     ///
     /// # Errors
     ///
     /// Returns an error if any of the constituent identifiers fail validation.
     pub fn try_identity(&self) -> Result<Option<AdkIdentity>> {
-        let Some(sid) = self.try_session_id()? else {
-            return Ok(None);
-        };
-        Ok(Some(AdkIdentity {
-            app_name: self.try_app_name()?,
-            user_id: self.try_user_id()?,
-            session_id: sid,
-        }))
+        let app_name = self.try_app_name()?;
+        let user_id = self.try_user_id()?;
+        Ok(self.try_session_id()?.map(|session_id| AdkIdentity { app_name, user_id, session_id }))
     }
 }
 
@@ -106,15 +103,109 @@ impl GetRequest {
     }
 }
 
+/// Validates the `(app_name, user_id)` scope addressed by `list` and `delete_all_sessions`.
+pub(crate) fn validate_scope(app_name: &str, user_id: &str) -> Result<()> {
+    AppName::try_from(app_name)?;
+    UserId::try_from(user_id)?;
+    Ok(())
+}
+
+/// Validates a session ID addressed on its own, as by `append_event`.
+pub(crate) fn validate_session_id(session_id: &str) -> Result<()> {
+    SessionId::try_from(session_id)?;
+    Ok(())
+}
+
 /// Builds the canonical error returned when a session identity has no matching record.
 pub(crate) fn session_not_found(req: &GetRequest) -> AdkError {
+    session_not_found_for(&req.app_name, &req.user_id, &req.session_id)
+}
+
+/// Builds the canonical not-found error for a raw `(app_name, user_id, session_id)` triple.
+pub(crate) fn session_not_found_for(app_name: &str, user_id: &str, session_id: &str) -> AdkError {
     AdkError::not_found(
         ErrorComponent::Session,
         "session.not_found",
+        format!("session '{session_id}' was not found for app '{app_name}' and user '{user_id}'"),
+    )
+}
+
+/// Builds the canonical not-found error for a typed session identity.
+pub(crate) fn identity_not_found(identity: &AdkIdentity) -> AdkError {
+    session_not_found_for(
+        identity.app_name.as_ref(),
+        identity.user_id.as_ref(),
+        identity.session_id.as_ref(),
+    )
+}
+
+/// Builds the canonical not-found error for a session addressed by its ID alone.
+pub(crate) fn session_id_not_found(session_id: &str) -> AdkError {
+    AdkError::not_found(
+        ErrorComponent::Session,
+        "session.not_found",
+        format!("session '{session_id}' was not found"),
+    )
+}
+
+/// Builds the error for a session ID that more than one app or user owns.
+pub(crate) fn ambiguous_session_id(session_id: &str) -> AdkError {
+    AdkError::new(
+        ErrorComponent::Session,
+        ErrorCategory::InvalidInput,
+        "session.ambiguous_id",
         format!(
-            "session '{}' was not found for app '{}' and user '{}'",
-            req.session_id, req.app_name, req.user_id
+            "session ID '{session_id}' exists for more than one app or user; use \
+             append_event_for_identity to address the session unambiguously"
         ),
+    )
+}
+
+/// Builds the canonical conflict error returned when `create` names an existing session.
+pub(crate) fn session_already_exists(app_name: &str, user_id: &str, session_id: &str) -> AdkError {
+    AdkError::new(
+        ErrorComponent::Session,
+        ErrorCategory::Conflict,
+        "session.already_exists",
+        format!(
+            "session '{session_id}' already exists for app '{app_name}' and user '{user_id}'; \
+             read it with get, or omit session_id to create a new one"
+        ),
+    )
+}
+
+/// Builds the error returned when a rewind target is not an event of the session.
+pub(crate) fn rewind_event_not_found(identity: &AdkIdentity, event_id: &str) -> AdkError {
+    AdkError::not_found(
+        ErrorComponent::Session,
+        "session.event_not_found",
+        format!(
+            "event '{event_id}' is not in session '{}'; rewind targets an event the session holds",
+            identity.session_id
+        ),
+    )
+}
+
+/// Builds the error returned when `rewind_steps` asks for more steps than the session has events.
+pub(crate) fn rewind_steps_exceed(identity: &AdkIdentity, steps: usize, events: usize) -> AdkError {
+    AdkError::new(
+        ErrorComponent::Session,
+        ErrorCategory::InvalidInput,
+        "session.rewind.too_many_steps",
+        format!(
+            "cannot rewind {steps} steps: session '{}' holds {events} events",
+            identity.session_id
+        ),
+    )
+}
+
+fn rewind_unsupported() -> AdkError {
+    AdkError::new(
+        ErrorComponent::Session,
+        ErrorCategory::Unsupported,
+        "session.rewind.unsupported",
+        "this session backend does not support rewind; the in-memory, SQLite, and encrypted \
+         backends do",
     )
 }
 
@@ -214,9 +305,25 @@ impl DeleteRequest {
 ///
 /// Implementations manage the full lifecycle of sessions: creation, retrieval,
 /// listing, deletion, and event appending.
+///
+/// Every method validates the app names, user IDs, and session IDs it receives against the
+/// [`AppName`], [`UserId`], and [`SessionId`] rules (non-empty, at most
+/// [`MAX_ID_LEN`](adk_core::identity::MAX_ID_LEN) bytes, no NUL) before it reads or writes
+/// storage, and rejects an invalid one with an
+/// [`InvalidInput`](adk_core::ErrorCategory::InvalidInput) error. The built-in backends all
+/// follow this rule.
 #[async_trait]
 pub trait SessionService: Send + Sync {
-    /// Create a new session and return it.
+    /// Creates a new session and returns it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-input error when an identifier fails validation, and an
+    /// [`AdkError`] with code `session.already_exists` and a
+    /// [`Conflict`](adk_core::ErrorCategory::Conflict) category when a session with the same
+    /// `(app_name, user_id, session_id)` already exists. A conflicting create changes nothing:
+    /// the existing session keeps its events and state, and the app and user tiers are not
+    /// written. Callers that get-or-create read the session again on a conflict.
     async fn create(&self, req: CreateRequest) -> Result<Box<dyn Session>>;
     /// Retrieves an existing session by its complete identity.
     ///
@@ -231,11 +338,24 @@ pub trait SessionService: Send + Sync {
     /// Returns an invalid-input error when an identifier fails validation, `session.not_found`
     /// when no matching session exists, or a backend-specific error when retrieval fails.
     async fn get(&self, req: GetRequest) -> Result<Box<dyn Session>>;
-    /// List sessions for a given app and user.
+    /// Lists the sessions of an app and user, most recently updated first.
+    ///
+    /// Sessions updated at the same instant are ordered by session ID, descending, so
+    /// `offset`/`limit` pages are stable.
     async fn list(&self, req: ListRequest) -> Result<Vec<Box<dyn Session>>>;
     /// Delete a session by its identifiers.
     async fn delete(&self, req: DeleteRequest) -> Result<()>;
-    /// Append an event to a session identified by its session ID string.
+    /// Appends an event to the session with this ID.
+    ///
+    /// Events read back in timestamp order; events with equal timestamps keep the order they
+    /// were appended in.
+    ///
+    /// # Errors
+    ///
+    /// Returns `session.not_found` ([`NotFound`](adk_core::ErrorCategory::NotFound)) when no
+    /// session has this ID. An ID alone does not name one session when more than one app or
+    /// user holds it, so prefer
+    /// [`append_event_for_identity`](SessionService::append_event_for_identity).
     async fn append_event(&self, session_id: &str, event: Event) -> Result<()>;
 
     /// Get a session using typed [`AdkIdentity`] addressing.
@@ -302,42 +422,74 @@ pub trait SessionService: Send + Sync {
         self.append_event(req.identity.session_id.as_ref(), req.event).await
     }
 
-    /// Delete all sessions for a given app and user.
+    /// Erases what the user `user_id` holds in the app `app_name`: every session with its
+    /// events, and the user's `user:` state tier.
     ///
-    /// Removes all sessions and their associated events. Useful for
-    /// bulk cleanup and GDPR right-to-erasure compliance.
-    /// The default implementation returns an error.
+    /// The `app:` tier, the user's sessions and state in other apps, and other users'
+    /// sessions and state are untouched. No other method removes the `user:` tier, so this is
+    /// the call for bulk cleanup and for a request to erase a user's session data. The tier is
+    /// erased when the user has no sessions left, and a repeated call succeeds.
+    ///
+    /// The default implementation validates the identifiers, then returns
+    /// `session.delete_all.unsupported`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-input error when an identifier fails validation,
+    /// `session.delete_all.unsupported` ([`Unsupported`](adk_core::ErrorCategory::Unsupported))
+    /// from a backend that does not implement it, or a backend error. A backend that cannot
+    /// erase in one transaction may have removed some sessions before the error; calling again
+    /// finishes the erasure.
     async fn delete_all_sessions(&self, app_name: &str, user_id: &str) -> Result<()> {
-        let _ = (app_name, user_id);
-        Err(adk_core::AdkError::session("delete_all_sessions not implemented"))
+        validate_scope(app_name, user_id)?;
+        Err(AdkError::new(
+            ErrorComponent::Session,
+            ErrorCategory::Unsupported,
+            "session.delete_all.unsupported",
+            "this session backend does not implement delete_all_sessions; delete each session \
+             from `list` and erase the user's `user:` state in the backend",
+        ))
     }
 
-    /// Rewind a session to the specified event, removing all subsequent events
-    /// and rebuilding state from remaining events' state deltas.
+    /// Rewinds the session `identity` to `target_event_id`.
     ///
-    /// After rewinding, the session will contain only events up to and including
-    /// the target event, and the session state will reflect the cumulative
-    /// application of those events' state deltas.
+    /// Removes every event after the target and rebuilds the session-scoped state from the
+    /// state the session was created with plus the state deltas of the events that remain.
+    /// App and user state are shared with other sessions and are not rewound. Only the session
+    /// that `identity` names changes, even when other apps or users hold a session with the
+    /// same ID.
     ///
     /// # Errors
     ///
-    /// Returns an error if the backend does not support rewind, the session is
-    /// not found, or the target event ID does not exist in the session.
-    async fn rewind(&self, _session_id: &str, _target_event_id: &str) -> Result<Box<dyn Session>> {
-        Err(adk_core::AdkError::session("rewind not supported by this backend"))
+    /// Returns `session.rewind.unsupported` ([`Unsupported`](adk_core::ErrorCategory::Unsupported))
+    /// when the backend does not support rewind, `session.not_found` when the session does not
+    /// exist, and `session.event_not_found` when the target is not an event of the session.
+    async fn rewind(
+        &self,
+        _identity: &AdkIdentity,
+        _target_event_id: &str,
+    ) -> Result<Box<dyn Session>> {
+        Err(rewind_unsupported())
     }
 
-    /// Rewind a session by N steps from the end.
+    /// Rewinds the session `identity` by `steps` events from the end.
     ///
-    /// If `steps` is 0, returns the session unchanged. If `steps` exceeds the
-    /// number of events, returns an error.
+    /// Rebuilds state as [`rewind`](SessionService::rewind) does. `steps == 0` returns the
+    /// session unchanged, and `steps` equal to the event count removes every event and leaves
+    /// the state the session was created with.
     ///
     /// # Errors
     ///
-    /// Returns an error if the backend does not support rewind, the session is
-    /// not found, or `steps` exceeds the event count.
-    async fn rewind_steps(&self, _session_id: &str, _steps: usize) -> Result<Box<dyn Session>> {
-        Err(adk_core::AdkError::session("rewind_steps not supported by this backend"))
+    /// Returns `session.rewind.unsupported` when the backend does not support rewind,
+    /// `session.not_found` when the session does not exist, and
+    /// `session.rewind.too_many_steps` ([`InvalidInput`](adk_core::ErrorCategory::InvalidInput))
+    /// when `steps` exceeds the event count.
+    async fn rewind_steps(
+        &self,
+        _identity: &AdkIdentity,
+        _steps: usize,
+    ) -> Result<Box<dyn Session>> {
+        Err(rewind_unsupported())
     }
 
     /// Verify backend connectivity.

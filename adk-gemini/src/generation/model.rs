@@ -130,7 +130,7 @@ pub struct CitationSource {
 }
 
 /// A candidate response
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Candidate {
     /// The content of the candidate
@@ -151,11 +151,90 @@ pub struct Candidate {
     /// The index of the candidate
     #[serde(skip_serializing_if = "Option::is_none")]
     pub index: Option<i32>,
+    /// Log probabilities of the chosen and top tokens, when the request set
+    /// [`GenerationConfig::response_logprobs`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logprobs_result: Option<LogprobsResult>,
+    /// Average log probability of the candidate's tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avg_logprobs: Option<f64>,
 }
 
-/// Metadata about token usage
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+/// Log probabilities of a candidate's tokens.
+///
+/// # Example
+///
+/// ```
+/// use adk_gemini::LogprobsResult;
+///
+/// let result: LogprobsResult = serde_json::from_value(serde_json::json!({
+///     "topCandidates": [{"candidates": [{"token": "Hi", "tokenId": 17, "logProbability": -0.01}]}],
+///     "chosenCandidates": [{"token": "Hi", "tokenId": 17, "logProbability": -0.01}],
+///     "logProbabilitySum": -0.01
+/// }))
+/// .unwrap();
+/// assert_eq!(result.chosen_candidates[0].token.as_deref(), Some("Hi"));
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct LogprobsResult {
+    /// The most likely tokens at each decoding step, most likely first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub top_candidates: Vec<TopLogprobsCandidates>,
+    /// The token chosen at each decoding step; it may not be among `top_candidates`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chosen_candidates: Vec<LogprobsCandidate>,
+    /// Sum of the log probabilities of every chosen token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_probability_sum: Option<f64>,
+}
+
+/// The top candidate tokens at one decoding step.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TopLogprobsCandidates {
+    /// Candidates sorted by log probability, most likely first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<LogprobsCandidate>,
+}
+
+/// One token and its log probability.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LogprobsCandidate {
+    /// The token text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    /// The token id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_id: Option<i32>,
+    /// The token's log probability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_probability: Option<f64>,
+}
+
+/// Metadata about token usage.
+///
+/// A count the API reports as `null` or leaves out reads as `None` (zero inside the detail
+/// lists) instead of failing the response, and [`raw`](Self::raw) keeps the object exactly as
+/// it was sent, including fields this type does not model.
+///
+/// # Example
+///
+/// ```
+/// use adk_gemini::UsageMetadata;
+///
+/// let usage: UsageMetadata = serde_json::from_value(serde_json::json!({
+///     "promptTokenCount": 12,
+///     "promptTokensDetails": [{"modality": "TEXT", "tokenCount": null}],
+///     "toolUsePromptTokenCount": 30
+/// }))
+/// .unwrap();
+/// assert_eq!(usage.prompt_tokens_details.as_ref().unwrap()[0].token_count, 0);
+/// assert_eq!(usage.raw.as_ref().unwrap()["toolUsePromptTokenCount"], 30);
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", try_from = "serde_json::Value")]
 pub struct UsageMetadata {
     /// The number of prompt tokens (null if request processing failed)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -178,20 +257,69 @@ pub struct UsageMetadata {
     /// Detailed cache token information (batch API)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_tokens_details: Option<Vec<PromptTokenDetails>>,
+    /// The `usageMetadata` object exactly as the API sent it, including fields this type
+    /// does not model, such as `toolUsePromptTokenCount` or `trafficType`.
+    ///
+    /// `None` for a value built in code.
+    #[serde(skip)]
+    pub raw: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UsageMetadataWire {
+    #[serde(default)]
+    prompt_token_count: Option<i32>,
+    #[serde(default)]
+    candidates_token_count: Option<i32>,
+    #[serde(default)]
+    total_token_count: Option<i32>,
+    #[serde(default)]
+    thoughts_token_count: Option<i32>,
+    #[serde(default)]
+    prompt_tokens_details: Option<Vec<PromptTokenDetails>>,
+    #[serde(default)]
+    cached_content_token_count: Option<i32>,
+    #[serde(default)]
+    cache_tokens_details: Option<Vec<PromptTokenDetails>>,
+}
+
+impl TryFrom<serde_json::Value> for UsageMetadata {
+    type Error = serde_json::Error;
+
+    fn try_from(raw: serde_json::Value) -> Result<Self, Self::Error> {
+        let wire = UsageMetadataWire::deserialize(&raw)?;
+        Ok(Self {
+            prompt_token_count: wire.prompt_token_count,
+            candidates_token_count: wire.candidates_token_count,
+            total_token_count: wire.total_token_count,
+            thoughts_token_count: wire.thoughts_token_count,
+            prompt_tokens_details: wire.prompt_tokens_details,
+            cached_content_token_count: wire.cached_content_token_count,
+            cache_tokens_details: wire.cache_tokens_details,
+            raw: Some(raw),
+        })
+    }
 }
 
 /// Details about prompt tokens by modality
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PromptTokenDetails {
-    /// The modality (e.g., "TEXT")
+    /// The modality (e.g., "TEXT"); `MODALITY_UNSPECIFIED` when the API leaves it out
+    #[serde(default = "unspecified_modality")]
     pub modality: Modality,
-    /// Token count for this modality
+    /// Token count for this modality; zero when the API reports `null` or leaves it out
+    #[serde(default, deserialize_with = "adk_core::nullable_count")]
     pub token_count: i32,
 }
 
+fn unspecified_modality() -> Modality {
+    Modality::ModalityUnspecified
+}
+
 /// Grounding metadata for responses that use grounding tools
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct GroundingMetadata {
     /// Grounding chunks containing source information
@@ -203,9 +331,24 @@ pub struct GroundingMetadata {
     /// Web search queries used for grounding
     #[serde(skip_serializing_if = "Option::is_none")]
     pub web_search_queries: Option<Vec<String>>,
+    /// Provider-rendered Google Search suggestions and SDK data.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub search_entry_point: Option<SearchEntryPoint>,
     /// Google Maps widget context token
     #[serde(skip_serializing_if = "Option::is_none")]
     pub google_maps_widget_context_token: Option<String>,
+}
+
+/// Google Search suggestions returned alongside a grounded answer.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchEntryPoint {
+    /// HTML and CSS to display the provider's search suggestions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rendered_content: Option<String>,
+    /// Base64-encoded search term and URL tuples for native SDKs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sdk_blob: Option<String>,
 }
 
 /// A chunk of grounding information from a source
@@ -261,6 +404,12 @@ pub struct GroundingSupport {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct GroundingSegment {
+    /// Index of the Part within the candidate's Content.
+    ///
+    /// The API omits zero values, so the field is absent when the segment is in the
+    /// first part; treat `None` as part `0`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part_index: Option<u32>,
     /// Start index of the segment in the response text
     #[serde(default)]
     pub start_index: Option<u32>,
@@ -613,6 +762,27 @@ pub enum ThinkingLevel {
     High,
 }
 
+/// The harness effort levels (spec 3.1 §7.23): `Low`, `Medium` and `High` map to the
+/// thinking level of the same name; `Minimal` stays reachable only through
+/// [`ThinkingConfig::with_thinking_level`].
+///
+/// # Example
+///
+/// ```rust
+/// use adk_gemini::ThinkingLevel;
+///
+/// assert_eq!(ThinkingLevel::from(adk_core::Effort::Medium), ThinkingLevel::Medium);
+/// ```
+impl From<adk_core::Effort> for ThinkingLevel {
+    fn from(effort: adk_core::Effort) -> Self {
+        match effort {
+            adk_core::Effort::Low => Self::Low,
+            adk_core::Effort::Medium => Self::Medium,
+            adk_core::Effort::High => Self::High,
+        }
+    }
+}
+
 /// Configuration for thinking (Gemini 2.5 and 3 series)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -749,6 +919,35 @@ pub struct GenerationConfig {
     /// The model will stop generating content when it encounters any of these sequences.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_sequences: Option<Vec<String>>,
+
+    /// Seed used in decoding, so repeated requests with the same seed return the same output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<i64>,
+
+    /// Penalty applied to tokens that already appear in the response, encouraging new topics.
+    ///
+    /// The API rejects it with `INVALID_ARGUMENT` for models that do not enable penalties.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presence_penalty: Option<f32>,
+
+    /// Penalty scaled by how often a token already appears in the response.
+    ///
+    /// The API rejects it with `INVALID_ARGUMENT` for models that do not enable penalties.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frequency_penalty: Option<f32>,
+
+    /// Whether to return the log probabilities of the chosen tokens in
+    /// [`Candidate::logprobs_result`].
+    ///
+    /// The API rejects it with `INVALID_ARGUMENT` for models that do not enable log
+    /// probabilities.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_logprobs: Option<bool>,
+
+    /// Number of top candidate tokens, with their log probabilities, to return at each
+    /// decoding step. Requires `response_logprobs`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logprobs: Option<i32>,
 
     /// The response mime type
     ///
@@ -990,6 +1189,23 @@ impl SpeakerVoiceConfig {
                 prebuilt_voice_config: Some(PrebuiltVoiceConfig { voice_name: voice_name.into() }),
                 voice: None,
             },
+        }
+    }
+}
+
+#[cfg(test)]
+mod effort_tests {
+    use super::ThinkingLevel;
+
+    /// The harness levels map to their namesakes; `Minimal` is never produced.
+    #[test]
+    fn every_harness_effort_maps_to_its_namesake() {
+        for (core, level) in [
+            (adk_core::Effort::Low, ThinkingLevel::Low),
+            (adk_core::Effort::Medium, ThinkingLevel::Medium),
+            (adk_core::Effort::High, ThinkingLevel::High),
+        ] {
+            assert_eq!(ThinkingLevel::from(core), level);
         }
     }
 }

@@ -24,8 +24,11 @@ tracing = { workspace = true }
 tempfile = "3.10"
 
 # Optional dependencies for wasm feature
-wasmtime = { version = "46", optional = true }
-wasmtime-wasi = { version = "46", optional = true }
+wasmtime = { version = "48", optional = true }
+wasmtime-wasi = { version = "48", optional = true }
+
+# Optional dependency for the egress proxy's audit records
+chrono = { workspace = true, optional = true }
 
 # Optional dependencies for workspace feature
 tar = { version = "0.4", optional = true }
@@ -36,19 +39,29 @@ futures = { workspace = true, optional = true }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
-# Optional: Windows AppContainer API
+# Optional: the Job Objects of `process_tree` (spec 3.2 §10 W1) and the Windows
+# restricted-token enforcer API (spec 3.2 §10 W5)
 [target.'cfg(windows)'.dependencies]
 find-msvc-tools = "0.1.9"
 windows-sys = { version = "0.59", optional = true, features = [
-    "Win32_Security",
-    "Win32_System_Threading",
     "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_JobObjects",
+    "Win32_System_Pipes",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
 ] }
 
 [features]
 default = ["process"]
 wasm = ["dep:wasmtime", "dep:wasmtime-wasi"]
 process = []  # no extra deps, uses tokio
+
+# The egress proxy a `Proxied` sandbox reaches the network through (`egress_proxy`).
+egress-proxy = ["dep:chrono", "adk-core/egress-dns", "tokio/net", "tokio/macros", "tokio/sync"]
 
 # Workspace lifecycle (sandbox-agent harness)
 workspace = ["dep:tar", "dep:uuid"]
@@ -57,7 +70,11 @@ workspace-docker = ["workspace", "dep:bollard", "dep:futures"]
 # OS-level sandbox enforcers
 sandbox-macos = []       # Seatbelt via sandbox-exec (no extra deps)
 sandbox-linux = []       # Bubblewrap via bwrap binary (no extra deps)
-sandbox-windows = ["dep:windows-sys"]  # AppContainer via Win32 API
+sandbox-windows = ["process-tree"]  # restricted-token enforcer via Win32 API (spec 3.2 §10 W5)
+
+# What holds a process tree (spec 3.2 §10 W1, K-I5): Job Objects on Windows, sessions and
+# process groups on Unix.
+process-tree = ["dep:windows-sys"]
 
 # Convenience: enables all platform enforcers — only the target platform's code
 # compiles due to #[cfg(target_os = "...")] gates inside each module.
@@ -66,3 +83,7 @@ sandbox-native = ["sandbox-macos", "sandbox-linux", "sandbox-windows"]
 [dev-dependencies]
 proptest = "1.4"
 tokio = { workspace = true, features = ["rt", "macros", "test-util"] }
+
+# Document every feature-gated API on docs.rs.
+[package.metadata.docs.rs]
+all-features = true

@@ -1,0 +1,1325 @@
+//! Tool execution policy.
+//!
+//! A [`ToolPolicy`] decides, for every tool call, whether it may execute, must not
+//! execute, or may execute only after a person approves it. Agents consult the run's
+//! policy ([`RunConfig::tool_policy`](crate::RunConfig::tool_policy)) on the final
+//! arguments of each call, after every plugin and callback rewrite and immediately
+//! before the tool runs.
+//!
+//! [`DeclarativePolicy`] is a rule list matched in order on the tool name and the
+//! call's arguments. Its default decision is **deny**: a tool that no rule permits
+//! does not run.
+
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use serde_json::Value;
+
+use crate::{ToolEffect, ToolOrigin};
+
+/// The outcome of evaluating a [`ToolPolicy`] for one tool call.
+///
+/// # Example
+///
+/// ```rust
+/// use adk_core::PolicyDecision;
+///
+/// let strict = PolicyDecision::Allow.stricter(PolicyDecision::require_approval("large"));
+/// assert_eq!(strict, PolicyDecision::require_approval("large"));
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PolicyDecision {
+    /// The call may execute.
+    Allow,
+    /// The call must not execute. `reason` is reported to the model as the call's error.
+    Deny {
+        /// Why the call was refused.
+        reason: String,
+    },
+    /// The call may execute only after a person approves it.
+    RequireApproval {
+        /// Why approval is needed, shown with the confirmation request.
+        reason: String,
+    },
+}
+
+impl PolicyDecision {
+    /// A [`PolicyDecision::Deny`] with `reason`.
+    pub fn deny(reason: impl Into<String>) -> Self {
+        Self::Deny { reason: reason.into() }
+    }
+
+    /// A [`PolicyDecision::RequireApproval`] with `reason`.
+    pub fn require_approval(reason: impl Into<String>) -> Self {
+        Self::RequireApproval { reason: reason.into() }
+    }
+
+    /// Returns the stricter of `self` and `other`.
+    ///
+    /// `Deny` is stricter than `RequireApproval`, which is stricter than `Allow`. On a
+    /// tie, `self` is kept.
+    #[must_use]
+    pub fn stricter(self, other: Self) -> Self {
+        if other.severity() > self.severity() { other } else { self }
+    }
+
+    fn severity(&self) -> u8 {
+        match self {
+            Self::Allow => 0,
+            Self::RequireApproval { .. } => 1,
+            Self::Deny { .. } => 2,
+        }
+    }
+}
+
+/// The facts a [`ToolPolicy`] decides on for one tool call.
+///
+/// Every field is set by the framework at the call site from the call it is about to
+/// execute; the arguments are the final ones, after plugin and callback rewrites.
+///
+/// # Example
+///
+/// ```rust
+/// use adk_core::{ToolEffect, ToolPolicyRequest};
+/// use serde_json::json;
+///
+/// let request = ToolPolicyRequest::new("transfer", json!({ "amount": 25 }))
+///     .with_agent_name("treasurer")
+///     .with_identity("payments", "user-1", "session-1")
+///     .with_invocation_id("inv-1");
+/// assert_eq!(request.tool_name, "transfer");
+/// assert_eq!(request.effect, ToolEffect::NonIdempotent);
+/// assert!(!request.is_read_only());
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolPolicyRequest {
+    /// Name of the tool the model called.
+    pub tool_name: String,
+    /// Final arguments the tool would execute with.
+    pub args: Value,
+    /// What the tool declares about repeating a call ([`Tool::effect`](crate::Tool::effect)).
+    pub effect: ToolEffect,
+    /// The agent making the call.
+    pub agent_name: String,
+    /// Application the run belongs to.
+    pub app_name: String,
+    /// User the run belongs to.
+    pub user_id: String,
+    /// Session the run belongs to.
+    pub session_id: String,
+    /// Invocation the call happened in.
+    pub invocation_id: String,
+    /// The calling agent's principal, the subject it acts for, and its delegation chain.
+    ///
+    /// The governed path always sets it; `None` only on a request built by hand.
+    pub acting: Option<crate::ActingContext>,
+}
+
+impl ToolPolicyRequest {
+    /// Creates a request for a call to `tool_name` with `args` and no identity attached.
+    pub fn new(tool_name: impl Into<String>, args: Value) -> Self {
+        Self {
+            tool_name: tool_name.into(),
+            args,
+            effect: ToolEffect::NonIdempotent,
+            agent_name: String::new(),
+            app_name: String::new(),
+            user_id: String::new(),
+            session_id: String::new(),
+            invocation_id: String::new(),
+            acting: None,
+        }
+    }
+
+    /// The calling agent's id, when the request carries an acting context.
+    pub fn agent_id(&self) -> Option<&crate::AgentId> {
+        self.acting.as_ref().map(|acting| &acting.agent.id)
+    }
+
+    /// Attaches the calling agent's acting context.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_core::{ActingContext, SubjectKind, ToolPolicyRequest};
+    /// use serde_json::json;
+    ///
+    /// let request = ToolPolicyRequest::new("search", json!({}))
+    ///     .with_acting_context(ActingContext::derived("app", "researcher", "alice", SubjectKind::Human));
+    /// assert_eq!(request.agent_id().unwrap().as_str(), "urn:adk:agent:app/researcher");
+    /// ```
+    #[must_use]
+    pub fn with_acting_context(mut self, acting: crate::ActingContext) -> Self {
+        self.acting = Some(acting);
+        self
+    }
+
+    /// Whether the called tool declares [`ToolEffect::ReadOnly`].
+    pub fn is_read_only(&self) -> bool {
+        self.effect == ToolEffect::ReadOnly
+    }
+
+    /// Sets the effect the called tool declares.
+    #[must_use]
+    pub fn with_effect(mut self, effect: ToolEffect) -> Self {
+        self.effect = effect;
+        self
+    }
+
+    /// Marks the called tool as read-only, or as having side effects
+    /// ([`ToolEffect::NonIdempotent`]).
+    #[must_use]
+    pub fn with_read_only(self, read_only: bool) -> Self {
+        self.with_effect(if read_only { ToolEffect::ReadOnly } else { ToolEffect::NonIdempotent })
+    }
+
+    /// Attaches the calling agent's name.
+    #[must_use]
+    pub fn with_agent_name(mut self, agent_name: impl Into<String>) -> Self {
+        self.agent_name = agent_name.into();
+        self
+    }
+
+    /// Attaches the run's identity.
+    #[must_use]
+    pub fn with_identity(
+        mut self,
+        app_name: impl Into<String>,
+        user_id: impl Into<String>,
+        session_id: impl Into<String>,
+    ) -> Self {
+        self.app_name = app_name.into();
+        self.user_id = user_id.into();
+        self.session_id = session_id.into();
+        self
+    }
+
+    /// Attaches the invocation the call happened in.
+    #[must_use]
+    pub fn with_invocation_id(mut self, invocation_id: impl Into<String>) -> Self {
+        self.invocation_id = invocation_id.into();
+        self
+    }
+}
+
+/// Facts about one governed call that are not part of the [`ToolPolicyRequest`]: who
+/// publishes the called tool and the model's ID for the call.
+///
+/// The governed path ([`authorize_tool_call`](crate::authorize_tool_call)) passes one to
+/// [`ToolPolicy::evaluate_call`] for every call it evaluates, including arguments an
+/// approver edited. A policy reads [`origin`](Self::origin) to bind a decision to the tool's
+/// publisher and declaration, so a tool of the same name on another MCP server, or a tool
+/// redefined since, is not the tool the decision was made for.
+///
+/// Spec 3.1 §10, C1.
+///
+/// # Example
+///
+/// ```rust
+/// use adk_core::{PolicyCall, ToolOrigin};
+/// use serde_json::json;
+///
+/// let origin = ToolOrigin::new("mcp:github", &json!({ "name": "create_issue" }), None);
+/// let call = PolicyCall::new().with_origin(&origin).with_function_call_id("call-1");
+/// assert_eq!(call.origin.map(|origin| origin.source.as_str()), Some("mcp:github"));
+/// assert_eq!(call.function_call_id, Some("call-1"));
+/// assert_eq!(PolicyCall::new().origin, None);
+/// ```
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PolicyCall<'a> {
+    /// Who publishes the called tool and the digest of what it declares. `None` when the
+    /// governed path saw the call without its tool.
+    pub origin: Option<&'a ToolOrigin>,
+    /// The model's ID for the call, as the function response that answers it carries.
+    pub function_call_id: Option<&'a str>,
+    /// The [`DurableRunStore`](crate::DurableRunStore) run the call belongs to
+    /// ([`RunConfig::durable_run_id`](crate::RunConfig::durable_run_id)), so a policy can scope
+    /// a decision to one run across the invocations that resume it. `None` outside a durable
+    /// run, where the invocation is the run.
+    ///
+    /// Spec 3.2 §7.8 (a partition crossing approved for the rest of one run).
+    pub durable_run_id: Option<&'a str>,
+}
+
+impl<'a> PolicyCall<'a> {
+    /// A call with no origin and no call ID.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the origin of the called tool.
+    #[must_use]
+    pub fn with_origin(mut self, origin: &'a ToolOrigin) -> Self {
+        self.origin = Some(origin);
+        self
+    }
+
+    /// Sets the model's ID for the call.
+    #[must_use]
+    pub fn with_function_call_id(mut self, function_call_id: &'a str) -> Self {
+        self.function_call_id = Some(function_call_id);
+        self
+    }
+
+    /// Sets the durable run the call belongs to (spec 3.2 §7.8).
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_core::PolicyCall;
+    ///
+    /// let call = PolicyCall::new().with_durable_run_id("run-1");
+    /// assert_eq!(call.durable_run_id, Some("run-1"));
+    /// assert_eq!(PolicyCall::new().durable_run_id, None);
+    /// ```
+    #[must_use]
+    pub fn with_durable_run_id(mut self, durable_run_id: &'a str) -> Self {
+        self.durable_run_id = Some(durable_run_id);
+        self
+    }
+}
+
+/// Decides whether a tool call may execute.
+///
+/// Set one on a run with [`RunConfigBuilder::tool_policy`](crate::RunConfigBuilder::tool_policy)
+/// or on a runner with its builder's `tool_policy`. The policy travels with the run's
+/// [`RunConfig`](crate::RunConfig), so transfer targets and agents behind an agent tool
+/// are governed by it too.
+///
+/// # Example
+///
+/// ```rust
+/// use adk_core::{PolicyDecision, ToolPolicy, ToolPolicyRequest, async_trait};
+///
+/// /// Refuses everything outside business hours.
+/// #[derive(Debug)]
+/// struct OfficeHours {
+///     open: bool,
+/// }
+///
+/// #[async_trait]
+/// impl ToolPolicy for OfficeHours {
+///     async fn evaluate(&self, _request: &ToolPolicyRequest) -> PolicyDecision {
+///         if self.open { PolicyDecision::Allow } else { PolicyDecision::deny("closed") }
+///     }
+/// }
+/// ```
+#[async_trait]
+pub trait ToolPolicy: std::fmt::Debug + Send + Sync {
+    /// Decides one call.
+    async fn evaluate(&self, request: &ToolPolicyRequest) -> PolicyDecision;
+
+    /// Decides one call, given its [`PolicyCall`] facts as well as the request.
+    ///
+    /// The governed path calls this method, not [`evaluate`](Self::evaluate). The default
+    /// ignores `call` and returns `self.evaluate(request)`, so a policy that does not
+    /// override it decides exactly as before. Override it to decide on the tool's
+    /// [`ToolOrigin`] or the call's ID.
+    ///
+    /// Spec 3.1 §10, C1.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_core::{PolicyCall, PolicyDecision, ToolOrigin, ToolPolicy, ToolPolicyRequest, async_trait};
+    /// use serde_json::json;
+    ///
+    /// /// Refuses every tool one MCP server publishes.
+    /// #[derive(Debug)]
+    /// struct BlockServer(&'static str);
+    ///
+    /// #[async_trait]
+    /// impl ToolPolicy for BlockServer {
+    ///     async fn evaluate(&self, _request: &ToolPolicyRequest) -> PolicyDecision {
+    ///         PolicyDecision::Allow
+    ///     }
+    ///
+    ///     async fn evaluate_call(
+    ///         &self,
+    ///         request: &ToolPolicyRequest,
+    ///         call: &PolicyCall<'_>,
+    ///     ) -> PolicyDecision {
+    ///         match call.origin {
+    ///             Some(origin) if origin.source == self.0 => {
+    ///                 PolicyDecision::deny(format!("tools from '{}' are blocked", origin.source))
+    ///             }
+    ///             _ => self.evaluate(request).await,
+    ///         }
+    ///     }
+    /// }
+    ///
+    /// # futures::executor::block_on(async {
+    /// let policy = BlockServer("mcp:evil");
+    /// let request = ToolPolicyRequest::new("search", json!({}));
+    /// let evil = ToolOrigin::new("mcp:evil", &json!({ "name": "search" }), None);
+    /// let call = PolicyCall::new().with_origin(&evil);
+    /// assert!(matches!(policy.evaluate_call(&request, &call).await, PolicyDecision::Deny { .. }));
+    /// assert_eq!(policy.evaluate_call(&request, &PolicyCall::new()).await, PolicyDecision::Allow);
+    /// # });
+    /// ```
+    async fn evaluate_call(
+        &self,
+        request: &ToolPolicyRequest,
+        call: &PolicyCall<'_>,
+    ) -> PolicyDecision {
+        let _ = call;
+        self.evaluate(request).await
+    }
+
+    /// A name or version for audit records, which cite the policy as
+    /// `tool_policy:<name>`. The default is `None`, cited as `tool_policy`.
+    fn policy_ref(&self) -> Option<String> {
+        None
+    }
+}
+
+/// A predicate over one argument, addressed by a JSON pointer (RFC 6901).
+///
+/// A predicate whose pointer does not resolve, or resolves to a value of the wrong
+/// type, does not hold, so the rule it belongs to does not match.
+///
+/// # Example
+///
+/// ```rust
+/// use adk_core::ArgPredicate;
+/// use serde_json::json;
+///
+/// let small = ArgPredicate::at_most("/amount", 100.0);
+/// assert!(small.holds(&json!({ "amount": 99.5 })));
+/// assert!(!small.holds(&json!({ "amount": 101 })));
+/// assert!(!small.holds(&json!({ "amount": "99" })));
+///
+/// let docs = ArgPredicate::domain_in("/url", ["docs.rs", "*.example.com"]);
+/// assert!(docs.holds(&json!({ "url": "https://docs.rs/serde" })));
+/// assert!(docs.holds(&json!({ "url": "https://api.example.com/v1" })));
+/// assert!(!docs.holds(&json!({ "url": "https://docs.rs@evil.test/" })));
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub enum ArgPredicate {
+    /// The argument equals `value`.
+    Equals {
+        /// JSON pointer to the argument.
+        pointer: String,
+        /// The required value.
+        value: Value,
+    },
+    /// The argument equals one of `values`.
+    InSet {
+        /// JSON pointer to the argument.
+        pointer: String,
+        /// The permitted values.
+        values: Vec<Value>,
+    },
+    /// The argument is a JSON number no greater than `max`.
+    AtMost {
+        /// JSON pointer to the argument.
+        pointer: String,
+        /// The largest permitted value.
+        max: f64,
+    },
+    /// The argument is a string starting with `prefix`.
+    ///
+    /// The comparison is lexical. For filesystem paths, where `..` segments defeat a
+    /// prefix, screen the call with a path guardrail as well.
+    StartsWith {
+        /// JSON pointer to the argument.
+        pointer: String,
+        /// The required prefix.
+        prefix: String,
+    },
+    /// The argument is an `http` or `https` URL whose host is in `domains`.
+    ///
+    /// An entry matches its host exactly; an entry written `*.example.com` matches any
+    /// subdomain of `example.com` but not `example.com` itself. A URL with user
+    /// information, a backslash, percent-encoding, or any character outside
+    /// `[a-z0-9.-]` in its host does not match, so a URL that parsers could read two
+    /// ways is refused.
+    DomainIn {
+        /// JSON pointer to the argument.
+        pointer: String,
+        /// The permitted hosts.
+        domains: Vec<String>,
+    },
+}
+
+impl ArgPredicate {
+    /// The argument at `pointer` equals `value`.
+    pub fn equals(pointer: impl Into<String>, value: Value) -> Self {
+        Self::Equals { pointer: pointer.into(), value }
+    }
+
+    /// The argument at `pointer` equals one of `values`.
+    pub fn in_set(pointer: impl Into<String>, values: impl IntoIterator<Item = Value>) -> Self {
+        Self::InSet { pointer: pointer.into(), values: values.into_iter().collect() }
+    }
+
+    /// The argument at `pointer` is a number no greater than `max`.
+    pub fn at_most(pointer: impl Into<String>, max: f64) -> Self {
+        Self::AtMost { pointer: pointer.into(), max }
+    }
+
+    /// The argument at `pointer` is a string starting with `prefix`.
+    pub fn starts_with(pointer: impl Into<String>, prefix: impl Into<String>) -> Self {
+        Self::StartsWith { pointer: pointer.into(), prefix: prefix.into() }
+    }
+
+    /// The argument at `pointer` is an `http(s)` URL whose host is in `domains`.
+    pub fn domain_in(
+        pointer: impl Into<String>,
+        domains: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self::DomainIn {
+            pointer: pointer.into(),
+            domains: domains.into_iter().map(|d| d.into().to_ascii_lowercase()).collect(),
+        }
+    }
+
+    /// Whether the predicate holds for `args`.
+    pub fn holds(&self, args: &Value) -> bool {
+        match self {
+            Self::Equals { pointer, value } => args.pointer(pointer) == Some(value),
+            Self::InSet { pointer, values } => {
+                args.pointer(pointer).is_some_and(|actual| values.contains(actual))
+            }
+            Self::AtMost { pointer, max } => {
+                args.pointer(pointer).and_then(Value::as_f64).is_some_and(|actual| actual <= *max)
+            }
+            Self::StartsWith { pointer, prefix } => args
+                .pointer(pointer)
+                .and_then(Value::as_str)
+                .is_some_and(|actual| actual.starts_with(prefix.as_str())),
+            Self::DomainIn { pointer, domains } => args
+                .pointer(pointer)
+                .and_then(Value::as_str)
+                .and_then(url_host)
+                .is_some_and(|host| domains.iter().any(|domain| domain_matches(domain, &host))),
+        }
+    }
+}
+
+/// Extracts the host of an `http` or `https` URL, refusing anything ambiguous.
+///
+/// Parsers disagree about backslashes, user information, percent-encoded hosts, and
+/// embedded whitespace, so any of those yields `None` rather than a host that a client
+/// might resolve differently.
+fn url_host(url: &str) -> Option<String> {
+    let lower = url.to_ascii_lowercase();
+    let rest = lower.strip_prefix("https://").or_else(|| lower.strip_prefix("http://"))?;
+    let end = rest.find(['/', '?', '#', '\\']).unwrap_or(rest.len());
+    if rest[end..].starts_with('\\') {
+        return None;
+    }
+    let authority = &rest[..end];
+    let host = match authority.rsplit_once(':') {
+        Some((host, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => host,
+        Some(_) => return None,
+        None => authority,
+    };
+    let host = host.strip_suffix('.').unwrap_or(host);
+    let valid = !host.is_empty()
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.' || b == b'-')
+        && !host.split('.').any(str::is_empty);
+    valid.then(|| host.to_string())
+}
+
+fn domain_matches(domain: &str, host: &str) -> bool {
+    match domain.strip_prefix("*.") {
+        Some(parent) => host.strip_suffix(parent).is_some_and(|sub| sub.ends_with('.')),
+        None => domain == host,
+    }
+}
+
+/// Matches `name` against a glob where `*` matches any run of characters and `?`
+/// matches exactly one.
+fn glob_matches(pattern: &str, name: &str) -> bool {
+    let pattern: Vec<char> = pattern.chars().collect();
+    let name: Vec<char> = name.chars().collect();
+    let (mut p, mut n) = (0, 0);
+    let mut backtrack: Option<(usize, usize)> = None;
+    while n < name.len() {
+        if p < pattern.len() && (pattern[p] == '?' || pattern[p] == name[n]) {
+            p += 1;
+            n += 1;
+        } else if p < pattern.len() && pattern[p] == '*' {
+            backtrack = Some((p, n));
+            p += 1;
+        } else if let Some((star, matched)) = backtrack {
+            p = star + 1;
+            n = matched + 1;
+            backtrack = Some((star, matched + 1));
+        } else {
+            return false;
+        }
+    }
+    pattern[p..].iter().all(|c| *c == '*')
+}
+
+/// One rule of a [`DeclarativePolicy`].
+///
+/// A rule matches a call when its tool-name glob matches, its read-only condition (if
+/// any) holds, and every argument predicate holds. The first matching rule decides.
+///
+/// # Example
+///
+/// ```rust
+/// use adk_core::{ArgPredicate, PolicyRule, ToolPolicyRequest};
+/// use serde_json::json;
+///
+/// let rule = PolicyRule::allow("transfer_*").when(ArgPredicate::at_most("/amount", 50.0));
+/// assert!(rule.matches(&ToolPolicyRequest::new("transfer_usd", json!({ "amount": 20 }))));
+/// assert!(!rule.matches(&ToolPolicyRequest::new("transfer_usd", json!({ "amount": 80 }))));
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct PolicyRule {
+    tool_pattern: String,
+    agent_pattern: Option<String>,
+    tenant: Option<String>,
+    class: Option<String>,
+    effect: Option<ToolEffect>,
+    predicates: Vec<ArgPredicate>,
+    decision: PolicyDecision,
+}
+
+impl PolicyRule {
+    /// A rule that decides `decision` for calls to tools matching `tool_pattern`.
+    pub fn new(tool_pattern: impl Into<String>, decision: PolicyDecision) -> Self {
+        Self {
+            tool_pattern: tool_pattern.into(),
+            agent_pattern: None,
+            tenant: None,
+            class: None,
+            effect: None,
+            predicates: Vec::new(),
+            decision,
+        }
+    }
+
+    /// A rule allowing calls to tools matching `tool_pattern`.
+    pub fn allow(tool_pattern: impl Into<String>) -> Self {
+        Self::new(tool_pattern, PolicyDecision::Allow)
+    }
+
+    /// A rule refusing calls to tools matching `tool_pattern`.
+    pub fn deny(tool_pattern: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self::new(tool_pattern, PolicyDecision::deny(reason))
+    }
+
+    /// A rule requiring approval for calls to tools matching `tool_pattern`.
+    pub fn require_approval(tool_pattern: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self::new(tool_pattern, PolicyDecision::require_approval(reason))
+    }
+
+    /// Adds an argument predicate; every predicate must hold for the rule to match.
+    #[must_use]
+    pub fn when(mut self, predicate: ArgPredicate) -> Self {
+        self.predicates.push(predicate);
+        self
+    }
+
+    /// Restricts the rule to read-only tools.
+    #[must_use]
+    pub fn read_only_tools(self) -> Self {
+        self.with_effect(ToolEffect::ReadOnly)
+    }
+
+    /// Restricts the rule to tools that declare `effect`.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_core::{PolicyDecision, PolicyRule, ToolEffect, ToolPolicyRequest};
+    /// use serde_json::json;
+    ///
+    /// let rule = PolicyRule::require_approval("*", "side effects")
+    ///     .with_effect(ToolEffect::NonIdempotent);
+    /// let charge = ToolPolicyRequest::new("charge_card", json!({}));
+    /// let lookup = ToolPolicyRequest::new("get_order", json!({})).with_effect(ToolEffect::Idempotent);
+    /// assert!(rule.matches(&charge));
+    /// assert!(!rule.matches(&lookup));
+    /// ```
+    #[must_use]
+    pub fn with_effect(mut self, effect: ToolEffect) -> Self {
+        self.effect = Some(effect);
+        self
+    }
+
+    /// Restricts the rule to agents whose [`AgentId`](crate::AgentId) matches the glob
+    /// `agent_pattern`.
+    ///
+    /// A call with no acting context does not match.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_core::{ActingContext, PolicyRule, SubjectKind, ToolPolicyRequest};
+    /// use serde_json::json;
+    ///
+    /// let rule = PolicyRule::allow("refund").for_agent("urn:adk:agent:shop/support-*");
+    /// let call = |agent: &str| {
+    ///     ToolPolicyRequest::new("refund", json!({}))
+    ///         .with_acting_context(ActingContext::derived("shop", agent, "u", SubjectKind::Human))
+    /// };
+    /// assert!(rule.matches(&call("support-eu")));
+    /// assert!(!rule.matches(&call("marketing")));
+    /// assert!(!rule.matches(&ToolPolicyRequest::new("refund", json!({}))));
+    /// ```
+    #[must_use]
+    pub fn for_agent(mut self, agent_pattern: impl Into<String>) -> Self {
+        self.agent_pattern = Some(agent_pattern.into());
+        self
+    }
+
+    /// Restricts the rule to agents of `tenant` ([`AgentPrincipal::tenant`](crate::AgentPrincipal::tenant)).
+    #[must_use]
+    pub fn for_tenant(mut self, tenant: impl Into<String>) -> Self {
+        self.tenant = Some(tenant.into());
+        self
+    }
+
+    /// Restricts the rule to agents of `class` ([`AgentPrincipal::class`](crate::AgentPrincipal::class)).
+    #[must_use]
+    pub fn for_class(mut self, class: impl Into<String>) -> Self {
+        self.class = Some(class.into());
+        self
+    }
+
+    /// The decision the rule makes when it matches.
+    pub fn decision(&self) -> &PolicyDecision {
+        &self.decision
+    }
+
+    /// Whether the rule matches `request`.
+    pub fn matches(&self, request: &ToolPolicyRequest) -> bool {
+        let principal = request.acting.as_ref().map(|acting| &acting.agent);
+        let identity_matches =
+            |required: &Option<String>, actual: fn(&crate::AgentPrincipal) -> Option<&str>| {
+                required
+                    .as_deref()
+                    .is_none_or(|required| principal.and_then(actual) == Some(required))
+            };
+        glob_matches(&self.tool_pattern, &request.tool_name)
+            && self.agent_pattern.as_deref().is_none_or(|pattern| {
+                principal.is_some_and(|principal| glob_matches(pattern, principal.id.as_str()))
+            })
+            && identity_matches(&self.tenant, |principal| principal.tenant.as_deref())
+            && identity_matches(&self.class, |principal| principal.class.as_deref())
+            && self.effect.is_none_or(|effect| effect == request.effect)
+            && self.predicates.iter().all(|predicate| predicate.holds(&request.args))
+    }
+}
+
+/// A rule list matched in order, with a default decision for calls no rule matches.
+///
+/// The default decision is **deny**, so a tool that no rule permits does not run.
+/// Build one with [`DeclarativePolicy::builder`].
+///
+/// # Example
+///
+/// ```rust
+/// use adk_core::{ArgPredicate, DeclarativePolicy, PolicyDecision, PolicyRule, ToolPolicyRequest};
+/// use serde_json::json;
+///
+/// let policy = DeclarativePolicy::builder()
+///     .allow_read_only()
+///     .rule(PolicyRule::allow("transfer").when(ArgPredicate::at_most("/amount", 100.0)))
+///     .rule(PolicyRule::require_approval("transfer", "transfers over 100 need approval"))
+///     .build();
+///
+/// let small = ToolPolicyRequest::new("transfer", json!({ "amount": 40 }));
+/// let large = ToolPolicyRequest::new("transfer", json!({ "amount": 4000 }));
+/// let unlisted = ToolPolicyRequest::new("delete_account", json!({}));
+///
+/// assert_eq!(policy.decide(&small), PolicyDecision::Allow);
+/// assert!(matches!(policy.decide(&large), PolicyDecision::RequireApproval { .. }));
+/// assert!(matches!(policy.decide(&unlisted), PolicyDecision::Deny { .. }));
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeclarativePolicy {
+    rules: Vec<PolicyRule>,
+    default_decision: Option<PolicyDecision>,
+    name: Option<String>,
+}
+
+impl DeclarativePolicy {
+    /// Starts a policy with no rules and a default decision of deny.
+    pub fn builder() -> DeclarativePolicyBuilder {
+        DeclarativePolicyBuilder::default()
+    }
+
+    /// The rules, in match order.
+    pub fn rules(&self) -> &[PolicyRule] {
+        &self.rules
+    }
+
+    /// Decides one call: the first matching rule's decision, else the default.
+    pub fn decide(&self, request: &ToolPolicyRequest) -> PolicyDecision {
+        if let Some(rule) = self.rules.iter().find(|rule| rule.matches(request)) {
+            return rule.decision.clone();
+        }
+        self.default_decision.clone().unwrap_or_else(|| {
+            PolicyDecision::deny(format!(
+                "no policy rule permits tool '{}'; it is denied by default",
+                request.tool_name
+            ))
+        })
+    }
+}
+
+#[async_trait]
+impl ToolPolicy for DeclarativePolicy {
+    async fn evaluate(&self, request: &ToolPolicyRequest) -> PolicyDecision {
+        self.decide(request)
+    }
+
+    fn policy_ref(&self) -> Option<String> {
+        self.name.clone()
+    }
+}
+
+/// Builder for [`DeclarativePolicy`].
+#[derive(Debug, Clone, Default)]
+pub struct DeclarativePolicyBuilder {
+    rules: Vec<PolicyRule>,
+    default_decision: Option<PolicyDecision>,
+    name: Option<String>,
+}
+
+impl DeclarativePolicyBuilder {
+    /// Appends a rule. Rules are matched in the order they are added.
+    #[must_use]
+    pub fn rule(mut self, rule: PolicyRule) -> Self {
+        self.rules.push(rule);
+        self
+    }
+
+    /// Appends a rule allowing calls to tools matching `tool_pattern`.
+    #[must_use]
+    pub fn allow(self, tool_pattern: impl Into<String>) -> Self {
+        self.rule(PolicyRule::allow(tool_pattern))
+    }
+
+    /// Appends a rule refusing calls to tools matching `tool_pattern`.
+    #[must_use]
+    pub fn deny(self, tool_pattern: impl Into<String>, reason: impl Into<String>) -> Self {
+        self.rule(PolicyRule::deny(tool_pattern, reason))
+    }
+
+    /// Appends a rule requiring approval for calls to tools matching `tool_pattern`.
+    #[must_use]
+    pub fn require_approval(
+        self,
+        tool_pattern: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Self {
+        self.rule(PolicyRule::require_approval(tool_pattern, reason))
+    }
+
+    /// Appends a rule allowing every read-only tool.
+    ///
+    /// Rules added before it still take precedence, so a read-only tool can be denied
+    /// by name ahead of this rule.
+    #[must_use]
+    pub fn allow_read_only(self) -> Self {
+        self.rule(PolicyRule::allow("*").read_only_tools())
+    }
+
+    /// Sets the decision for calls no rule matches. The default is deny.
+    #[must_use]
+    pub fn default_decision(mut self, decision: PolicyDecision) -> Self {
+        self.default_decision = Some(decision);
+        self
+    }
+
+    /// Names the policy, such as `payments-v3`, so audit records cite it as
+    /// `tool_policy:payments-v3`.
+    #[must_use]
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    /// Builds the policy.
+    pub fn build(self) -> DeclarativePolicy {
+        DeclarativePolicy {
+            rules: self.rules,
+            default_decision: self.default_decision,
+            name: self.name,
+        }
+    }
+}
+
+/// Several policies applied together: every layer decides each call, and the strictest
+/// decision wins.
+///
+/// `Deny` is stricter than `RequireApproval`, which is stricter than `Allow`
+/// ([`PolicyDecision::stricter`]); between equally strict decisions the earlier layer's
+/// reason is kept. Each layer is asked through [`ToolPolicy::evaluate_call`] with the
+/// call's [`PolicyCall`] facts. With no layers every call is allowed, as with no policy.
+///
+/// Use it to add a policy to a run that already has one without replacing it: an
+/// [`Agent::configure_run`](crate::Agent::configure_run) hook runs on every run, on
+/// transfer and for delegates, so it checks [`contains_ref`](Self::contains_ref) before
+/// adding its layer and never nests it twice.
+///
+/// Spec 3.1 §10, C2.
+///
+/// # Example
+///
+/// ```rust
+/// use adk_core::{
+///     DeclarativePolicy, PolicyDecision, RunConfig, StrictestPolicy, ToolPolicy,
+///     ToolPolicyRequest,
+/// };
+/// use serde_json::json;
+/// use std::sync::Arc;
+///
+/// let operator = DeclarativePolicy::builder().name("ops-v3").allow("*").build();
+/// let harness = DeclarativePolicy::builder()
+///     .name("adk-harness")
+///     .require_approval("bash", "shell commands need a person")
+///     .allow("*")
+///     .build();
+///
+/// /// Adds the harness layer to whatever policy the run already has, once.
+/// fn add_layer(config: &mut RunConfig, layer: Arc<dyn ToolPolicy>) {
+///     let Some(existing) = config.tool_policy.take() else {
+///         config.tool_policy = Some(layer);
+///         return;
+///     };
+///     let composed = StrictestPolicy::new(vec![existing.clone()]);
+///     config.tool_policy = Some(if composed.contains_ref("adk-harness") {
+///         existing
+///     } else {
+///         Arc::new(composed.layer(layer))
+///     });
+/// }
+///
+/// let mut config = RunConfig::builder().tool_policy(Arc::new(operator)).build();
+/// let harness: Arc<dyn ToolPolicy> = Arc::new(harness);
+/// for _ in 0..3 {
+///     add_layer(&mut config, harness.clone());
+/// }
+/// let policy = config.tool_policy.unwrap();
+/// assert_eq!(policy.policy_ref().as_deref(), Some("ops-v3+adk-harness"));
+///
+/// # futures::executor::block_on(async {
+/// let bash = ToolPolicyRequest::new("bash", json!({ "command": "ls" }));
+/// assert!(matches!(policy.evaluate(&bash).await, PolicyDecision::RequireApproval { .. }));
+/// # });
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct StrictestPolicy {
+    layers: Vec<Arc<dyn ToolPolicy>>,
+}
+
+impl StrictestPolicy {
+    /// A policy over `layers`, asked in order.
+    pub fn new(layers: Vec<Arc<dyn ToolPolicy>>) -> Self {
+        Self { layers }
+    }
+
+    /// Appends `policy` as the last layer.
+    #[must_use]
+    pub fn layer(mut self, policy: Arc<dyn ToolPolicy>) -> Self {
+        self.layers.push(policy);
+        self
+    }
+
+    /// The layers, in the order they are asked.
+    pub fn layers(&self) -> &[Arc<dyn ToolPolicy>] {
+        &self.layers
+    }
+
+    /// Whether a layer, or a layer of a nested `StrictestPolicy`, names itself
+    /// `policy_ref`.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_core::{DeclarativePolicy, StrictestPolicy};
+    /// use std::sync::Arc;
+    ///
+    /// let named = |name: &str| Arc::new(DeclarativePolicy::builder().name(name).build());
+    /// let inner = StrictestPolicy::new(vec![named("ops-v3"), named("adk-harness")]);
+    /// let outer = StrictestPolicy::new(vec![Arc::new(inner), named("tenant")]);
+    /// assert!(outer.contains_ref("adk-harness"));
+    /// assert!(!outer.contains_ref("adk"));
+    /// ```
+    pub fn contains_ref(&self, policy_ref: &str) -> bool {
+        self.layers.iter().filter_map(|layer| layer.policy_ref()).any(|layer_ref| {
+            layer_ref == policy_ref
+                || layer_ref.split(STRICTEST_REF_SEPARATOR).any(|part| part == policy_ref)
+        })
+    }
+}
+
+/// Joins the layer names in [`StrictestPolicy::policy_ref`].
+const STRICTEST_REF_SEPARATOR: char = '+';
+
+#[async_trait]
+impl ToolPolicy for StrictestPolicy {
+    async fn evaluate(&self, request: &ToolPolicyRequest) -> PolicyDecision {
+        self.evaluate_call(request, &PolicyCall::new()).await
+    }
+
+    async fn evaluate_call(
+        &self,
+        request: &ToolPolicyRequest,
+        call: &PolicyCall<'_>,
+    ) -> PolicyDecision {
+        let mut decision = PolicyDecision::Allow;
+        // Every layer is asked, so each one observes (and can audit) every call.
+        for layer in &self.layers {
+            decision = decision.stricter(layer.evaluate_call(request, call).await);
+        }
+        decision
+    }
+
+    /// The named layers' references joined with `+`, such as `ops-v3+adk-harness`;
+    /// unnamed layers are left out, and `None` when no layer is named.
+    fn policy_ref(&self) -> Option<String> {
+        let names: Vec<String> =
+            self.layers.iter().filter_map(|layer| layer.policy_ref()).collect();
+        (!names.is_empty()).then(|| names.join(&STRICTEST_REF_SEPARATOR.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn glob_matching() {
+        assert!(glob_matches("*", "anything"));
+        assert!(glob_matches("send_*", "send_email"));
+        assert!(!glob_matches("send_*", "resend_email"));
+        assert!(glob_matches("*_file", "delete_file"));
+        assert!(glob_matches("get_?", "get_x"));
+        assert!(!glob_matches("get_?", "get_xy"));
+        assert!(glob_matches("a*b*c", "aXXbYYc"));
+        assert!(!glob_matches("a*b*c", "aXXbYY"));
+        assert!(glob_matches("exact", "exact"));
+        assert!(!glob_matches("exact", "exactly"));
+    }
+
+    #[test]
+    fn url_hosts_refuse_ambiguous_forms() {
+        assert_eq!(url_host("https://Docs.RS/serde").as_deref(), Some("docs.rs"));
+        assert_eq!(url_host("http://example.com:8080/x").as_deref(), Some("example.com"));
+        assert_eq!(url_host("https://example.com.").as_deref(), Some("example.com"));
+        assert_eq!(url_host("https://example.com?q=1").as_deref(), Some("example.com"));
+        assert_eq!(url_host("https://example.com#frag").as_deref(), Some("example.com"));
+        for ambiguous in [
+            "https://allowed.com@evil.test/",
+            "https://evil.test\\@allowed.com",
+            "https://allowed.com\\.evil.test",
+            "https://%61llowed.com/",
+            "https://[::1]/",
+            "https://allowed.com:/",
+            "https://allowed.com:80x/",
+            "https://allowed.com\t.evil.test",
+            "https://allowed..com",
+            "https:///path",
+            "ftp://allowed.com/",
+            "allowed.com/path",
+            " https://allowed.com",
+        ] {
+            assert_eq!(url_host(ambiguous), None, "{ambiguous}");
+        }
+    }
+
+    #[test]
+    fn domain_patterns() {
+        assert!(domain_matches("example.com", "example.com"));
+        assert!(!domain_matches("example.com", "api.example.com"));
+        assert!(domain_matches("*.example.com", "api.example.com"));
+        assert!(!domain_matches("*.example.com", "example.com"));
+        assert!(!domain_matches("*.example.com", "badexample.com"));
+    }
+
+    #[test]
+    fn predicates_fail_closed_on_missing_or_mistyped_arguments() {
+        let args = json!({ "amount": "5", "nested": { "region": "eu" } });
+        assert!(!ArgPredicate::at_most("/amount", 10.0).holds(&args));
+        assert!(!ArgPredicate::at_most("/missing", 10.0).holds(&args));
+        assert!(ArgPredicate::equals("/nested/region", json!("eu")).holds(&args));
+        assert!(ArgPredicate::in_set("/nested/region", [json!("us"), json!("eu")]).holds(&args));
+        assert!(!ArgPredicate::in_set("/nested/region", [json!("us")]).holds(&args));
+        assert!(!ArgPredicate::starts_with("/amount", "6").holds(&args));
+        assert!(!ArgPredicate::domain_in("/nested", ["eu"]).holds(&args));
+    }
+
+    #[test]
+    fn rules_match_in_order_and_unlisted_tools_are_denied() {
+        let policy = DeclarativePolicy::builder()
+            .deny("lookup_secret", "secrets are off limits")
+            .allow_read_only()
+            .rule(PolicyRule::allow("fetch").when(ArgPredicate::domain_in("/url", ["docs.rs"])))
+            .build();
+
+        let read = |name: &str| ToolPolicyRequest::new(name, json!({})).with_read_only(true);
+        assert_eq!(policy.decide(&read("search")), PolicyDecision::Allow);
+        assert_eq!(
+            policy.decide(&read("lookup_secret")),
+            PolicyDecision::deny("secrets are off limits")
+        );
+        assert_eq!(
+            policy.decide(&ToolPolicyRequest::new("fetch", json!({ "url": "https://docs.rs" }))),
+            PolicyDecision::Allow
+        );
+        assert!(matches!(
+            policy.decide(&ToolPolicyRequest::new("fetch", json!({ "url": "https://evil.test" }))),
+            PolicyDecision::Deny { .. }
+        ));
+        assert!(matches!(
+            policy.decide(&ToolPolicyRequest::new("delete", json!({}))),
+            PolicyDecision::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn rules_can_match_on_the_declared_effect() {
+        let policy = DeclarativePolicy::builder()
+            .rule(PolicyRule::allow("*").with_effect(ToolEffect::Idempotent))
+            .require_approval("*", "may repeat a side effect")
+            .build();
+
+        let idempotent =
+            ToolPolicyRequest::new("put_record", json!({})).with_effect(ToolEffect::Idempotent);
+        assert_eq!(policy.decide(&idempotent), PolicyDecision::Allow);
+        assert_eq!(
+            policy.decide(&ToolPolicyRequest::new("charge_card", json!({}))),
+            PolicyDecision::require_approval("may repeat a side effect")
+        );
+        assert!(!idempotent.is_read_only());
+        assert!(ToolPolicyRequest::new("search", json!({})).with_read_only(true).is_read_only());
+    }
+
+    #[test]
+    fn rules_can_match_on_the_acting_agent() {
+        use crate::{ActingContext, AgentId, AgentPrincipal};
+        let principal = |id: &str| AgentPrincipal::new(AgentId::new(id).unwrap());
+        let policy = DeclarativePolicy::builder()
+            .rule(PolicyRule::deny("*", "quarantined").for_agent("urn:adk:agent:ops/rogue"))
+            .rule(PolicyRule::allow("deploy").for_tenant("acme").for_class("release-bot"))
+            .rule(PolicyRule::allow("search").for_agent("urn:adk:agent:ops/*"))
+            .build();
+        let call = |tool: &str, principal: AgentPrincipal| {
+            ToolPolicyRequest::new(tool, json!({}))
+                .with_acting_context(ActingContext::new(principal))
+        };
+
+        assert_eq!(
+            policy.decide(&call("search", principal("urn:adk:agent:ops/rogue"))),
+            PolicyDecision::deny("quarantined")
+        );
+        assert_eq!(
+            policy.decide(&call("search", principal("urn:adk:agent:ops/scout"))),
+            PolicyDecision::Allow
+        );
+        assert!(matches!(
+            policy.decide(&call("search", principal("urn:adk:agent:dev/scout"))),
+            PolicyDecision::Deny { .. }
+        ));
+        let release =
+            principal("spiffe://acme/release").with_tenant("acme").with_class("release-bot");
+        assert_eq!(policy.decide(&call("deploy", release.clone())), PolicyDecision::Allow);
+        assert!(matches!(
+            policy.decide(&call("deploy", release.with_tenant("globex"))),
+            PolicyDecision::Deny { .. }
+        ));
+        assert!(matches!(
+            policy.decide(&ToolPolicyRequest::new("deploy", json!({}))),
+            PolicyDecision::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn the_default_decision_can_be_replaced() {
+        let policy = DeclarativePolicy::builder()
+            .default_decision(PolicyDecision::require_approval("unlisted"))
+            .build();
+        assert_eq!(
+            policy.decide(&ToolPolicyRequest::new("anything", json!({}))),
+            PolicyDecision::require_approval("unlisted")
+        );
+    }
+
+    #[test]
+    fn stricter_orders_decisions() {
+        let allow = PolicyDecision::Allow;
+        let approve = PolicyDecision::require_approval("a");
+        let deny = PolicyDecision::deny("d");
+        assert_eq!(allow.clone().stricter(approve.clone()), approve);
+        assert_eq!(approve.clone().stricter(deny.clone()), deny);
+        assert_eq!(deny.clone().stricter(allow), deny);
+    }
+
+    /// A policy with a fixed decision that counts how often it is asked.
+    #[derive(Debug)]
+    struct Fixed {
+        name: Option<&'static str>,
+        decision: PolicyDecision,
+        asked: std::sync::atomic::AtomicUsize,
+    }
+
+    fn fixed(name: Option<&'static str>, decision: PolicyDecision) -> Arc<Fixed> {
+        Arc::new(Fixed { name, decision, asked: std::sync::atomic::AtomicUsize::new(0) })
+    }
+
+    #[async_trait]
+    impl ToolPolicy for Fixed {
+        async fn evaluate(&self, _request: &ToolPolicyRequest) -> PolicyDecision {
+            self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.decision.clone()
+        }
+
+        fn policy_ref(&self) -> Option<String> {
+            self.name.map(str::to_string)
+        }
+    }
+
+    /// Denies the tools one publisher serves, and allows everything else.
+    #[derive(Debug)]
+    struct BlockSource(&'static str);
+
+    #[async_trait]
+    impl ToolPolicy for BlockSource {
+        async fn evaluate(&self, _request: &ToolPolicyRequest) -> PolicyDecision {
+            PolicyDecision::Allow
+        }
+
+        async fn evaluate_call(
+            &self,
+            _request: &ToolPolicyRequest,
+            call: &PolicyCall<'_>,
+        ) -> PolicyDecision {
+            match call.origin {
+                Some(origin) if origin.source == self.0 => PolicyDecision::deny("blocked source"),
+                _ => PolicyDecision::Allow,
+            }
+        }
+    }
+
+    fn request() -> ToolPolicyRequest {
+        ToolPolicyRequest::new("search", json!({ "q": "rust" }))
+    }
+
+    async fn strictest(layers: Vec<Arc<dyn ToolPolicy>>) -> PolicyDecision {
+        StrictestPolicy::new(layers).evaluate_call(&request(), &PolicyCall::new()).await
+    }
+
+    #[tokio::test]
+    async fn evaluate_call_defaults_to_evaluate() {
+        let origin = ToolOrigin::new("mcp:any", &json!({ "name": "search" }), None);
+        let call = PolicyCall::new().with_origin(&origin).with_function_call_id("c1");
+        let policy = DeclarativePolicy::builder().allow("search").build();
+        assert_eq!(policy.evaluate_call(&request(), &call).await, PolicyDecision::Allow);
+        let unlisted = ToolPolicyRequest::new("delete", json!({}));
+        assert_eq!(policy.evaluate_call(&unlisted, &call).await, policy.evaluate(&unlisted).await);
+    }
+
+    #[tokio::test]
+    async fn the_strictest_layer_decides() {
+        let allow = || fixed(None, PolicyDecision::Allow) as Arc<dyn ToolPolicy>;
+        let approve =
+            || fixed(None, PolicyDecision::require_approval("ask")) as Arc<dyn ToolPolicy>;
+        let deny = || fixed(None, PolicyDecision::deny("no")) as Arc<dyn ToolPolicy>;
+
+        assert_eq!(strictest(vec![allow(), deny()]).await, PolicyDecision::deny("no"));
+        assert_eq!(strictest(vec![deny(), allow()]).await, PolicyDecision::deny("no"));
+        assert_eq!(
+            strictest(vec![allow(), approve()]).await,
+            PolicyDecision::require_approval("ask")
+        );
+        assert_eq!(
+            strictest(vec![approve(), allow()]).await,
+            PolicyDecision::require_approval("ask")
+        );
+        assert_eq!(strictest(vec![approve(), deny()]).await, PolicyDecision::deny("no"));
+        assert_eq!(strictest(vec![allow(), allow()]).await, PolicyDecision::Allow);
+        assert_eq!(strictest(vec![]).await, PolicyDecision::Allow);
+
+        // Between equally strict layers the earlier reason is kept.
+        let first = fixed(None, PolicyDecision::deny("first"));
+        let second = fixed(None, PolicyDecision::deny("second"));
+        assert_eq!(strictest(vec![first, second]).await, PolicyDecision::deny("first"));
+    }
+
+    #[tokio::test]
+    async fn every_layer_is_asked_even_after_a_denial() {
+        let deny = fixed(None, PolicyDecision::deny("no"));
+        let allow = fixed(None, PolicyDecision::Allow);
+        let policy = StrictestPolicy::new(vec![deny.clone()]).layer(allow.clone());
+        assert_eq!(policy.evaluate(&request()).await, PolicyDecision::deny("no"));
+        assert_eq!(deny.asked.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(allow.asked.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(policy.layers().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn layers_receive_the_calls_facts() {
+        let evil = ToolOrigin::new("mcp:evil", &json!({ "name": "search" }), None);
+        let good = ToolOrigin::new("mcp:good", &json!({ "name": "search" }), None);
+        let policy = StrictestPolicy::new(vec![
+            fixed(Some("operator"), PolicyDecision::Allow) as Arc<dyn ToolPolicy>,
+            Arc::new(BlockSource("mcp:evil")),
+        ]);
+        let decide = |origin| {
+            let policy = &policy;
+            async move { policy.evaluate_call(&request(), &PolicyCall::new().with_origin(origin)).await }
+        };
+        assert_eq!(decide(&evil).await, PolicyDecision::deny("blocked source"));
+        assert_eq!(decide(&good).await, PolicyDecision::Allow);
+        // Without the facts, the origin-aware layer cannot tell the call apart.
+        assert_eq!(policy.evaluate(&request()).await, PolicyDecision::Allow);
+    }
+
+    #[test]
+    fn policy_ref_joins_the_named_layers() {
+        let named = |name| fixed(Some(name), PolicyDecision::Allow) as Arc<dyn ToolPolicy>;
+        let unnamed = || fixed(None, PolicyDecision::Allow) as Arc<dyn ToolPolicy>;
+        let policy = StrictestPolicy::new(vec![named("ops-v3"), unnamed(), named("adk-harness")]);
+        assert_eq!(policy.policy_ref().as_deref(), Some("ops-v3+adk-harness"));
+        assert_eq!(StrictestPolicy::new(vec![unnamed()]).policy_ref(), None);
+        assert_eq!(StrictestPolicy::default().policy_ref(), None);
+
+        let nested = StrictestPolicy::new(vec![Arc::new(policy), named("tenant")]);
+        assert_eq!(nested.policy_ref().as_deref(), Some("ops-v3+adk-harness+tenant"));
+        assert!(nested.contains_ref("adk-harness"));
+        assert!(nested.contains_ref("tenant"));
+        assert!(!nested.contains_ref("adk"));
+        assert!(!nested.contains_ref("ops-v3+adk"));
+    }
+
+    #[tokio::test]
+    async fn layering_guarded_by_contains_ref_is_idempotent() {
+        let harness: Arc<dyn ToolPolicy> =
+            fixed(Some("adk-harness"), PolicyDecision::require_approval("harness"));
+        let add_layer = |existing: Option<Arc<dyn ToolPolicy>>| -> Arc<dyn ToolPolicy> {
+            let Some(existing) = existing else {
+                return harness.clone();
+            };
+            let composed = StrictestPolicy::new(vec![existing.clone()]);
+            if composed.contains_ref("adk-harness") {
+                existing
+            } else {
+                Arc::new(composed.layer(harness.clone()))
+            }
+        };
+
+        let operator: Arc<dyn ToolPolicy> = fixed(Some("ops-v3"), PolicyDecision::Allow);
+        let once = add_layer(Some(operator));
+        let thrice = add_layer(Some(add_layer(Some(once.clone()))));
+        assert!(Arc::ptr_eq(&once, &thrice), "the layer is added once");
+        assert_eq!(thrice.policy_ref().as_deref(), Some("ops-v3+adk-harness"));
+        assert_eq!(thrice.evaluate(&request()).await, PolicyDecision::require_approval("harness"));
+
+        let alone = add_layer(None);
+        assert!(Arc::ptr_eq(&alone, &add_layer(Some(alone.clone()))));
+    }
+}

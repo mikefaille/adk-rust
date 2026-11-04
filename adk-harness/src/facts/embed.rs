@@ -1,0 +1,195 @@
+//! `RagEmbedder`: adk-rag's embedders as adk-memory's batch trait (spec 3.1 §7.15.2,
+//! features `memory-embeddings` and `memory-embeddings-local`).
+
+use std::sync::Arc;
+
+use adk_core::{AdkError, ErrorCategory, ErrorComponent, Result};
+use async_trait::async_trait;
+
+/// An `adk_rag::EmbeddingProvider` as an [`adk_memory::EmbeddingProvider`], for
+/// [`HarnessAgentBuilder::memory_embedder`](crate::HarnessAgentBuilder::memory_embedder)
+/// (spec 3.1 §7.15.2).
+///
+/// adk-rag embeds one text at a time or a batch of `&str`; adk-memory embeds a batch of
+/// `String`. `openai` and `gemini` (feature `memory-embeddings`) build the two providers
+/// adk-rag ships; `onnx` and `local` (feature `memory-embeddings-local`) its in-process one.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use std::sync::Arc;
+/// use adk_harness::{HarnessAgent, LongTermMemoryConfig, RagEmbedder};
+///
+/// # #[cfg(feature = "memory-embeddings")]
+/// # fn build(model: Arc<dyn adk_core::Llm>) -> adk_core::Result<HarnessAgent> {
+/// let embedder = RagEmbedder::gemini(&std::env::var("GOOGLE_API_KEY").unwrap_or_default())?;
+/// HarnessAgent::builder("harness")
+///     .model(model)
+///     .workspace(adk_devtools::Workspace::new("."))
+///     .long_term_memory(LongTermMemoryConfig::default())
+///     .memory_embedder(Arc::new(embedder))
+///     .build()
+/// # }
+/// ```
+pub struct RagEmbedder {
+    inner: Arc<dyn adk_rag::EmbeddingProvider>,
+    /// The id stored with each vector (spec 3.1 §7.32, I73).
+    model_id: Option<String>,
+}
+
+impl std::fmt::Debug for RagEmbedder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RagEmbedder")
+            .field("model_id", &self.model_id)
+            .field("dimensions", &self.inner.dimensions())
+            .finish()
+    }
+}
+
+fn embedding_error(error: adk_rag::RagError) -> AdkError {
+    AdkError::new(
+        ErrorComponent::Memory,
+        ErrorCategory::Unavailable,
+        "harness.memory.embedding_failed",
+        format!("the fact embedder failed: {error}"),
+    )
+}
+
+impl RagEmbedder {
+    /// Wraps `inner`, with no model id: give one with
+    /// [`with_model_id`](Self::with_model_id) so stored vectors name their model.
+    pub fn new(inner: Arc<dyn adk_rag::EmbeddingProvider>) -> Self {
+        Self { inner, model_id: None }
+    }
+
+    /// Names the model behind the vectors, stored with each fact's vector so recall never
+    /// compares two models' vectors (spec 3.1 §7.32, I73).
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # #[cfg(feature = "memory-embeddings")]
+    /// # {
+    /// use adk_memory::EmbeddingProvider as _;
+    ///
+    /// let embedder = adk_harness::RagEmbedder::openai("key").unwrap();
+    /// assert_eq!(embedder.model_id(), Some("openai/text-embedding-3-small"));
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn with_model_id(mut self, model_id: impl Into<String>) -> Self {
+        self.model_id = Some(model_id.into());
+        self
+    }
+
+    /// OpenAI's `text-embedding-3-small` with `api_key`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the client cannot be built.
+    #[cfg(feature = "memory-embeddings")]
+    pub fn openai(api_key: &str) -> Result<Self> {
+        Ok(Self::new(Arc::new(
+            adk_rag::openai::OpenAIEmbeddingProvider::new(api_key).map_err(embedding_error)?,
+        ))
+        .with_model_id("openai/text-embedding-3-small"))
+    }
+
+    /// Gemini's `gemini-embedding-2` with `api_key`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the client cannot be built.
+    #[cfg(feature = "memory-embeddings")]
+    pub fn gemini(api_key: &str) -> Result<Self> {
+        Ok(Self::new(Arc::new(
+            adk_rag::GeminiEmbeddingProvider::new(api_key).map_err(embedding_error)?,
+        ))
+        .with_model_id("gemini/gemini-embedding-2"))
+    }
+
+    /// A sentence-transformer ONNX model run in process (feature `memory-embeddings-local`;
+    /// spec 3.1 §7.15.2, §10 R1): `BAAI/bge-small-en-v1.5` by default, fetched once into
+    /// the Hugging Face hub cache, so recall needs no network and no provider key. The
+    /// default of the fully local harness (spec 3.1 §5 H10).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the model files cannot be fetched or loaded.
+    #[cfg(feature = "memory-embeddings-local")]
+    pub fn onnx(config: adk_rag::OnnxEmbeddingConfig) -> Result<Self> {
+        let model_id = format!("onnx/{}", config.model_id);
+        Ok(Self::new(Arc::new(
+            adk_rag::OnnxEmbeddingProvider::new(config).map_err(embedding_error)?,
+        ))
+        .with_model_id(model_id))
+    }
+
+    /// [`onnx`](Self::onnx) with the default model, `BAAI/bge-small-en-v1.5`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the model files cannot be fetched or loaded.
+    #[cfg(feature = "memory-embeddings-local")]
+    pub fn local() -> Result<Self> {
+        Self::onnx(adk_rag::OnnxEmbeddingConfig::default())
+    }
+}
+
+#[async_trait]
+impl adk_memory::EmbeddingProvider for RagEmbedder {
+    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        let texts: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let vectors = self.inner.embed_batch(&texts).await.map_err(embedding_error)?;
+        if vectors.len() != texts.len() {
+            return Err(AdkError::new(
+                ErrorComponent::Memory,
+                ErrorCategory::Internal,
+                "harness.memory.embedding_failed",
+                format!(
+                    "the fact embedder returned {} vectors for {} texts",
+                    vectors.len(),
+                    texts.len()
+                ),
+            ));
+        }
+        Ok(vectors)
+    }
+
+    fn dimensions(&self) -> usize {
+        self.inner.dimensions()
+    }
+
+    fn model_id(&self) -> Option<&str> {
+        self.model_id.as_deref()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use adk_memory::EmbeddingProvider as _;
+
+    struct Echo;
+
+    #[async_trait]
+    impl adk_rag::EmbeddingProvider for Echo {
+        async fn embed(&self, text: &str) -> adk_rag::Result<Vec<f32>> {
+            Ok(vec![text.len() as f32, 1.0])
+        }
+
+        fn dimensions(&self) -> usize {
+            2
+        }
+    }
+
+    #[tokio::test]
+    async fn batches_are_embedded_one_vector_per_text() {
+        let embedder = RagEmbedder::new(Arc::new(Echo));
+        let vectors = embedder.embed(&["a".into(), "abc".into()]).await.unwrap();
+        assert_eq!(vectors, vec![vec![1.0, 1.0], vec![3.0, 1.0]]);
+        assert_eq!(embedder.dimensions(), 2);
+        assert_eq!(embedder.model_id(), None);
+        assert_eq!(embedder.with_model_id("test/echo").model_id(), Some("test/echo"));
+    }
+}

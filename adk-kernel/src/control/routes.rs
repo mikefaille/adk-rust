@@ -1,0 +1,988 @@
+//! The control plane's route handlers (spec 3.2 §7.11), over a [`ControlBackend`]: the
+//! kernel, or a test double.
+
+use std::sync::Arc;
+
+use adk_core::audit_log::{AuditActor, AuditRecordDraft, AuditRecordKind, AuditTrail};
+use adk_core::principal::SubjectRef;
+use adk_core::{
+    AdkError, ApprovalService, DurableRunStore, ErrorCategory, ErrorComponent, Event,
+    GovernanceControl, NewRun, RequestContext, RunFilter, ToolConfirmationRequest, held_tool_calls,
+};
+use adk_server::rest::FreezeDelegate;
+use adk_session::{GetRequest, SessionService};
+use async_trait::async_trait;
+use axum::extract::{FromRequestParts, Path as UrlPath, Query, State};
+use axum::http::HeaderMap;
+use axum::http::request::Parts;
+use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use futures::{FutureExt as _, StreamExt};
+use serde_json::json;
+
+use super::api::{
+    AgendaItemResponse, AgendaQuery, AgendaResponse, AttachRequest, AttachResponse, EventsQuery,
+    FreezeRequest, FreezeResponse, KillRequest, NiceRequest, PartitionModeRequest,
+    PartitionResponse, PartitionsResponse, ProcessResponse, ProcessesQuery, ProcessesResponse,
+    RejectRequest, ScheduleRequest, SpawnRequest,
+};
+use super::{ControlTransport, paths};
+use crate::agenda::{Agenda, AgendaItem};
+use crate::audit;
+use crate::bus::EventSubscriber;
+use crate::error::{KernelError, RESUME_NOT_HERE_CODE, Result, UNAUTHORIZED_CODE};
+use crate::kernel::{Kernel, KernelHealth};
+use crate::partition::{Partition, PartitionId, PartitionMode};
+use crate::process::{Process, ProcessKind, ProcessSpec};
+use crate::sched::QueueClass;
+use crate::stores::ProcessFilter;
+
+/// The scope the socket and a loopback bind grant the OS user; the approvals inbox
+/// `adk-rust up` serves routes held calls to this group, as `adk-rust serve` does.
+pub(crate) const OPERATOR_SCOPE: &str = "operator";
+
+/// What the routes read and change: the kernel, or a test double.
+#[async_trait]
+pub(crate) trait ControlBackend: Send + Sync + 'static {
+    fn app_name(&self) -> &str;
+    fn health(&self) -> KernelHealth;
+    fn governance(&self) -> &GovernanceControl;
+    fn run_store(&self) -> &Arc<dyn DurableRunStore>;
+    fn sessions(&self) -> Option<&Arc<dyn SessionService>>;
+    fn approvals(&self) -> Option<&Arc<dyn ApprovalService>>;
+    fn audit_trail(&self) -> Option<&AuditTrail>;
+    /// The targets processes may run, for the message refusing another.
+    fn targets(&self) -> Vec<String>;
+    fn has_target(&self, target: &str) -> bool;
+    async fn spawn(&self, run: NewRun, spec: ProcessSpec) -> Result<Process>;
+    async fn ps(&self, filter: ProcessFilter) -> Result<Vec<Process>>;
+    async fn process(&self, pid: &str) -> Result<Option<Process>>;
+    async fn kill(&self, pid: &str, reason: &str) -> Result<()>;
+    /// Moves the process and returns the moved one, under its new pid.
+    async fn nice(&self, pid: &str, queue: QueueClass) -> Result<Process>;
+    async fn suspend(&self, pid: &str) -> Result<()>;
+    async fn resume(&self, pid: &str) -> Result<()>;
+    /// Freezes and returns how many running processes this replica parked.
+    async fn freeze(&self, reason: &str, by: AuditActor) -> Result<usize>;
+    async fn unfreeze(&self, by: AuditActor) -> Result<()>;
+    /// The bus from just after `after`, or from now on.
+    async fn events(&self, after: Option<u64>) -> Result<EventSubscriber>;
+    /// The agenda (spec 3.2 §7.5); `None` on a backend without one.
+    fn agenda(&self) -> Option<Agenda> {
+        None
+    }
+    /// What the kernel runs and would silently not do; `None` on a backend without one.
+    fn inventory(&self) -> Option<crate::inventory::KernelInventory> {
+        None
+    }
+    /// The driver supervisor, when the kernel has one (spec 3.2 §7.7).
+    #[cfg(feature = "drivers")]
+    fn drivers(&self) -> Option<crate::drivers::DriverSupervisor> {
+        None
+    }
+
+    /// The activity ledger (spec 3.2 §7.10); `None` on a backend without one.
+    #[cfg(feature = "proc")]
+    fn ledger(&self) -> Option<crate::proc::Ledger> {
+        None
+    }
+
+    /// Device pairing (spec 3.3 §10 K2); `None` on a backend that pairs no devices.
+    fn pairing(&self) -> Option<crate::pairing::Pairing> {
+        None
+    }
+
+    /// The kernel behind the routes the surfaces need (spec 3.3 §10 K3–K5); `None` on a
+    /// test double.
+    fn kernel(&self) -> Option<&Kernel> {
+        None
+    }
+
+    /// The partition table, ordered by id (spec 3.2 §7.8).
+    async fn partitions(&self) -> Result<Vec<Partition>> {
+        Ok(Vec::new())
+    }
+    /// Creates or replaces `partition` (spec 3.2 §7.8).
+    async fn put_partition(&self, partition: Partition, by: AuditActor) -> Result<Partition> {
+        let _ = (partition, by);
+        Err(KernelError::Config { reason: "this kernel keeps no partition table".into() })
+    }
+    /// Sets the mode of partition `id` (spec 3.2 §7.8).
+    async fn set_partition_mode(
+        &self,
+        id: PartitionId,
+        mode: PartitionMode,
+        by: AuditActor,
+    ) -> Result<Partition> {
+        let _ = (id, mode, by);
+        Err(KernelError::Config { reason: "this kernel keeps no partition table".into() })
+    }
+}
+
+#[async_trait]
+impl ControlBackend for Kernel {
+    fn app_name(&self) -> &str {
+        &self.config().app_name
+    }
+
+    fn health(&self) -> KernelHealth {
+        Kernel::health(self)
+    }
+
+    fn governance(&self) -> &GovernanceControl {
+        &self.config().governance
+    }
+
+    fn run_store(&self) -> &Arc<dyn DurableRunStore> {
+        self.processes().run_store()
+    }
+
+    fn sessions(&self) -> Option<&Arc<dyn SessionService>> {
+        self.session_service()
+    }
+
+    fn approvals(&self) -> Option<&Arc<dyn ApprovalService>> {
+        self.approval_service()
+    }
+
+    fn audit_trail(&self) -> Option<&AuditTrail> {
+        Kernel::audit_trail(self)
+    }
+
+    fn targets(&self) -> Vec<String> {
+        Kernel::targets(self)
+    }
+
+    fn has_target(&self, target: &str) -> bool {
+        Kernel::has_target(self, target)
+    }
+
+    fn inventory(&self) -> Option<crate::inventory::KernelInventory> {
+        Some(Kernel::inventory(self))
+    }
+
+    async fn spawn(&self, run: NewRun, spec: ProcessSpec) -> Result<Process> {
+        self.processes().spawn(run, spec).await
+    }
+
+    async fn ps(&self, filter: ProcessFilter) -> Result<Vec<Process>> {
+        self.processes().ps(filter).await
+    }
+
+    async fn process(&self, pid: &str) -> Result<Option<Process>> {
+        self.processes().get(pid).await
+    }
+
+    async fn kill(&self, pid: &str, reason: &str) -> Result<()> {
+        self.processes().kill(pid, reason).await
+    }
+
+    async fn nice(&self, pid: &str, queue: QueueClass) -> Result<Process> {
+        self.processes().nice(pid, queue).await
+    }
+
+    async fn suspend(&self, pid: &str) -> Result<()> {
+        self.processes().suspend(pid).await
+    }
+
+    async fn resume(&self, pid: &str) -> Result<()> {
+        self.processes().resume(pid).await
+    }
+
+    async fn freeze(&self, reason: &str, by: AuditActor) -> Result<usize> {
+        // The delegate's freeze is `Kernel::freeze` with the count the response reports.
+        Ok(FreezeDelegate::freeze(self, reason, by).await?.parked_runs)
+    }
+
+    async fn unfreeze(&self, by: AuditActor) -> Result<()> {
+        Kernel::unfreeze(self, by).await
+    }
+
+    async fn events(&self, after: Option<u64>) -> Result<EventSubscriber> {
+        match after {
+            Some(cursor) => self.bus().subscribe_after(cursor).await,
+            None => Ok(Kernel::events(self)),
+        }
+    }
+
+    fn agenda(&self) -> Option<Agenda> {
+        Some(Kernel::agenda(self).clone())
+    }
+
+    #[cfg(feature = "drivers")]
+    fn drivers(&self) -> Option<crate::drivers::DriverSupervisor> {
+        Kernel::drivers(self).cloned()
+    }
+
+    #[cfg(feature = "proc")]
+    fn ledger(&self) -> Option<crate::proc::Ledger> {
+        Kernel::ledger(self).cloned()
+    }
+
+    fn pairing(&self) -> Option<crate::pairing::Pairing> {
+        self.config().control.pairing.clone()
+    }
+
+    fn kernel(&self) -> Option<&Kernel> {
+        Some(self)
+    }
+
+    async fn partitions(&self) -> Result<Vec<Partition>> {
+        Kernel::partitions(self).list().await
+    }
+
+    async fn put_partition(&self, partition: Partition, by: AuditActor) -> Result<Partition> {
+        Kernel::partitions(self).put(partition.clone(), by).await?;
+        Ok(partition)
+    }
+
+    async fn set_partition_mode(
+        &self,
+        id: PartitionId,
+        mode: PartitionMode,
+        by: AuditActor,
+    ) -> Result<Partition> {
+        Kernel::partitions(self).set_mode(id, mode, by).await
+    }
+}
+
+/// The routes over `backend`, relative to `/api`.
+pub(crate) fn routes(backend: Arc<dyn ControlBackend>) -> Router {
+    let router = Router::new()
+        .route(paths::HEALTH, get(health))
+        .route(paths::INVENTORY, get(inventory))
+        .route(paths::PROCESSES, get(processes).post(spawn))
+        .route(paths::KILL, post(kill))
+        .route(paths::NICE, post(nice))
+        .route(paths::SUSPEND, post(suspend))
+        .route(paths::RESUME, post(resume))
+        .route(paths::EVENTS, get(events))
+        .route(paths::ATTACH, post(attach))
+        .route(paths::FREEZE, post(freeze))
+        .route(paths::UNFREEZE, post(unfreeze))
+        .route(paths::AGENDA, get(agenda))
+        .route(paths::AGENDA_APPROVE, post(agenda_approve))
+        .route(paths::AGENDA_REJECT, post(agenda_reject))
+        .route(paths::AGENDA_SCHEDULE, post(agenda_schedule))
+        .route(paths::PARTITIONS, get(partitions).post(put_partition))
+        .route(paths::PARTITION_MODE, post(set_partition_mode))
+        // What the home's Today and "Agent Memory and Rules" read and change (spec 3.3 §10
+        // K3–K5).
+        .merge(super::settings::routes())
+        .merge(super::memory::routes())
+        .merge(super::record::routes())
+        // The agents a person adds, read only (spec 3.3 §10 K7).
+        .merge(super::agents::routes())
+        // The REPL's commands and "Always allow" for a terminal on the kernel (spec 3.3 §5.2).
+        .merge(super::commands::routes());
+    #[cfg(feature = "proc")]
+    let router = router.merge(super::away::routes());
+    #[cfg(feature = "drivers")]
+    let router = router
+        .route(paths::DRIVERS, get(drivers::list))
+        .route(paths::DRIVER_MOUNT, post(drivers::mount))
+        .route(paths::DRIVER_UNMOUNT, post(drivers::unmount))
+        .route(paths::DRIVER_RESTART, post(drivers::restart))
+        .route(paths::DRIVER_REAPPROVE, post(drivers::reapprove));
+    #[cfg(feature = "proc")]
+    let router = router
+        .route(paths::PROC_LEDGER, get(proc_ledger))
+        .route(paths::PROC_BASELINES, get(proc_baselines))
+        .route(paths::PROC_OBSERVATIONS, get(proc_observations));
+    // Device pairing (spec 3.3 §10 K2); its tokens are admitted where the transport
+    // authenticates, and by `guard_devices` in front of a server's app.
+    router.with_state(backend.clone()).merge(super::pairing::routes(backend))
+}
+
+type Backend = State<Arc<dyn ControlBackend>>;
+
+/// The authenticated caller of a route (K-I16).
+pub(crate) struct Caller {
+    pub(super) context: RequestContext,
+    pub(super) transport: ControlTransport,
+}
+
+impl Caller {
+    pub(super) fn subject(&self) -> SubjectRef {
+        SubjectRef::human(self.context.user_id.clone())
+    }
+
+    /// The paired device the request came from, when a device token admitted it.
+    fn device(&self) -> Option<&str> {
+        self.context.metadata.get(crate::pairing::DEVICE_ID_METADATA).map(String::as_str)
+    }
+
+    fn actor(&self) -> AuditActor {
+        AuditActor::subject(self.subject())
+    }
+
+    /// Refuses a caller without the `operator` scope the routes that change the kernel need.
+    pub(super) fn require_operator(&self, action: &str) -> Result<()> {
+        if self.context.scopes.iter().any(|scope| scope == OPERATOR_SCOPE) {
+            return Ok(());
+        }
+        Err(KernelError::Core(AdkError::new(
+            ErrorComponent::Server,
+            ErrorCategory::Forbidden,
+            UNAUTHORIZED_CODE,
+            format!(
+                "{} may not {action}: changing the kernel needs the `{OPERATOR_SCOPE}` scope, \
+                 which the kernel's socket and a loopback bind grant",
+                self.context.user_id
+            ),
+        )))
+    }
+}
+
+impl<S: Send + Sync> FromRequestParts<S> for Caller {
+    type Rejection = KernelError;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self> {
+        let context = parts.extensions.get::<Option<RequestContext>>().cloned().flatten();
+        let transport =
+            parts.extensions.get::<ControlTransport>().copied().unwrap_or(ControlTransport::Http);
+        match context {
+            Some(context) => Ok(Self { context, transport }),
+            None => Err(KernelError::Unauthorized {
+                reason: "the kernel control plane needs an authenticated caller: connect over \
+                         the kernel's socket as its OS user, or configure a \
+                         RequestContextExtractor (a bearer token or SSO) for HTTP"
+                    .into(),
+            }),
+        }
+    }
+}
+
+/// Writes the `kernel.control` record of `action` on `target` by `caller` (spec 3.2 §9.3).
+///
+/// # Errors
+///
+/// The trail's error under `AuditFailureMode::Block`; the caller refuses the action.
+pub(super) async fn record(
+    backend: &dyn ControlBackend,
+    caller: &Caller,
+    action: &str,
+    target: Option<&str>,
+    extra: &[(&str, serde_json::Value)],
+) -> Result<()> {
+    tracing::info!(
+        control.action = action,
+        control.subject = %caller.context.user_id,
+        control.transport = ?caller.transport,
+        control.target = target.unwrap_or_default(),
+        "kernel control action"
+    );
+    let Some(trail) = backend.audit_trail() else {
+        return Ok(());
+    };
+    let draft = AuditRecordDraft::new(
+        AuditRecordKind::Other(audit::KERNEL_AUDIT_KIND.into()),
+        audit::CONTROL,
+    )
+    .actor(caller.actor())
+    .ext("subject", json!(caller.subject()))
+    .ext("transport", json!(caller.transport))
+    .ext("action", json!(action))
+    .ext("target", json!(target));
+    // A paired device's action names the device (spec 3.3 §11).
+    let draft = match caller.context.metadata.get(crate::pairing::DEVICE_ID_METADATA) {
+        Some(device) => draft.ext("device", json!(device)),
+        None => draft,
+    };
+    let draft = extra.iter().fold(draft, |draft, (key, value)| draft.ext(*key, value.clone()));
+    trail.record(draft).await.map_err(KernelError::from)
+}
+
+/// The process `pid` after an action, or `NotFound` when it is gone.
+async fn after_action(backend: &dyn ControlBackend, pid: &str) -> Result<Json<ProcessResponse>> {
+    match backend.process(pid).await? {
+        Some(process) => Ok(Json(ProcessResponse { process })),
+        None => Err(KernelError::NotFound { pid: pid.to_string() }),
+    }
+}
+
+async fn health(State(backend): Backend, _caller: Caller) -> Json<KernelHealth> {
+    Json(backend.health())
+}
+
+async fn inventory(
+    State(backend): Backend,
+    caller: Caller,
+) -> Result<Json<crate::inventory::KernelInventory>> {
+    caller.require_operator("read the kernel's inventory")?;
+    backend.inventory().map(Json).ok_or_else(|| KernelError::Config {
+        reason: "this control plane serves no kernel inventory".into(),
+    })
+}
+
+async fn processes(
+    State(backend): Backend,
+    _caller: Caller,
+    Query(query): Query<ProcessesQuery>,
+) -> Result<Json<ProcessesResponse>> {
+    let processes = backend.ps(query.to_filter()).await?;
+    Ok(Json(ProcessesResponse { processes }))
+}
+
+async fn spawn(
+    State(backend): Backend,
+    caller: Caller,
+    Json(request): Json<SpawnRequest>,
+) -> Result<Json<ProcessResponse>> {
+    caller.require_operator("spawn")?;
+    if !backend.has_target(&request.target) {
+        let targets = backend.targets();
+        let runs = if targets.is_empty() { "none".to_string() } else { targets.join(", ") };
+        return Err(KernelError::Core(AdkError::new(
+            ErrorComponent::Server,
+            ErrorCategory::NotFound,
+            crate::error::NOT_FOUND_CODE,
+            format!("no target {} on this kernel; it runs {runs}", request.target),
+        )));
+    }
+    let queue = request.queue.unwrap_or(QueueClass::Interactive);
+    // The run is the caller's own, as `/api/runs` makes an authenticated submission.
+    let mut run = NewRun::new(
+        queue.as_str(),
+        backend.app_name(),
+        caller.context.user_id.clone(),
+        request.target.clone(),
+        request.input,
+    )
+    .with_authenticated_user();
+    if let Some(session_id) = request.session_id {
+        run = run.with_session_id(session_id);
+    }
+    let mut spec = ProcessSpec::new(request.kind.unwrap_or(ProcessKind::Interactive));
+    if let Some(parent) = request.parent {
+        spec = spec.with_parent(parent);
+    }
+    if let Some(wake) = request.wake {
+        spec = spec.with_wake(wake);
+    }
+    for (key, value) in request.labels {
+        spec = spec.with_label(key, value);
+    }
+    let process = backend.spawn(run, spec).await?;
+    let pid = process.meta.pid.clone();
+    let extra = [("pid", json!(pid))];
+    if let Err(error) =
+        record(backend.as_ref(), &caller, "spawn", Some(&request.target), &extra).await
+    {
+        // A process nobody recorded starting does not run.
+        if let Err(cancel) = backend.kill(&pid, "its control record could not be written").await {
+            tracing::error!(process.pid = %pid, error = %cancel, "could not cancel an unrecorded process");
+        }
+        return Err(error);
+    }
+    Ok(Json(ProcessResponse { process }))
+}
+
+async fn kill(
+    State(backend): Backend,
+    caller: Caller,
+    UrlPath(pid): UrlPath<String>,
+    Json(request): Json<KillRequest>,
+) -> Result<Json<ProcessResponse>> {
+    caller.require_operator("kill")?;
+    record(backend.as_ref(), &caller, "kill", Some(&pid), &[]).await?;
+    let reason = request.reason.unwrap_or_else(|| {
+        format!("killed by {} over the kernel control plane", caller.context.user_id)
+    });
+    backend.kill(&pid, &reason).await?;
+    after_action(backend.as_ref(), &pid).await
+}
+
+async fn nice(
+    State(backend): Backend,
+    caller: Caller,
+    UrlPath(pid): UrlPath<String>,
+    Json(request): Json<NiceRequest>,
+) -> Result<Json<ProcessResponse>> {
+    caller.require_operator("nice")?;
+    record(backend.as_ref(), &caller, "nice", Some(&pid), &[]).await?;
+    // The run store has no queue change, so the moved process has a new pid.
+    let process = backend.nice(&pid, request.queue).await?;
+    Ok(Json(ProcessResponse { process }))
+}
+
+async fn suspend(
+    State(backend): Backend,
+    caller: Caller,
+    UrlPath(pid): UrlPath<String>,
+) -> Result<Json<ProcessResponse>> {
+    caller.require_operator("suspend")?;
+    record(backend.as_ref(), &caller, "suspend", Some(&pid), &[]).await?;
+    backend.suspend(&pid).await?;
+    after_action(backend.as_ref(), &pid).await
+}
+
+async fn resume(
+    State(backend): Backend,
+    caller: Caller,
+    UrlPath(pid): UrlPath<String>,
+) -> Result<Json<ProcessResponse>> {
+    caller.require_operator("resume")?;
+    record(backend.as_ref(), &caller, "resume", Some(&pid), &[]).await?;
+    backend.resume(&pid).await?;
+    after_action(backend.as_ref(), &pid).await
+}
+
+async fn events(
+    State(backend): Backend,
+    caller: Caller,
+    headers: HeaderMap,
+    Query(query): Query<EventsQuery>,
+) -> Result<Response> {
+    // A reconnecting `EventSource` sends the last id it saw; it wins over the query.
+    let after = headers
+        .get("last-event-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .or(query.after);
+    let subscriber = backend.events(after).await?;
+    // A paired device's stream ends when the device is revoked or its pairing ends (spec 3.3
+    // S-I7): its access ends at once, not at its next request.
+    let device_ends = match (backend.pairing(), caller.device()) {
+        (Some(pairing), Some(device)) => pairing.until_device_ends(device.to_string()).boxed(),
+        _ => futures::future::pending().boxed(),
+    };
+    let stream = subscriber.into_stream().take_until(device_ends).map(|record| {
+        let event = SseEvent::default().id(record.cursor.to_string()).event(record.event.name());
+        Ok::<_, std::convert::Infallible>(event.json_data(&record).unwrap_or_else(|error| {
+            tracing::warn!(error = %error, "kernel event could not be encoded");
+            SseEvent::default().comment("an event could not be encoded")
+        }))
+    });
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()).into_response())
+}
+
+async fn attach(
+    State(backend): Backend,
+    caller: Caller,
+    UrlPath(session_id): UrlPath<String>,
+    Json(request): Json<AttachRequest>,
+) -> Result<Json<AttachResponse>> {
+    // A surface attaches to its caller's own sessions; the owner checks of `/api/runs` apply.
+    let user_id = match request.user_id {
+        Some(user) if user != caller.context.user_id => {
+            return Err(KernelError::Unauthorized {
+                reason: format!(
+                    "{} cannot attach to a session of {user}: a surface attaches to its \
+                     caller's own sessions",
+                    caller.context.user_id
+                ),
+            });
+        }
+        Some(user) => user,
+        None => caller.context.user_id.clone(),
+    };
+    record(backend.as_ref(), &caller, "attach", Some(&session_id), &[]).await?;
+    let sessions = backend.sessions().ok_or_else(|| KernelError::Config {
+        reason: "attach reads the kernel's sessions: build the kernel with \
+                 KernelBuilder::session_service"
+            .into(),
+    })?;
+    let session = sessions
+        .get(GetRequest {
+            app_name: backend.app_name().to_string(),
+            user_id: user_id.clone(),
+            session_id: session_id.clone(),
+            num_recent_events: None,
+            after: None,
+        })
+        .await?;
+    let events = session.events().all();
+    let pending = pending_holds(&events);
+    let transcript: Vec<Event> = events
+        .into_iter()
+        .filter(|event| request.after.is_none_or(|after| event.timestamp > after))
+        .collect();
+    let cursor = transcript.last().map(|event| event.timestamp).or(request.after);
+    let process = session_process(backend.as_ref(), &user_id, &session_id).await?;
+    Ok(Json(AttachResponse { session_id, transcript, cursor, pending, process }))
+}
+
+/// The calls `events` hold for a decision, for every agent that held one.
+fn pending_holds(events: &[Event]) -> Vec<ToolConfirmationRequest> {
+    let mut holders: Vec<(&str, &str)> = Vec::new();
+    for event in events.iter().filter(|event| event.actions.tool_confirmation.is_some()) {
+        let holder = (event.author.as_str(), event.branch.as_str());
+        if !holders.contains(&holder) {
+            holders.push(holder);
+        }
+    }
+    holders
+        .into_iter()
+        .flat_map(|(author, branch)| held_tool_calls(events, author, branch))
+        .map(|held| held.request)
+        .collect()
+}
+
+/// The unfinished process continuing `session_id`, the latest when several are.
+async fn session_process(
+    backend: &dyn ControlBackend,
+    user_id: &str,
+    session_id: &str,
+) -> Result<Option<Process>> {
+    let runs = backend
+        .run_store()
+        .list(
+            RunFilter::default()
+                .app_name(backend.app_name())
+                .user_id(user_id)
+                .session_id(session_id),
+        )
+        .await?;
+    match runs.into_iter().filter(|run| !run.state.is_terminal()).max_by_key(|run| run.updated_at) {
+        Some(run) => backend.process(&run.run_id).await,
+        None => Ok(None),
+    }
+}
+
+async fn freeze(
+    State(backend): Backend,
+    caller: Caller,
+    Json(request): Json<FreezeRequest>,
+) -> Result<Json<FreezeResponse>> {
+    caller.require_operator("freeze")?;
+    // The kill switch takes effect even when its control record cannot be written; the
+    // answer says the record is missing.
+    let audit_error = match record(backend.as_ref(), &caller, "freeze", None, &[]).await {
+        Ok(()) => None,
+        Err(error) => {
+            tracing::warn!(error = %error, "the freeze's control record failed; freezing regardless");
+            Some(error.to_string())
+        }
+    };
+    let reason = request.reason.unwrap_or_else(|| {
+        format!("frozen by {} over the kernel control plane", caller.context.user_id)
+    });
+    let parked = backend.freeze(&reason, caller.actor()).await?;
+    let governance = backend.governance();
+    Ok(Json(FreezeResponse {
+        frozen: governance.is_frozen(),
+        reason: governance.reason(),
+        parked_runs: Some(parked),
+        audit_error,
+    }))
+}
+
+async fn unfreeze(State(backend): Backend, caller: Caller) -> Result<Json<FreezeResponse>> {
+    caller.require_operator("unfreeze")?;
+    // Resuming happens only in the web home, whose engine resumes in the kernel's process,
+    // or on a paired local terminal, the kernel's socket or pipe (spec 3.3 S-I10).
+    if caller.transport == ControlTransport::Http {
+        return Err(KernelError::Core(AdkError::new(
+            ErrorComponent::Server,
+            ErrorCategory::Forbidden,
+            RESUME_NOT_HERE_CODE,
+            "resume all in the web home or on the kernel's own terminal: over HTTP the kernel \
+             cannot tell either from another client holding the operator credential",
+        )));
+    }
+    record(backend.as_ref(), &caller, "unfreeze", None, &[]).await?;
+    backend.unfreeze(caller.actor()).await?;
+    let governance = backend.governance();
+    Ok(Json(FreezeResponse {
+        frozen: governance.is_frozen(),
+        reason: governance.reason(),
+        parked_runs: None,
+        audit_error: None,
+    }))
+}
+
+/// The agenda of `backend`, or a `Config` error naming why there is none.
+fn agenda_of(backend: &dyn ControlBackend) -> Result<Agenda> {
+    backend.agenda().ok_or_else(|| KernelError::Config {
+        reason: "this control plane serves no agenda; the agenda routes need a kernel".into(),
+    })
+}
+
+async fn agenda(
+    State(backend): Backend,
+    _caller: Caller,
+    Query(query): Query<AgendaQuery>,
+) -> Result<Json<AgendaResponse>> {
+    let agenda = agenda_of(backend.as_ref())?;
+    if !query.newest_first && query.after.is_none() {
+        return Ok(Json(AgendaResponse { items: agenda.list(&query.to_filter()).await? }));
+    }
+    // Every store lists oldest first: the order and the page are made here (spec 3.3 §5.1).
+    let all = AgendaQuery { limit: None, ..query.clone() };
+    let mut items = agenda.list(&all.to_filter()).await?;
+    let key = |item: &AgendaItem| (item.created_at, item.id.clone());
+    items.sort_by_key(key);
+    if query.newest_first {
+        items.reverse();
+    }
+    if let Some(after) = &query.after {
+        // The anchor may have left the state asked for since: its place still holds.
+        let anchor = match items.iter().find(|item| item.id == *after) {
+            Some(item) => key(item),
+            None => key(&agenda
+                .get(after)
+                .await?
+                .ok_or_else(|| KernelError::AgendaNotFound { item: after.clone() })?),
+        };
+        items.retain(|item| match query.newest_first {
+            true => key(item) < anchor,
+            false => key(item) > anchor,
+        });
+    }
+    if let Some(limit) = query.limit {
+        items.truncate(limit);
+    }
+    Ok(Json(AgendaResponse { items }))
+}
+
+async fn agenda_approve(
+    State(backend): Backend,
+    caller: Caller,
+    UrlPath(id): UrlPath<String>,
+) -> Result<Json<AgendaItemResponse>> {
+    caller.require_operator("approve an agenda item")?;
+    let agenda = agenda_of(backend.as_ref())?;
+    record(backend.as_ref(), &caller, "agenda.approve", Some(&id), &[]).await?;
+    let item = agenda.approve(&id, &caller.subject()).await?;
+    Ok(Json(AgendaItemResponse { item }))
+}
+
+async fn agenda_reject(
+    State(backend): Backend,
+    caller: Caller,
+    UrlPath(id): UrlPath<String>,
+    Json(request): Json<RejectRequest>,
+) -> Result<Json<AgendaItemResponse>> {
+    caller.require_operator("reject an agenda item")?;
+    let agenda = agenda_of(backend.as_ref())?;
+    record(backend.as_ref(), &caller, "agenda.reject", Some(&id), &[]).await?;
+    let item = agenda.reject(&id, &caller.subject(), request.reason.as_deref()).await?;
+    Ok(Json(AgendaItemResponse { item }))
+}
+
+async fn agenda_schedule(
+    State(backend): Backend,
+    caller: Caller,
+    UrlPath(id): UrlPath<String>,
+    Json(request): Json<ScheduleRequest>,
+) -> Result<Json<AgendaItemResponse>> {
+    caller.require_operator("schedule an agenda item")?;
+    let agenda = agenda_of(backend.as_ref())?;
+    record(
+        backend.as_ref(),
+        &caller,
+        "agenda.schedule",
+        Some(&id),
+        &[("wake", json!(request.wake))],
+    )
+    .await?;
+    let item = agenda.schedule(&id, request.wake, &caller.subject()).await?;
+    Ok(Json(AgendaItemResponse { item }))
+}
+
+/// The driver routes (spec 3.2 §7.7, §7.11): listing for any authenticated caller, every
+/// change for the `operator` scope, each recorded as `kernel.control` with its subject.
+#[cfg(feature = "drivers")]
+mod drivers {
+    use axum::Json;
+    use axum::extract::{Path as UrlPath, State};
+    use serde_json::json;
+
+    use super::{Backend, Caller, record};
+    use crate::control::api::{
+        DriverResponse, DriversResponse, MountDriverRequest, MountDriverResponse,
+        UnmountDriverResponse,
+    };
+    use crate::drivers::{DriverManifest, DriverProposal, DriverSupervisor, DriverView};
+    use crate::error::{KernelError, Result};
+
+    fn supervisor(backend: &dyn super::ControlBackend) -> Result<DriverSupervisor> {
+        backend.drivers().ok_or_else(|| KernelError::Config {
+            reason: "this kernel supervises no drivers; build it with KernelBuilder::drivers"
+                .into(),
+        })
+    }
+
+    async fn view(drivers: &DriverSupervisor, id: &str) -> Result<DriverView> {
+        drivers
+            .drivers()
+            .await?
+            .into_iter()
+            .find(|view| view.record.id() == id)
+            .ok_or_else(|| crate::drivers::not_mounted(id))
+    }
+
+    pub(super) async fn list(
+        State(backend): Backend,
+        _caller: Caller,
+    ) -> Result<Json<DriversResponse>> {
+        let drivers = supervisor(backend.as_ref())?;
+        Ok(Json(DriversResponse { drivers: drivers.drivers().await? }))
+    }
+
+    pub(super) async fn mount(
+        State(backend): Backend,
+        caller: Caller,
+        UrlPath(id): UrlPath<String>,
+        Json(request): Json<MountDriverRequest>,
+    ) -> Result<Json<MountDriverResponse>> {
+        caller.require_operator("mount a driver")?;
+        let drivers = supervisor(backend.as_ref())?;
+        let manifest = DriverManifest::from_toml(&request.manifest)?;
+        if manifest.id != id {
+            return Err(KernelError::Config {
+                reason: format!("the manifest declares driver `{}`, not `{id}`", manifest.id),
+            });
+        }
+        let proposal = DriverProposal::of(&manifest);
+        if !request.confirm {
+            return Ok(Json(MountDriverResponse { proposal, mounted: None }));
+        }
+        let extra = [("commandDigest", json!(proposal.command_digest))];
+        record(backend.as_ref(), &caller, "drivers.mount", Some(&id), &extra).await?;
+        drivers.mount(manifest, &caller.subject().id).await?;
+        let mounted = view(&drivers, &id).await?;
+        Ok(Json(MountDriverResponse { proposal, mounted: Some(mounted) }))
+    }
+
+    pub(super) async fn unmount(
+        State(backend): Backend,
+        caller: Caller,
+        UrlPath(id): UrlPath<String>,
+    ) -> Result<Json<UnmountDriverResponse>> {
+        caller.require_operator("unmount a driver")?;
+        let drivers = supervisor(backend.as_ref())?;
+        record(backend.as_ref(), &caller, "drivers.unmount", Some(&id), &[]).await?;
+        let unmounted = drivers.unmount(&id, &caller.subject().id).await?;
+        Ok(Json(UnmountDriverResponse { unmounted }))
+    }
+
+    pub(super) async fn restart(
+        State(backend): Backend,
+        caller: Caller,
+        UrlPath(id): UrlPath<String>,
+    ) -> Result<Json<DriverResponse>> {
+        caller.require_operator("restart a driver")?;
+        let drivers = supervisor(backend.as_ref())?;
+        record(backend.as_ref(), &caller, "drivers.restart", Some(&id), &[]).await?;
+        drivers.restart(&id).await?;
+        Ok(Json(DriverResponse { driver: view(&drivers, &id).await? }))
+    }
+
+    pub(super) async fn reapprove(
+        State(backend): Backend,
+        caller: Caller,
+        UrlPath(id): UrlPath<String>,
+    ) -> Result<Json<DriverResponse>> {
+        caller.require_operator("re-approve a driver")?;
+        let drivers = supervisor(backend.as_ref())?;
+        record(backend.as_ref(), &caller, "drivers.reapprove", Some(&id), &[]).await?;
+        drivers.reapprove(&id, &caller.subject().id).await?;
+        Ok(Json(DriverResponse { driver: view(&drivers, &id).await? }))
+    }
+}
+
+/// The ledger of `backend`, or a `Config` error naming why there is none.
+#[cfg(feature = "proc")]
+fn ledger_of(backend: &dyn ControlBackend) -> Result<crate::proc::Ledger> {
+    backend.ledger().ok_or_else(|| KernelError::Config {
+        reason: "this kernel keeps no activity ledger: build it with KernelBuilder::ledger, as \
+                 `adk-rust up` does"
+            .into(),
+    })
+}
+
+/// `GET /kernel/proc/ledger` (spec 3.2 §7.10): a page of rows as JSON, or as JSONL with the
+/// next cursor in `x-ledger-next`. Operator only, and recorded: the ledger leaves the host
+/// only through here; "While you were away" serves only the rows of its lines.
+#[cfg(feature = "proc")]
+async fn proc_ledger(
+    State(backend): Backend,
+    caller: Caller,
+    Query(params): Query<super::api::LedgerParams>,
+) -> Result<Response> {
+    use super::api::{LedgerFormat, LedgerResponse};
+
+    caller.require_operator("read the activity ledger")?;
+    let ledger = ledger_of(backend.as_ref())?;
+    let format = params.format.unwrap_or_default();
+    record(backend.as_ref(), &caller, "proc.ledger", None, &[("format", json!(format))]).await?;
+    let query = params.to_query();
+    let entries = ledger.store().list(&query).await?;
+    let next = match query.limit {
+        Some(limit) if entries.len() >= limit => entries.last().map(|entry| entry.seq),
+        _ => None,
+    };
+    match format {
+        LedgerFormat::Json => Ok(Json(LedgerResponse { entries, next }).into_response()),
+        LedgerFormat::Jsonl => {
+            let mut body = String::new();
+            for entry in &entries {
+                body.push_str(&entry.to_jsonl()?);
+                body.push('\n');
+            }
+            let mut response = ([("content-type", "application/x-ndjson")], body).into_response();
+            if let Some(next) = next
+                && let Ok(value) = axum::http::HeaderValue::from_str(&next.to_string())
+            {
+                response.headers_mut().insert("x-ledger-next", value);
+            }
+            Ok(response)
+        }
+    }
+}
+
+/// `GET /kernel/proc/baselines` (spec 3.2 §7.10): each partition's last pass.
+#[cfg(feature = "proc")]
+async fn proc_baselines(
+    State(backend): Backend,
+    caller: Caller,
+) -> Result<Json<super::api::BaselinesResponse>> {
+    caller.require_operator("read the baselines")?;
+    let partitions = ledger_of(backend.as_ref())?.store().pass_states().await?;
+    Ok(Json(super::api::BaselinesResponse { partitions }))
+}
+
+/// `GET /kernel/proc/observations` (spec 3.2 §7.10): the observations offered, newest first.
+#[cfg(feature = "proc")]
+async fn proc_observations(
+    State(backend): Backend,
+    caller: Caller,
+    Query(params): Query<super::api::ObservationsParams>,
+) -> Result<Json<super::api::ObservationsResponse>> {
+    caller.require_operator("read the observations")?;
+    let observations =
+        ledger_of(backend.as_ref())?.store().observations(&params.to_query()).await?;
+    Ok(Json(super::api::ObservationsResponse { observations }))
+}
+
+async fn partitions(State(backend): Backend, _caller: Caller) -> Result<Json<PartitionsResponse>> {
+    Ok(Json(PartitionsResponse { partitions: backend.partitions().await? }))
+}
+
+async fn put_partition(
+    State(backend): Backend,
+    caller: Caller,
+    Json(partition): Json<Partition>,
+) -> Result<Json<PartitionResponse>> {
+    caller.require_operator("change partitions")?;
+    record(backend.as_ref(), &caller, "partition.put", Some(partition.id.as_str()), &[]).await?;
+    let partition = backend.put_partition(partition, caller.actor()).await?;
+    Ok(Json(PartitionResponse { partition }))
+}
+
+async fn set_partition_mode(
+    State(backend): Backend,
+    caller: Caller,
+    UrlPath(id): UrlPath<String>,
+    Json(request): Json<PartitionModeRequest>,
+) -> Result<Json<PartitionResponse>> {
+    caller.require_operator("change partitions")?;
+    record(backend.as_ref(), &caller, "partition.mode", Some(&id), &[]).await?;
+    let partition =
+        backend.set_partition_mode(PartitionId::new(id), request.mode, caller.actor()).await?;
+    Ok(Json(PartitionResponse { partition }))
+}

@@ -4,260 +4,327 @@ Core traits and types for ADK-Rust agents, tools, sessions, and events.
 
 [![Crates.io](https://img.shields.io/crates/v/adk-core.svg)](https://crates.io/crates/adk-core)
 [![Documentation](https://docs.rs/adk-core/badge.svg)](https://docs.rs/adk-core)
-[![License](https://img.shields.io/crates/l/adk-core.svg)](LICENSE)
+[![License](https://img.shields.io/crates/l/adk-core.svg)](../LICENSE)
 
 ## Overview
 
-`adk-core` provides the foundational abstractions for [ADK-Rust](https://github.com/zavora-ai/adk-rust). It defines the core traits and types that all other ADK crates build upon:
+`adk-core` provides the foundational abstractions for [ADK-Rust](https://github.com/zavora-ai/adk-rust). Every other ADK crate builds on the traits and types it defines:
 
-- **Agent trait** - The fundamental abstraction for all agents
-- **Tool / Toolset traits** - For extending agents with custom capabilities
-- **Llm trait** - For LLM provider integrations
-- **SchemaAdapter trait** - Provider-aware JSON Schema normalization for MCP tools
-- **Context hierarchy** - ReadonlyContext → CallbackContext → ToolContext/InvocationContext
-- **Content / Part** - Message content structures
-- **Event system** - For streaming agent responses
-- **Session / State** - For managing conversation context
-- **Error types** - Unified error handling
+- **`Agent`** — the abstraction every agent implements
+- **`Tool` / `Toolset`** — capabilities an agent can call
+- **`Llm`** — the interface every model provider implements
+- **`SchemaAdapter`** — provider-aware JSON Schema normalization for tool declarations
+- **Context hierarchy** — `ReadonlyContext` → `CallbackContext` → `ToolContext` / `InvocationContext`
+- **`Content` / `Part`** — message content
+- **`Event` / `EventActions`** — the event stream an agent produces
+- **`Session` / `State`** — conversation context
+- **`AdkError`** — the structured error envelope
+- **Governance** — `ToolPolicy`, `authorize_tool_call`, `GovernanceControl`, approvals, run budgets, and the spend ledger
+- **Durable runtime contracts** — `LeaseStore`, `DurableRunStore`, `ScheduleStore`, `GovernanceStateStore`, `ActionLedger`, `ApprovalStore`, `SpendLedger`, `AuditLogStore`
 
-This crate is model-agnostic and contains no LLM-specific code.
+The crate contains no model provider client.
 
 ## Installation
 
 ```toml
 [dependencies]
-adk-core = "2.1.0"
+adk-core = "3.0.0"
 ```
 
-Or use the meta-crate:
+Or use the umbrella crate:
 
 ```toml
 [dependencies]
-adk-rust = "2.1.0"
+adk-rust = "3.0.0"
 ```
+
+## Feature Flags
+
+No feature is enabled by default.
+
+| Feature | Enables |
+|---------|---------|
+| `rustls` | `ensure_crypto_provider()` installs the `aws-lc-rs` rustls provider process-wide |
+| `conformance` | The `conformance` module: the `*_conformance_tests!` suites for durable store backends |
+| `cron` | Cron schedules in IANA time zones for `ScheduleStore` and `schedule::plan_fires` |
+| `webhooks` | The `webhook` module: Standard Webhooks signing, verification, and replay protection |
+| `egress-dns` | `egress::SystemResolver`: the operating system resolver for egress checks |
+| `egress-client` | `egress::GuardedClient` and `egress::EgressResolver`: HTTP clients that enforce an `EgressPolicy` (implies `egress-dns`) |
+| `webhook-delivery` | The `webhook_delivery` module: signed outbound webhook delivery (implies `webhooks`, `egress-client`) |
 
 ## Core Traits
 
 ### Agent
 
-```rust
-#[async_trait]
-pub trait Agent: Send + Sync {
-    fn name(&self) -> &str;
-    fn description(&self) -> &str;
-    fn sub_agents(&self) -> &[Arc<dyn Agent>];
-    async fn run(&self, ctx: Arc<dyn InvocationContext>) -> Result<EventStream>;
-}
-```
+| Method | Default | Purpose |
+|--------|---------|---------|
+| `name()` | required | Unique name within the agent tree |
+| `description()` | required | Returns `&str`; shown to models that route between agents |
+| `sub_agents()` | required | Child agents; return `&[]` for a leaf agent |
+| `run(ctx)` | required | Returns `Result<EventStream>` |
+| `allows_transfer_to_parent()` / `allows_transfer_to_peers()` | `true` | Transfer restrictions the runner enforces for every transfer |
+| `screen_user_input(content)` | no screening | Input guardrails the runner applies before it saves a user message |
+| `close()` | closes each sub-agent | Releases what the agent holds; `Runner::close` calls it |
+
+`EventStream` is `Pin<Box<dyn Stream<Item = Result<Event>> + Send>>`.
 
 ### Tool
 
 ```rust
+use std::sync::Arc;
+
+use adk_core::{Result, Tool, ToolContext, ToolEffect};
+use async_trait::async_trait;
+use serde_json::{Value, json};
+
+struct GetWeather;
+
 #[async_trait]
-pub trait Tool: Send + Sync {
-    fn name(&self) -> &str;
-    fn description(&self) -> &str;
-    fn parameters_schema(&self) -> Option<Value>;
-    fn is_long_running(&self) -> bool;
-    fn is_read_only(&self) -> bool;           // default: false
-    fn is_concurrency_safe(&self) -> bool;    // default: false
-    async fn execute(&self, ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value>;
+impl Tool for GetWeather {
+    fn name(&self) -> &str {
+        "get_weather"
+    }
+
+    fn description(&self) -> &str {
+        "Returns the weather for a city"
+    }
+
+    fn parameters_schema(&self) -> Option<Value> {
+        Some(json!({
+            "type": "object",
+            "properties": { "city": { "type": "string" } },
+            "required": ["city"]
+        }))
+    }
+
+    fn effect(&self) -> ToolEffect {
+        ToolEffect::ReadOnly
+    }
+
+    async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
+        Ok(json!({ "city": args["city"], "forecast": "sunny" }))
+    }
 }
 ```
 
-`ToolExecutionStrategy::Auto` includes a call in its concurrent subset only when the selected tool returns `true` from both `is_read_only()` and `is_concurrency_safe()`. It runs that safe subset first, then executes the remaining calls sequentially. Both methods default to `false`, so existing implementations remain sequential.
+| Method | Default | Purpose |
+|--------|---------|---------|
+| `parameters_schema()` / `response_schema()` | `None` | JSON Schemas sent to the model |
+| `is_long_running()` | `false` | The call returns before its work completes |
+| `is_read_only()` | `false` | The call has no side effects |
+| `is_concurrency_safe()` | `false` | The call can run beside other calls |
+| `is_agent_delegation()` | `false` | The tool delegates to another agent |
+| `effect()` | `ReadOnly` when `is_read_only()`, else `NonIdempotent` | Governs retries, the action ledger, and `DeclarativePolicy` effect rules |
+| `timeout_override()` | `None` (the agent's tool timeout) | `Some(None)` removes the timeout; `Some(Some(d))` sets one |
+| `origin()` | `STATIC_TOOL_ORIGIN` (`"static"`) | Where the tool came from; MCP tools report `mcp:{toolset name}` |
+| `annotations()` | `None` | Behaviour annotations the tool's publisher declared |
+| `required_scopes()` | `&[]` | Scopes the caller must hold |
+
+Only `ReadOnly` and `Idempotent` tools are retried, and only after a retryable error or a timeout. With an `ActionLedger` on `RunConfig::action_ledger` (`InMemoryActionLedger` here, `SqliteActionLedger` and the other backends in `adk-session`), a `NonIdempotent` call executes at most once per `ToolContext::idempotency_key()`; a replay of a call that never recorded an outcome is answered with `outcome_unknown_response()` instead of executing again.
+
+An answer an agent writes in place of a tool's result — a refusal, a hold, a failure, a withheld result, an unknown outcome, a ledger replay — carries a `ToolResultStatus` (`refused`, `not_run`, `held`, `failed`, `outcome_unknown`, `withheld`, `succeeded`) in the function response's annotations, read with `Part::tool_result_status()`, beside the code and category of the error behind it. The payload the model reads is unchanged.
+
+`ToolExecutionStrategy::Auto` keeps the LLM-returned order and overlaps a call with its adjacent neighbours only when the selected tool returns `true` from both `is_read_only()` and `is_concurrency_safe()`. Every other call runs alone, in its place: it starts after the calls listed before it finish, and the calls listed after it wait for it. The guarantee is ordering only — a write that is held for confirmation, refused, skipped or failed has changed nothing when the next call runs.
+
+`ensure_unique_tool_names` fails with `agent.duplicate_tool_name` (`DUPLICATE_TOOL_NAME_CODE`) when two tools share a name; `LlmAgentBuilder::build` and the other agent builders run the same check.
 
 ### Toolset
 
 ```rust
+use std::sync::Arc;
+
+use adk_core::{ReadonlyContext, Result, Tool, Toolset};
+use async_trait::async_trait;
+
+struct WeatherTools {
+    tools: Vec<Arc<dyn Tool>>,
+}
+
 #[async_trait]
-pub trait Toolset: Send + Sync {
-    fn name(&self) -> &str;
-    async fn tools(&self, ctx: Arc<dyn ReadonlyContext>) -> Result<Vec<Arc<dyn Tool>>>;
+impl Toolset for WeatherTools {
+    fn name(&self) -> &str {
+        "weather"
+    }
+
+    async fn tools(&self, _ctx: Arc<dyn ReadonlyContext>) -> Result<Vec<Arc<dyn Tool>>> {
+        Ok(self.tools.clone())
+    }
 }
 ```
+
+`process_llm_request` adds toolset-specific guidance to each model request, and `close` releases connections or subprocesses; both default to doing nothing.
 
 ### Llm
 
-```rust
-#[async_trait]
-pub trait Llm: Send + Sync {
-    fn name(&self) -> &str;
-    async fn generate_content(&self, request: LlmRequest, stream: bool) -> Result<LlmResponseStream>;
-    fn schema_adapter(&self) -> &dyn SchemaAdapter; // default: GenericSchemaAdapter
-}
-```
+| Method | Default | Purpose |
+|--------|---------|---------|
+| `name()` | required | Model identifier |
+| `generate_content(request, stream)` | required | Returns `Result<LlmResponseStream>` |
+| `schema_adapter()` | `GenericSchemaAdapter` | Provider-specific schema normalization |
+| `max_cost_micro_usd(request)` | `None` | Upper bound on the request's cost; a spend cap refuses a model that returns `None` |
+
+Wrappers around another `Llm` forward `max_cost_micro_usd`.
 
 ### SchemaAdapter
 
-```rust
-pub trait SchemaAdapter: Send + Sync + Debug {
-    fn normalize_schema(&self, schema: Value) -> Value;
-    fn normalize_tool_name<'a>(&self, name: &'a str) -> Cow<'a, str>;
-    fn empty_schema(&self) -> Value;
-}
-```
-
-Provider-specific schema normalization for MCP tools. Each `Llm` implementation returns its adapter via `schema_adapter()`. See `GenericSchemaAdapter` for the default implementation.
+`normalize_schema` (required), `normalize_tool_name`, `empty_schema`, and `parameters_field` adapt tool declarations to a provider's schema dialect. Each `Llm` returns its adapter from `schema_adapter()`; `GenericSchemaAdapter` is the default.
 
 ## Key Types
 
-### Content & Part
+### Content and Part
 
 ```rust
-// Message content with role and parts
-let content = Content::new("user")
-    .with_text("Hello!")
-    .with_inline_data("image/png", image_bytes)
-    .with_file_uri("image/jpeg", "https://example.com/image.jpg");
+use adk_core::Content;
 
-// Part variants
-enum Part {
-    Text { text: String },
-    InlineData { mime_type: String, data: Vec<u8>, uri: Option<String>, annotations: Option<Value> },
-    FileData { mime_type: String, file_uri: String, annotations: Option<Value> },
-    FunctionCall { name: String, args: Value, id: Option<String> },
-    FunctionResponse { function_response: FunctionResponseData, id: Option<String>, annotations: Option<Value> },
+fn message(image_bytes: Vec<u8>) -> Content {
+    Content::new("user")
+        .with_text("Hello!")
+        .with_inline_data("image/png", image_bytes)
+        .with_file_uri("image/jpeg", "https://example.com/image.jpg")
 }
 ```
 
+`Part` variants: `Text`, `Thinking`, `InlineData`, `FileData`, `FunctionCall`, `FunctionResponse`, `ServerToolCall`, `ServerToolResponse`, and `EmbeddedResource`. `Content::with_inline_data()` and `Part::inline_data()` panic above 10 MB (`MAX_INLINE_DATA_SIZE`).
+
 ### Multimodal Function Responses
 
-Tools can return images, audio, or file references alongside JSON:
+A tool returns images, audio, or file references alongside JSON:
 
 ```rust
-// Tool returns JSON with inline_data — framework extracts automatically
-Ok(json!({
-    "response": { "title": "Q4 Chart" },
-    "inline_data": [{ "mime_type": "image/png", "data": png_bytes }]
-}))
+use adk_core::{FileDataPart, FunctionResponseData, InlineDataPart};
+use serde_json::{Value, json};
 
-// Direct construction
-let frd = FunctionResponseData::with_inline_data(
-    "chart_tool",
-    json!({"title": "Q4 Chart"}),
-    vec![InlineDataPart {
-        mime_type: "image/png".into(),
-        data: png_bytes,
-        uri: None,
-        annotations: None,
-    }],
-);
+// A tool result with `inline_data` or `file_data` arrays is split into parts
+// by `FunctionResponseData::from_tool_result`.
+fn chart_result(png_bytes: Vec<u8>) -> Value {
+    json!({
+        "response": { "title": "Q4 Chart" },
+        "inline_data": [{ "mime_type": "image/png", "data": png_bytes }]
+    })
+}
 
-// File references (URIs to external files)
-let frd = FunctionResponseData::with_file_data(
-    "doc_tool",
-    json!({"status": "ok"}),
-    vec![FileDataPart {
-        mime_type: "application/pdf".into(),
-        file_uri: "gs://bucket/report.pdf".into(),
-        annotations: None,
-    }],
-);
+fn direct(png_bytes: Vec<u8>) -> (FunctionResponseData, FunctionResponseData) {
+    let image = FunctionResponseData::with_inline_data(
+        "chart_tool",
+        json!({ "title": "Q4 Chart" }),
+        vec![InlineDataPart {
+            mime_type: "image/png".into(),
+            data: png_bytes,
+            uri: None,
+            annotations: None,
+        }],
+    );
+    let file = FunctionResponseData::with_file_data(
+        "doc_tool",
+        json!({ "status": "ok" }),
+        vec![FileDataPart {
+            mime_type: "application/pdf".into(),
+            file_uri: "gs://bucket/report.pdf".into(),
+            annotations: None,
+        }],
+    );
+    (image, file)
+}
 ```
 
 ### Event
 
 ```rust
-// Events stream from agent execution
-let event = Event::new("invocation_123");
-event.content()  // Access response content
-event.actions    // State changes, transfers, escalation
+use adk_core::Event;
 
-// Provider-specific metadata (replaces GCP-specific fields)
-event.provider_metadata  // HashMap<String, String>
+fn inspect(event: &Event) {
+    let _content = event.content(); // Option<&Content>
+    let _actions = &event.actions; // state changes, transfers, escalation
+    let _metadata = &event.provider_metadata; // HashMap<String, String>
+}
 ```
 
-#### First-class tool events
+#### Complete Response Snapshots
 
-Events expose typed, render-ready views of tool activity, so UIs consume tool
-calls and results generically without matching `Part` internals:
+Terminal events marked with `llm_response.provider_metadata.content_complete` contain the complete response for their event ID, including earlier streamed text. Preserve the original event for persistence and replacement-aware UIs. Append-only output can use one `EventTextDeltas` adapter per live stream:
 
 ```rust
-for call in event.tool_calls() {       // Vec<ToolCallView>
-    println!("→ {} {}", call.name, call.args);
-}
-for result in event.tool_results() {   // Vec<ToolResultView>
-    println!("✓ {} {}", result.name, result.response);
+use adk_core::{EventStream, EventTextDeltas, Result};
+use futures::StreamExt;
+
+async fn render(mut stream: EventStream) -> Result<()> {
+    let mut deltas = EventTextDeltas::default();
+    while let Some(event) = stream.next().await {
+        let event = event?;
+        let output = deltas.push(&event);
+        // Render output.content(); persist the original event.
+        let _ = output.content();
+    }
+    Ok(())
 }
 ```
 
-Because a tool's result is an ordinary event, the output of **any** tool —
-streaming or one-shot — is renderable. Use `call_id` to correlate a call with
-its result (and progress chunks).
+The adapter preserves tool parts, thinking signatures, actions, and usage. A non-prefix correction is returned in full because append-only output cannot retract text already rendered.
 
-#### Streaming tool progress
+#### Tool Events
 
-A tool can push intermediate output while still running via
-`ToolContext::emit_progress("stdout", chunk)`. The framework forwards each chunk
-as a partial event on the same `EventStream`; detect them with:
+Events expose typed views of tool activity, so UIs render tool calls and results without matching `Part` internals:
 
 ```rust
-if let Some(stream_name) = event.tool_progress_stream() {  // "stdout" | "stderr" | custom
-    // render a live terminal line
+use adk_core::Event;
+
+fn render_tools(event: &Event) {
+    for call in event.tool_calls() {
+        println!("-> {} {}", call.name, call.args);
+    }
+    for result in event.tool_results() {
+        println!("<- {} {}", result.name, result.response);
+    }
+    if let Some(stream_name) = event.tool_progress_stream() {
+        println!("progress on {stream_name}");
+    }
 }
 ```
 
-The default `emit_progress` is a no-op, so non-streaming tools are unaffected.
+`call_id` correlates a call with its result and its progress chunks. A tool pushes intermediate output with `ToolContext::emit_progress("stdout", chunk)`; the framework forwards each chunk as a partial event on the same `EventStream`. The default `emit_progress` does nothing.
 
 ### EventActions
 
-```rust
-pub struct EventActions {
-    pub state_delta: HashMap<String, Value>,  // State updates
-    pub artifact_delta: HashMap<String, i64>, // Artifact changes
-    pub skip_summarization: bool,
-    pub transfer_to_agent: Option<String>,    // Agent transfer
-    pub escalate: bool,                       // Escalate to parent
-    pub tool_confirmation: Option<ToolConfirmationRequest>,  // Pending tool confirmation
-    pub tool_confirmation_decision: Option<ToolConfirmationDecision>,
-    pub compaction: Option<EventCompaction>,  // Context compaction summary
-}
-```
+| Field | Purpose |
+|-------|---------|
+| `state_delta` | State updates |
+| `artifact_delta` | Artifact versions saved by the event |
+| `skip_summarization` | End the turn on a tool result without another model call |
+| `transfer_to_agent` | Agent transfer |
+| `escalate` | Escalate to the parent |
+| `tool_confirmation` / `tool_confirmation_decision` | A call held for confirmation, and its decision |
+| `compaction` | An `EventCompaction` summary that replaces earlier events |
+| `route` | Target node names for dynamic routing in graph workflows |
+| `input_screened` | The runner screened this user message with input guardrails |
+| `workflow_positions` | Where each workflow agent stopped on a held call |
 
-### EventCompaction
+`EventActions` derives `Default`; struct literals end with `..Default::default()`.
 
-When context compaction is enabled, older events are summarized into a single compacted event:
+### Tool Context Engineering
 
-```rust
-pub struct EventCompaction {
-    pub start_timestamp: DateTime<Utc>,   // Earliest compacted event
-    pub end_timestamp: DateTime<Utc>,     // Latest compacted event
-    pub compacted_content: Content,       // The summary replacing original events
-}
-```
-
-### High-Stakes Tooling & Context Engineering
-
-For production agents, `adk-core` provides types to ensure that an agent's instructions (the cognitive frame) always match its tool capabilities (the physical frame).
-
-#### `ResolvedContext`
-An "atomic unit" containing the final system instruction and the collection of verified, binary `Arc<dyn Tool>` instances. This prevents "Phantom Tool" hallucinations.
-
-#### `ToolRegistry`
-A foundational trait for mapping string-based tool names (from config or skills) to concrete executable tool instances.
-
-#### `ValidationMode`
-Defines how the framework handles cases where a requested tool is missing:
-- **Strict**: Rejects the match/operation if any tool is missing.
-- **Permissive**: Binds available tools, omits missing ones, and logs a warning.
-
----
+| Type | Purpose |
+|------|---------|
+| `ResolvedContext` | A system instruction together with the `Arc<dyn Tool>` instances it describes |
+| `ToolRegistry` | Maps tool names from configuration or skills to tool instances |
+| `ValidationMode` | `Strict` (default) rejects a request that names a missing tool; `Permissive` binds the tools that exist and logs a warning |
 
 ## Context Hierarchy
 
-```
-ReadonlyContext (read-only access)
-    ├── invocation_id, agent_name, user_id, app_name, session_id
-    └── user_content()
+```text
+ReadonlyContext
+    ├── invocation_id(), agent_name(), user_id(), app_name(), session_id(), branch()
+    ├── user_content()
+    └── acting_context()
 
 CallbackContext (extends ReadonlyContext)
-    └── artifacts()
+    ├── artifacts()
+    └── shared_state()
 
 ToolContext (extends CallbackContext)
-    ├── function_call_id()
+    ├── function_call_id(), idempotency_key()
     ├── actions() / set_actions()
-    └── search_memory()
+    ├── search_memory()
+    └── emit_progress()
 
 InvocationContext (extends CallbackContext)
     ├── agent(), memory(), session()
@@ -265,110 +332,264 @@ InvocationContext (extends CallbackContext)
     └── end_invocation() / ended()
 ```
 
-## Security
+Context wrappers forward `acting_context()`; otherwise they report the derived identity.
 
-### Inline Data Size Limit
+## Error Handling
 
-`Content::with_inline_data()` and `Part::inline_data()` enforce a 10 MB limit (`MAX_INLINE_DATA_SIZE`) to prevent oversized payloads.
-
-### State Key Validation
-
-`validate_state_key()` rejects keys that are empty, exceed 256 bytes (`MAX_STATE_KEY_LEN`), contain path separators (`/`, `\`, `..`), or null bytes.
+`AdkError` carries a component, a category, a stable code, a message, a retry hint, and details:
 
 ```rust
-use adk_core::context::validate_state_key;
+use adk_core::{AdkError, ErrorCategory, ErrorComponent};
+
+let err = AdkError::new(
+    ErrorComponent::Model,
+    ErrorCategory::RateLimited,
+    "model.openai.rate_limited",
+    "OpenAI API rate limit exceeded",
+)
+.with_provider("openai")
+.with_upstream_status(429);
+
+assert!(err.is_retryable());
+assert_eq!(err.http_status_code(), 429);
+let _problem = err.to_problem_json();
+let _log_line = err.diagnostics().to_string(); // everything but the message
+```
+
+| Category | HTTP | Retryable by default |
+|----------|------|----------------------|
+| `InvalidInput` | 400 | no |
+| `Unauthorized` | 401 | no |
+| `Forbidden` | 403 | no |
+| `NotFound` | 404 | no |
+| `Timeout` | 408 | yes |
+| `Conflict` | 409 | no |
+| `RateLimited` | 429 | yes |
+| `ResourceExhausted` | 429 | no |
+| `Cancelled` | 499 | no |
+| `Internal` | 500 | no |
+| `Unsupported` | 501 | no |
+| `Unavailable` | 503 | yes |
+
+`ErrorCategory` is not `#[non_exhaustive]`, so exhaustive matches list every category. `upstream_excerpt` and `json_error_summary` keep upstream text and JSON values out of messages and logs.
+
+## Governed Tool Execution
+
+`LlmAgent` and `CodeActAgent` run each tool call through `authorize_tool_call` after plugin and callback rewrites and immediately before `Tool::execute`:
+
+| Step | Type | Effect |
+|------|------|--------|
+| Kill switch | `GovernanceControl` | A frozen run ends with a `governance.frozen` error |
+| Resume binding | `GovernedCall::resuming` | A resumed held call runs only for the agent that held it, on a tool with the `ToolOrigin` it was held for |
+| Policy | `ToolPolicy`, `DeclarativePolicy`, `StrictestPolicy` | Allow, deny, or require approval; `DeclarativePolicy` denies unlisted tools; `evaluate_call` also receives the tool's `ToolOrigin` and the call ID (`PolicyCall`); `StrictestPolicy` applies several policies and keeps the strictest decision |
+| Screen | `ToolCallScreen` | The agent's guardrails; a rewrite is checked against the policy again |
+| Confirmation | `ToolApproval`, `ApprovalStore`, `ToolConfirmationHandler::decide_approval` | A live handler may return edited arguments, checked against the policy again, or a denial message. Decisions bind to the call's fingerprint — acting agent, tool origin and declaration digest, tool name, arguments — so they survive a re-issued call ID and never authorize another agent's call or another server's tool |
+| Approval service | `ApprovalService`, `StoreApprovalService`, `ApprovalPolicy` | An inbox over the approval store: quorum, slots filled by distinct approvers, an approver directory, delegation, escalation, expiry, and edit / reject / respond actions with compare-and-swap decisions |
+
+```rust
+use adk_core::{ArgPredicate, DeclarativePolicy, PolicyDecision, PolicyRule, ToolPolicyRequest};
+use serde_json::json;
+
+let policy = DeclarativePolicy::builder()
+    .allow_read_only()
+    .rule(PolicyRule::allow("transfer").when(ArgPredicate::at_most("/amount", 100.0)))
+    .build();
+
+let request = ToolPolicyRequest::new("transfer", json!({ "amount": 500 }));
+assert!(matches!(policy.decide(&request), PolicyDecision::Deny { .. }));
+```
+
+Build a fingerprint from the request a held call surfaced, or with `ToolConfirmationRequest::for_tool(tool, args).with_acting_context(..)`; `tool_call_fingerprint(name, args)` alone, or a request without an acting agent, matches no call, and `RunConfigBuilder::tool_approval` refuses such a fingerprint (`ToolConfirmationRequest::fingerprint_agent`). `ToolApproval::approve()` and `ToolApproval::deny()` take `with_edited_args`, `with_message`, and an expiry.
+
+Provider-executed built-in tools (Gemini Google Search, OpenAI hosted web search, Anthropic web search, and the others) never reach `authorize_tool_call`. `BuiltinToolGovernor` applies the kill switch, the tool-call budget, and the policy to them before each model request: a denied tool, or one that needs an approval that does not exist yet, is withheld from the request. The uses a provider reports are counted in `UsageMetadata::builtin_tool_uses`, against the run's tool-call budget, and in `UsageMetadata::cost`.
+
+## Agent Identity
+
+Every run has an acting agent. `AgentId`, `AgentPrincipal`, and `ActingContext` (module `principal`) identify it; `ActingConfig` (module `acting`, on `RunConfig::acting`) maps agent names to principals and pins the subject to the session's user. Without configuration an agent acts as `urn:adk:agent:{app}/{agent}`. `IdentitySource`, `StaticIdentitySource`, and `CredentialBroker` (module `credential`) resolve principals and mint audience-bound `ScopedToken`s. `PolicyRule::for_agent`, `for_tenant`, and `for_class` restrict a policy rule to an acting agent.
+
+## Network Egress
+
+`egress::EgressPolicy` is a host, port and CIDR allowlist with a pure `decide()`, intersected by `narrow()` so lower layers only tighten an operator's ceiling; cloud metadata endpoints are always refused and non-public addresses need an explicit CIDR rule or `with_private_networks()`. `egress::classify` is the one address classifier the workspace shares. `egress::GuardedClient` (feature `egress-client`) checks every request URL, every resolved address and every redirect hop, ignores proxy settings, and fails to build rather than fall back to an unguarded client. See [Network Egress Policy](../docs/official_docs/security/egress.md).
+
+## Run Budgets and Spend
+
+`RunBudget` limits model calls, total tokens, cost (micro-USD), wall time, and tool calls; `RunConfig::budget` carries it and `RunConfig::budget_tracker` carries the shared `BudgetTracker`. A violation converts to an `AdkError` with category `ResourceExhausted` and a `budget.*` code.
+
+```rust
+use adk_core::{BudgetTracker, RunBudget};
+
+let tracker = BudgetTracker::new(RunBudget::new().max_tool_calls(2));
+assert!(tracker.begin_tool_calls(2).is_ok());
+assert!(tracker.begin_tool_calls(1).is_err());
+```
+
+`SpendLedger` holds one budget for model calls and payments: `reserve` holds an amount against every `SpendLimits` cap that covers a `SpendKey` (org, agent, vendor; day, month, or lifetime in UTC), `commit` records the actual amount, and `release` drops the hold. Unsettled holds expire after a TTL. `InMemorySpendLedger` is the process-local implementation; `adk-session` provides SQLite, PostgreSQL, Redis, MongoDB, Neo4j, and Firestore ledgers. Set `RunConfig::spend_ledger` to cap a run; a refused reservation fails with `spend.limit_exceeded`. `with_clock` takes a `Clock`; `ManualClock` lets a test cross a day or month boundary.
+
+```rust
+use adk_core::{InMemorySpendLedger, SpendKey, SpendLimits, SpendPeriod};
+
+let ledger = InMemorySpendLedger::new(
+    SpendLimits::new().limit(SpendKey::org("my-app").per(SpendPeriod::Day), 50_000_000),
+);
+```
+
+`ModelCallScope` applies the run budget and the spend ledger to model calls made outside an agent's own loop — compaction summaries, LLM routing, MCP sampling. `generate_metered` and `MeteredLlm` meter against the scope made current with `ModelCallScope::within`. `LlmResponse` carries `model` and `provider` so usage and cost are attributable.
+
+Calls billed in units rather than tokens — images, audio, characters — go through `ModelCallScope::meter` or `meter_usage`: the spend hold covers `UsageCall::max_cost_micro_usd` before the call is sent, and `MeteredUsage` commits the cost in micro-USD and counts its `UsageVector` (`UsageUnit::Images`, `AudioMillis`, `Characters`, …) in `BudgetTracker::units`. A unit call with no known price is refused under a cost cap. Agents make the run's scope current around every tool call (`ModelCallScope::within_tool`), so media calls in tools count against the run. `UnitRate` prices a unit in integer micro-USD.
+
+## Audit Records
+
+`AuditRecorder` (module `audit_log`) receives a record for every governed tool decision, approval decision, kill-switch change, and `outcome_unknown` answer; `InMemoryAuditRecorder` keeps them in memory and `FileAuditRecorder` appends them to a JSON Lines file that survives a restart. Each record names the acting agent and the subject it acts for and carries an argument digest, never the arguments. Under `AuditFailureMode::Block` (the default) an action whose record cannot be written does not happen. `AuditLogStore` and `InMemoryAuditLogStore` hold append-only logs with a compare-and-swap on the log size; `adk-auth`'s `signed_audit::AuditLog` signs them. `AuditLogStore::redact` drops chosen record bodies and keeps their hashes; `subject::PseudonymousRecorder` names visitors (or every subject) by registry pseudonym, and `subject::AuditLogSubjectData` redacts the records that name a subject being erased.
+
+## Subject Rights
+
+Module `subject` holds what a deployment needs to know whom it holds data about and to act on that person's data across stores. `SubjectKind::Visitor` names a person known only by a random `VisitorId`; a visitor's run is never authenticated and a visitor cannot decide an approval. `ConsentStore` keeps `ConsentRecord`s per subject and `ConsentPurpose`; `SubjectRegistry` keeps each subject's pseudonym, links, and erasure state. `SubjectRights` exports, erases, and links a subject over every registered `SubjectDataStore` adapter and reports each store's outcome — `erased`, `scheduled`, `unsupported`, `unreachable`, or `failed` — so no store is skipped silently. `InMemorySubjectRegistry` and `InMemoryConsentStore` are the reference implementations, and `subject_registry_conformance_tests!`, `consent_store_conformance_tests!`, and `subject_data_store_conformance_tests!` (feature `conformance`) prove other backends. See [Subject Rights](https://github.com/zavora-ai/adk-rust/blob/main/docs/official_docs/security/subject-rights.md).
+
+## Durable Runtime Contracts
+
+Backend-neutral traits for running agents durably across replicas, each with an in-memory implementation that takes a `Clock` through `with_clock`:
+
+| Trait | In-memory | Holds |
+|-------|-----------|-------|
+| `LeaseStore` | `InMemoryLeaseStore` | Leases with fencing epochs |
+| `DurableRunStore` | `InMemoryRunStore` | The run queue: claims, heartbeats, waits, retries, cancellation |
+| `ScheduleStore` | `InMemoryScheduleStore` | Cron, one-shot, and interval schedules with a revision compare-and-swap |
+| `GovernanceStateStore` | `InMemoryGovernanceStateStore` | Freeze state per organisation, tenant, and agent |
+| `ActionLedger` | `InMemoryActionLedger` | Begun and completed non-idempotent tool calls |
+| `ApprovalStore` | `InMemoryApprovalStore` | Pending approvals, decisions, and delegations |
+| `SpendLedger` | `InMemorySpendLedger` | Spend reservations and committed spend |
+| `AuditLogStore` | `InMemoryAuditLogStore` | Append-only audit logs and checkpoints |
+
+`NewRun::with_service_subject` marks a scheduled, webhook, or queue run as acting for a service. `schedule::plan_fires` computes fire times; cron specs need the `cron` feature. `GovernanceControl::mirrored` mirrors a shared `GovernanceStateStore`, so a freeze on one replica reaches every replica.
+
+```rust
+use std::time::Duration;
+
+use adk_core::{DurableRunStore, InMemoryRunStore, NewRun, RunOutcome};
+use serde_json::json;
+
+#[tokio::main]
+async fn main() -> adk_core::Result<()> {
+    let runs = InMemoryRunStore::new();
+    runs.enqueue(NewRun::new("default", "app", "user", "agent", json!({}))).await?;
+    let claimed = runs.claim("default", "worker-1", Duration::from_secs(30)).await?.unwrap();
+    let done = runs
+        .finish(&claimed.record.run_id, claimed.epoch, RunOutcome::Completed(json!("ok")))
+        .await?;
+    assert!(done.state.is_terminal());
+    Ok(())
+}
+```
+
+### Store Conformance Suites
+
+The `conformance` feature provides one suite per durable store trait. A backend implements a harness that opens it and calls the matching `*_conformance_tests!` macro, which generates one `#[tokio::test]` per contract case: accounting, period rollover, fencing, single-winner concurrency across two handles, and restart survival. Every in-memory and `adk-session` backend runs the same suites.
+
+```toml
+[dev-dependencies]
+adk-core = { version = "3.0.0", features = ["conformance"] }
+```
+
+## Wake-ups and Webhooks
+
+| Module | Feature | Provides |
+|--------|---------|----------|
+| `webhook` | `webhooks` | Standard Webhooks `WebhookSigner` / `WebhookVerifier` (timestamp tolerance, several secrets for rotation), `WebhookReplayGuard` |
+| `webhook_delivery` | `webhook-delivery` | `WebhookDelivery`: signed outbound POSTs with exponential backoff and jitter, a `DeadLetterSink`, and an `egress::EgressPolicy` enforced at resolve time |
+| `queue_source` | — | `QueueSource` (pull, ack, nack), `InMemoryQueueSource`, and `QueueIngress`, which enqueues each message as a durable run keyed by its message id and acks only after the enqueue succeeds |
+
+`queue_source_conformance_tests!` (feature `conformance`) checks any `QueueSource`. See [Wake-ups and Webhooks](../docs/official_docs/core/wake-ups.md).
+
+## State Management
+
+State keys use prefixes for scope:
+
+| Prefix | Scope |
+|--------|-------|
+| `user:` | The user, across sessions |
+| `app:` | The application, across users |
+| `temp:` | The current invocation; session services do not persist it |
+
+```rust
+use adk_core::{Session, ToolContext};
+use serde_json::json;
+
+fn read_and_write(session: &dyn Session, ctx: &dyn ToolContext) {
+    let _preference = session.state().get("user:preference");
+
+    let mut actions = ctx.actions();
+    actions.state_delta.insert("temp:counter".to_string(), json!(42));
+    ctx.set_actions(actions);
+}
+```
+
+`validate_state_key()` rejects keys that are empty, longer than `MAX_STATE_KEY_LEN` (256 bytes), or that contain `/`, `\`, `..`, or a null byte.
+
+```rust
+use adk_core::validate_state_key;
 
 assert!(validate_state_key("user_name").is_ok());
 assert!(validate_state_key("../etc/passwd").is_err());
 ```
 
-### Provider Metadata
+### Instruction Templates
 
-The `Event` struct uses a generic `provider_metadata: HashMap<String, String>` field for provider-specific data (e.g., GCP Vertex, Azure OpenAI), keeping the core type provider-agnostic.
-
-## State Management
-
-State uses typed prefixes for organization:
-
-| Prefix | Scope | Persistence |
-|--------|-------|-------------|
-| `user:` | User preferences | Across sessions |
-| `app:` | Application state | Application-wide |
-| `temp:` | Temporary data | Cleared each turn |
-
-```rust
-// Access state via session
-let value = session.state().get("user:preference");
-session.state().set("temp:counter".to_string(), json!(42));
-```
-
-State keys are validated with `validate_state_key()` — max length is `MAX_STATE_KEY_LEN` (256 bytes), and keys must be valid UTF-8 with no control characters.
+`inject_session_state` fills `{var}` (required), `{var?}` (optional), prefixed `{user:var}` / `{app:var}` / `{temp:var}`, and `{artifact.name}` placeholders. `${x}`, `\{x}`, and `{{x}}` stay literal, so instructions can quote shell, JavaScript, and template code.
 
 ## Callbacks
 
-```rust
-// Callback type aliases
-pub type BeforeAgentCallback = Box<dyn Fn(...) -> ... + Send + Sync>;
-pub type AfterAgentCallback = Box<dyn Fn(...) -> ... + Send + Sync>;
-pub type BeforeModelCallback = Box<dyn Fn(...) -> ... + Send + Sync>;
-pub type AfterModelCallback = Box<dyn Fn(...) -> ... + Send + Sync>;
-pub type BeforeToolCallback = Box<dyn Fn(...) -> ... + Send + Sync>;
-pub type AfterToolCallback = Box<dyn Fn(...) -> ... + Send + Sync>;
+| Alias | Receives | Returns |
+|-------|----------|---------|
+| `BeforeAgentCallback` / `AfterAgentCallback` | `Arc<dyn CallbackContext>` | `Result<Option<Content>>` |
+| `BeforeModelCallback` | context, `LlmRequest` | `Result<BeforeModelResult>` (`Continue(request)` or `Skip(response)`) |
+| `AfterModelCallback` | context, `LlmResponse` | `Result<Option<LlmResponse>>` |
+| `BeforeToolCallback` / `AfterToolCallback` | `Arc<dyn CallbackContext>` | `Result<Option<Content>>` |
+| `AfterToolCallbackFull` | context, tool, arguments, response | `Result<Option<Value>>` |
+| `OnToolErrorCallback` | context, tool, arguments, error message | `Result<Option<Value>>` |
+| `InstructionProvider` / `GlobalInstructionProvider` | `Arc<dyn ReadonlyContext>` | `Result<String>` |
 
-// Instruction providers
-pub type InstructionProvider = Box<dyn Fn(...) -> ... + Send + Sync>;
-pub type GlobalInstructionProvider = Box<dyn Fn(...) -> ... + Send + Sync>;
-```
+Each alias boxes an async closure: `Box<dyn Fn(..) -> Pin<Box<dyn Future<Output = ..> + Send>> + Send + Sync>`. `InvocationHooks` carries run-wide hooks (the runner's plugins) that agents run ahead of their own callbacks.
 
 ## Context Compaction
 
-Types for sliding-window context compaction (summarizing older events to reduce LLM context size):
-
-```rust
-/// Trait for summarizing events during compaction.
-#[async_trait]
-pub trait BaseEventsSummarizer: Send + Sync {
-    async fn summarize_events(&self, events: &[Event]) -> Result<Option<Event>>;
-}
-
-/// Configuration for automatic context compaction.
-pub struct EventsCompactionConfig {
-    pub compaction_interval: u32,  // Invocations between compactions
-    pub overlap_size: u32,         // Events to carry over for continuity
-    pub summarizer: Arc<dyn BaseEventsSummarizer>,
-}
-```
+`EventsCompactionConfig` configures compaction: `compaction_interval` (compaction runs when the session's user-message count is a multiple of it), `overlap_size` (the most recent invocations left out of the summary), and a `summarizer` implementing `BaseEventsSummarizer`. Compaction never covers a call still held for confirmation (`held_call_compaction_limit`). `IntraCompactionConfig` triggers compaction within an invocation when the estimated token count passes a threshold.
 
 ## Streaming Modes
 
-```rust
-pub enum StreamingMode {
-    None,  // Complete responses only
-    SSE,   // Server-Sent Events (default)
-    Bidi,  // Bidirectional (realtime)
-}
-```
+`StreamingMode` is `None` (complete responses), `SSE` (the default), or `Bidi` (realtime).
 
 ## ToolExecutionStrategy
 
-Controls how multiple tool calls from a single LLM response are dispatched:
+| Strategy | Dispatch |
+|----------|----------|
+| `Sequential` (default) | One call at a time, in order |
+| `Parallel` | Every call concurrently; does not inspect tool metadata |
+| `Auto` | In order; adjacent read-only, concurrency-safe calls overlap |
 
-```rust
-pub enum ToolExecutionStrategy {
-    Sequential,  // One at a time, in order (default)
-    Parallel,    // All concurrently; caller owns safety
-    Auto,        // Safe read-only subset concurrently, then the rest sequentially
-}
-```
+Set per agent with `LlmAgentBuilder::tool_execution_strategy()`.
 
-Set per-agent via `LlmAgentBuilder::tool_execution_strategy()`. `Parallel` is an explicit override that does not inspect tool metadata.
+## Changes in 3.0
+
+| Change | Migration |
+|--------|-----------|
+| `ToolConfirmationRequest::fingerprint()` names the acting agent and the tool's `ToolOrigin` | Take fingerprints from the held call's request or `ToolConfirmationRequest::for_tool` |
+| `ErrorCategory` gains `Conflict` (409) and `ResourceExhausted` (429) | Add match arms |
+| `RunConfig` gains `acting`, `action_ledger`, `approval_store`, `approval_service`, `audit`, `budget`, `budget_tracker`, `governance`, `invocation_hooks`, `llm_spend_estimate`, `spend_ledger`, `tool_approvals`, `tool_policy`, `tool_confirmation_timeout`, and `deny_on_confirmation_timeout` | End struct literals with `..Default::default()` |
+| `ToolApproval` carries `edited_args` and `message` and is no longer `Copy` | Build it with `approve()` / `deny()` |
+| `Tool` gains `effect()`, `timeout_override()`, `origin()`, and `annotations()`; `Agent` gains `close()`, `screen_user_input()`, and transfer flags | Wrappers forward them |
+| `LlmResponse` gains `model` and `provider`; `UsageMetadata` gains `builtin_tool_uses` | End struct literals with `..Default::default()` |
+| `ActingContext` no longer carries an invocation id | Read it from the execution identity |
+| `inject_session_state` leaves `${x}`, `\{x}`, and `{{x}}` literal | — |
+
+See the [2.x to 3.0 migration guide](../docs/official_docs/migration/2.x-to-3.0.md) and the [changelog](../CHANGELOG.md) for the full list.
 
 ## Related Crates
 
-- [adk-rust](https://crates.io/crates/adk-rust) - Meta-crate with all components
-- [adk-agent](https://crates.io/crates/adk-agent) - Agent implementations
-- [adk-model](https://crates.io/crates/adk-model) - LLM integrations
-- [adk-tool](https://crates.io/crates/adk-tool) - Tool implementations
+- [adk-rust](https://crates.io/crates/adk-rust) — umbrella crate with every component
+- [adk-agent](https://crates.io/crates/adk-agent) — agent implementations
+- [adk-model](https://crates.io/crates/adk-model) — model providers
+- [adk-tool](https://crates.io/crates/adk-tool) — tool implementations
+- [adk-runner](https://crates.io/crates/adk-runner) — the execution runtime
 
 ## License
 

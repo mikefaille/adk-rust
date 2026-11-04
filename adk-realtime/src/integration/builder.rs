@@ -14,10 +14,11 @@ use adk_session::SessionService;
 
 use crate::config::{RealtimeConfig, ToolDefinition};
 use crate::error::RealtimeError;
+use crate::metering::RealtimePricing;
 use crate::model::BoxedModel;
 use crate::runner::{EventHandler, RealtimeRunner, RunnerConfig, ToolHandler};
 
-use super::context::DefaultToolContextFactory;
+use super::context::IdentityToolContextFactory;
 use super::tool_bridge::ToolBridgeAdapter;
 use super::{IntegrationConfig, SessionIdentity};
 
@@ -58,12 +59,33 @@ pub struct IntegratedRealtimeRunnerBuilder {
     pub(crate) adk_tools: Vec<Arc<dyn Tool>>,
     /// Native tools registered directly as `ToolHandler` implementations.
     pub(crate) native_tools: HashMap<String, (ToolDefinition, Arc<dyn ToolHandler>)>,
+    /// The first native tool name registered twice; `build` rejects it.
+    pub(crate) duplicate_tool: Option<String>,
     /// Optional event handler for raw realtime events.
     pub(crate) event_handler: Option<Arc<dyn EventHandler>>,
     /// Session identity triple (required for build).
     pub(crate) identity: Option<SessionIdentity>,
     /// Integration-layer configuration (transcript persistence, memory injection, etc.).
     pub(crate) integration_config: IntegrationConfig,
+    /// Policy, kill switch, and confirmation applied to every dispatched tool call.
+    pub(crate) tool_governance: Option<adk_core::RunConfig>,
+    /// How long one tool call may run.
+    pub(crate) tool_timeout: std::time::Duration,
+    /// Screens every tool result before the model and the session see it.
+    pub(crate) tool_result_screen: Option<Arc<dyn adk_core::ToolResultScreen>>,
+    /// Whether tool and plugin error messages reach the model.
+    pub(crate) expose_tool_error_messages: bool,
+    /// The identity the server authenticated for the session, if any.
+    pub(crate) request_context: Option<adk_core::RequestContext>,
+    /// Output guardrails on the model's text and transcripts.
+    #[cfg(feature = "guardrails")]
+    pub(crate) output_guardrails: Option<adk_guardrail::GuardrailSet>,
+    /// Prices each response's usage for the spend ledger.
+    pub(crate) pricing: Option<RealtimePricing>,
+    /// Whether `next_event` runs tool dispatch on its own task.
+    pub(crate) concurrent_tool_dispatch: bool,
+    /// The agent tool calls are governed, metered and held under.
+    pub(crate) agent_name: String,
 }
 
 impl Default for IntegratedRealtimeRunnerBuilder {
@@ -86,9 +108,20 @@ impl IntegratedRealtimeRunnerBuilder {
             plugin_manager: None,
             adk_tools: Vec::new(),
             native_tools: HashMap::new(),
+            duplicate_tool: None,
             event_handler: None,
             identity: None,
             integration_config: IntegrationConfig::default(),
+            tool_governance: None,
+            tool_timeout: crate::runner::DEFAULT_REALTIME_TOOL_TIMEOUT,
+            tool_result_screen: None,
+            expose_tool_error_messages: false,
+            request_context: None,
+            #[cfg(feature = "guardrails")]
+            output_guardrails: None,
+            pricing: None,
+            concurrent_tool_dispatch: false,
+            agent_name: crate::runner::DEFAULT_REALTIME_AGENT_NAME.to_string(),
         }
     }
 
@@ -214,7 +247,9 @@ impl IntegratedRealtimeRunnerBuilder {
     /// * `handler` - The tool handler implementation.
     pub fn tool(mut self, definition: ToolDefinition, handler: impl ToolHandler + 'static) -> Self {
         let name = definition.name.clone();
-        self.native_tools.insert(name, (definition, Arc::new(handler)));
+        if self.native_tools.insert(name.clone(), (definition, Arc::new(handler))).is_some() {
+            self.duplicate_tool.get_or_insert(name);
+        }
         self
     }
 
@@ -244,6 +279,149 @@ impl IntegratedRealtimeRunnerBuilder {
         self
     }
 
+    /// Governs every tool call with `config`'s tool policy, kill switches, confirmation
+    /// handler, approvals, and approval store, scoped to this runner's identity. ADK tools
+    /// are authorized after the plugin pipeline rewrites their arguments, and every tool
+    /// context answers [`run_config`](adk_core::ToolContext::run_config) with `config`.
+    /// A call the governed path holds, or that a tool's delegate holds, is surfaced as
+    /// [`ServerEvent::ToolConfirmationRequested`](crate::events::ServerEvent::ToolConfirmationRequested)
+    /// and recorded in the session; see
+    /// [`IntegratedRealtimeRunner::resume_held_calls`](super::IntegratedRealtimeRunner::resume_held_calls).
+    /// With a `spend_ledger`, every response is metered under the identity's app name.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use adk_core::{DeclarativePolicy, RunConfig};
+    ///
+    /// let runner = IntegratedRealtimeRunner::builder()
+    ///     .model(model)
+    ///     .identity("voice", "user-1", "session-1")
+    ///     .tool_governance(
+    ///         RunConfig::builder()
+    ///             .tool_policy(Arc::new(DeclarativePolicy::builder().allow_read_only().build()))
+    ///             .build(),
+    ///     )
+    ///     .build()?;
+    /// ```
+    pub fn tool_governance(mut self, config: adk_core::RunConfig) -> Self {
+        self.tool_governance = Some(config);
+        self
+    }
+
+    /// Sets how long a tool may run before its call is answered with a timeout error.
+    pub fn tool_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.tool_timeout = timeout;
+        self
+    }
+
+    /// Screens every tool result before the model and the session see it.
+    ///
+    /// For an ADK tool the screen runs after the plugin pipeline, before the tool event is
+    /// persisted and the result is sent; for a native handler it runs as
+    /// [`RealtimeRunnerBuilder::tool_result_screen`](crate::runner::RealtimeRunnerBuilder::tool_result_screen)
+    /// describes. A result it withholds, or cannot decide on, is replaced by
+    /// [`result_blocked_response`](adk_core::result_blocked_response).
+    pub fn tool_result_screen(mut self, screen: Arc<dyn adk_core::ToolResultScreen>) -> Self {
+        self.tool_result_screen = Some(screen);
+        self
+    }
+
+    /// Sends the full message of tool and plugin errors to the model, which by default sees
+    /// their component, category, and code only.
+    pub fn expose_tool_error_messages(mut self, expose: bool) -> Self {
+        self.expose_tool_error_messages = expose;
+        self
+    }
+
+    /// Runs every tool call as the identity the server authenticated for this session (spec
+    /// 3.1 §7.17): tool contexts answer
+    /// [`is_authenticated`](adk_core::ReadonlyContext::is_authenticated) with `true` and
+    /// [`user_scopes`](adk_core::ToolContext::user_scopes) with the context's scopes, so a
+    /// policy that trusts only authenticated users (such as a harness's standing approvals)
+    /// treats a voice session as the server does. Without it, tool contexts report an
+    /// unauthenticated user. The context's `user_id` must be the [`identity`](Self::identity)
+    /// user; [`build`](Self::build) refuses a mismatch.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let runner = IntegratedRealtimeRunner::builder()
+    ///     .model(model)
+    ///     .identity("voice", "user-1", "session-1")
+    ///     .request_context(authenticated) // from the server's RequestContextExtractor
+    ///     .build()?;
+    /// ```
+    pub fn request_context(mut self, request_context: adk_core::RequestContext) -> Self {
+        self.request_context = Some(request_context);
+        self
+    }
+
+    /// Screens every completed model turn — its text, or its audio transcript when it
+    /// produced no text — with `guardrails` before it reaches the session and memory, as
+    /// `LlmAgent` screens final text. A transform replaces the persisted text; a block
+    /// interrupts the response, persists nothing of the turn, and makes
+    /// [`next_event`](super::IntegratedRealtimeRunner::next_event) return
+    /// [`crate::error::RealtimeError::OutputBlocked`].
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use adk_guardrail::{GuardrailSet, PiiRedactor};
+    ///
+    /// let runner = IntegratedRealtimeRunner::builder()
+    ///     .model(model)
+    ///     .identity("voice", "user-1", "session-1")
+    ///     .output_guardrails(GuardrailSet::new().with(PiiRedactor::new()))
+    ///     .build()?;
+    /// ```
+    #[cfg(feature = "guardrails")]
+    pub fn output_guardrails(mut self, guardrails: adk_guardrail::GuardrailSet) -> Self {
+        self.output_guardrails = Some(guardrails);
+        self
+    }
+
+    /// Prices each response's reported usage, so the run's spend ledger is charged the
+    /// usage's price rather than the per-call estimate. Needs
+    /// [`tool_governance`](Self::tool_governance) with a `spend_ledger`.
+    pub fn realtime_pricing(mut self, pricing: RealtimePricing) -> Self {
+        self.pricing = Some(pricing);
+        self
+    }
+
+    /// Runs each tool dispatch on its own task, so
+    /// [`next_event`](super::IntegratedRealtimeRunner::next_event) keeps reading provider
+    /// events — the user's transcript included — while a tool runs or waits for a
+    /// confirmation handler. The follow-up response is sent once the dispatching response
+    /// has closed and every tool is in, as [`RealtimeRunner::run`] does. Off by default:
+    /// `next_event` then dispatches inline and returns after the result is sent.
+    pub fn concurrent_tool_dispatch(mut self, concurrent: bool) -> Self {
+        self.concurrent_tool_dispatch = concurrent;
+        self
+    }
+
+    /// Names the agent every tool call is governed, metered and held under: the gate's
+    /// agent name, the acting agent of each call, the agent tool contexts report, and the
+    /// author of the session events that record a hold. Defaults to
+    /// [`DEFAULT_REALTIME_AGENT_NAME`](crate::runner::DEFAULT_REALTIME_AGENT_NAME). A
+    /// surface that runs an existing agent's tools sets that agent's name, so the agent's
+    /// tool policy classifies its own tools (spec 3.1 §7.17).
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let runner = IntegratedRealtimeRunner::builder()
+    ///     .model(model)
+    ///     .identity("adk-rust", "ana", "voice-1")
+    ///     .agent_name("harness")
+    ///     .tool_governance(harness.run_config())
+    ///     .build()?;
+    /// ```
+    pub fn agent_name(mut self, name: impl Into<String>) -> Self {
+        self.agent_name = name.into();
+        self
+    }
+
     /// Builds the [`IntegratedRealtimeRunner`](super::IntegratedRealtimeRunner).
     ///
     /// Validates required fields, bridges ADK tools via
@@ -256,6 +434,8 @@ impl IntegratedRealtimeRunnerBuilder {
     /// Returns a [`ConfigError`](crate::error::RealtimeError::ConfigError) if:
     /// - `model` was not set
     /// - `identity` was not set
+    /// - a [`request_context`](Self::request_context) names a user other than the identity's
+    /// - two tools, native or bridged, share a name
     ///
     /// Also propagates any errors from the underlying `RealtimeRunner::builder().build()`.
     ///
@@ -273,25 +453,68 @@ impl IntegratedRealtimeRunnerBuilder {
             RealtimeError::config("Identity (app_name, user_id, session_id) is required")
         })?;
 
+        if let Some(request_context) = &self.request_context
+            && request_context.user_id != identity.user_id
+        {
+            return Err(RealtimeError::config(format!(
+                "the request context authenticates user '{}' but the session identity is user \
+                 '{}'; pass the authenticated user to identity()",
+                request_context.user_id, identity.user_id
+            )));
+        }
+
         // Create context factory for ADK tools
-        let context_factory = Arc::new(DefaultToolContextFactory {
+        let context_factory = Arc::new(IdentityToolContextFactory {
             identity: identity.clone(),
             memory_service: self.memory_service.clone(),
+            request_context: self.request_context.clone(),
+            run_config: self.tool_governance.clone(),
+            agent_name: self.agent_name.clone(),
         });
 
         // Bridge ADK tools via ToolBridgeAdapter
         let mut all_tools = self.native_tools;
+        let mut duplicate_tool = self.duplicate_tool;
         for tool in &self.adk_tools {
             let def = ToolBridgeAdapter::definition(tool.as_ref());
-            let adapter = Arc::new(ToolBridgeAdapter::new(tool.clone(), context_factory.clone()));
-            all_tools.insert(def.name.clone(), (def, adapter as Arc<dyn ToolHandler>));
+            let adapter = Arc::new(
+                ToolBridgeAdapter::new(tool.clone(), context_factory.clone())
+                    .with_exposed_error_messages(self.expose_tool_error_messages),
+            );
+            let name = def.name.clone();
+            if all_tools.insert(name.clone(), (def, adapter as Arc<dyn ToolHandler>)).is_some() {
+                duplicate_tool.get_or_insert(name);
+            }
+        }
+        if let Some(name) = duplicate_tool {
+            return Err(RealtimeError::config(format!(
+                "two tools are registered as '{name}'; the model calls tools by name, so only \
+                 one could ever run. Rename one of them or register it once."
+            )));
         }
 
         // Build underlying RealtimeRunner
         let mut runner_builder = RealtimeRunner::builder()
             .model(model)
             .config(self.config)
-            .runner_config(self.runner_config);
+            .runner_config(self.runner_config)
+            .tool_timeout(self.tool_timeout)
+            .expose_tool_error_messages(self.expose_tool_error_messages)
+            .agent_name(self.agent_name);
+        if let Some(screen) = self.tool_result_screen {
+            runner_builder = runner_builder.tool_result_screen(screen);
+        }
+        if let Some(pricing) = self.pricing {
+            runner_builder = runner_builder.realtime_pricing(pricing);
+        }
+        if let Some(config) = self.tool_governance {
+            let scope = adk_core::ApprovalScope::new(
+                &identity.app_name,
+                &identity.user_id,
+                &identity.session_id,
+            );
+            runner_builder = runner_builder.tool_governance(config, scope);
+        }
 
         for (_, (def, handler)) in all_tools {
             runner_builder = runner_builder.tool_arc(def, handler);
@@ -309,14 +532,22 @@ impl IntegratedRealtimeRunnerBuilder {
             self.adk_tools.iter().map(|tool| (tool.name().to_string(), Arc::clone(tool))).collect();
 
         Ok(super::IntegratedRealtimeRunner {
-            runner,
-            session_service: self.session_service,
-            memory_service: self.memory_service,
-            plugin_manager: self.plugin_manager,
-            aggregator: tokio::sync::RwLock::new(super::transcript::TranscriptAggregator::new()),
-            identity,
-            config: self.integration_config,
-            adk_tools: adk_tools_by_name,
+            inner: Arc::new(super::Inner {
+                runner,
+                session_service: self.session_service,
+                memory_service: self.memory_service,
+                plugin_manager: self.plugin_manager,
+                aggregator: tokio::sync::RwLock::new(super::transcript::TranscriptAggregator::new()),
+                identity,
+                config: self.integration_config,
+                adk_tools: adk_tools_by_name,
+                request_context: self.request_context,
+                pending_events: std::sync::Mutex::new(std::collections::VecDeque::new()),
+                connected_calls: std::sync::Mutex::new(std::collections::HashSet::new()),
+                concurrent_dispatch: self.concurrent_tool_dispatch,
+                #[cfg(feature = "guardrails")]
+                output_guardrails: self.output_guardrails,
+            }),
         })
     }
 }

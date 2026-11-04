@@ -1,37 +1,39 @@
 //! # adk-bench
 //!
-//! A comprehensive benchmarking framework for ADK-Rust that measures
-//! framework-level runtime performance using real LLM APIs.
+//! Benchmarking framework for ADK-Rust that measures framework-level runtime overhead using
+//! real LLM APIs.
 //!
-//! `adk-bench` isolates framework overhead from LLM latency through precise
-//! per-call instrumentation, supports concurrent agent throughput testing,
-//! memory profiling, and external framework comparison via subprocess
-//! execution with a standardized JSON protocol (External Benchmark Protocol).
+//! [`BenchRunner`] wraps the model in [`InstrumentedLlm`], which sends a deterministic
+//! configuration (temperature 0, `top_p` 1.0, seed 42) and records each call's timing, so the
+//! framework's per-turn overhead is the total turn time minus the LLM round trip.
+//! [`ExternalRunner`] benchmarks other frameworks as subprocesses that speak the External
+//! Benchmark Protocol, a single JSON object on stdout.
 //!
-//! ## Features
+//! ## Measurements
 //!
-//! - **Cold start measurement**: Binary launch to first LLM call timing
-//! - **Agent loop overhead**: Per-turn framework processing latency (excluding LLM time)
-//! - **Concurrent throughput**: Agents/second under Tokio async load
-//! - **Memory footprint**: Platform-specific RSS sampling (Linux/macOS)
-//! - **Tool invocation latency**: Deserialization, validation, and dispatch timing
-//! - **Token overhead**: Framework-injected token cost analysis
-//! - **External comparison**: Subprocess-based competitor framework benchmarking
-//! - **Regression detection**: Baseline save/compare with configurable tolerance
+//! - **Cold start**: run start to the first LLM request (process spawn for external harnesses)
+//! - **Agent loop overhead**: per-turn framework time, excluding the LLM round trip
+//! - **Concurrent throughput**: agents per second at each concurrency level
+//! - **Memory**: peak RSS during the measurement phase and its growth per agent (Linux, macOS)
+//! - **External comparison**: peak RSS and token overhead as reported by each harness
+//! - **Regression detection**: baselines compared with a configurable tolerance
 //!
-//! ## Feature Flags
+//! `cargo adk bench` is the command-line front end.
 //!
-//! - `tau2` — Enables the τ²-bench task quality adapter
-//! - `bfcl` — Enables the BFCL (Berkeley Function Calling Leaderboard) adapter
+//! ## Quick start
 //!
-//! ## Quick Start
-//!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use adk_bench::{BenchConfig, BenchRunner};
 //!
-//! let config = BenchConfig::default();
-//! let runner = BenchRunner::new(config);
-//! let results = runner.run().await?;
+//! # #[tokio::main]
+//! # async fn main() -> adk_bench::Result<()> {
+//! let config = BenchConfig { runs: 1, warmup: 0, ..BenchConfig::default() };
+//! let results = BenchRunner::new(config).run().await?;
+//! for result in &results {
+//!     println!("{}: {} µs", result.workload_name, result.agent_loop_overhead.mean_us);
+//! }
+//! # Ok(())
+//! # }
 //! ```
 
 pub mod config;
@@ -49,7 +51,7 @@ pub mod adapters;
 pub use adapters::{CaseResult, TaskQualityAdapter, TaskQualityResult};
 
 // Public re-exports
-pub use config::{BenchConfig, ExternalFrameworkConfig, OutputFormat, TaskSuite};
+pub use config::{BenchConfig, ExternalFrameworkConfig, OutputFormat};
 pub use error::{BenchError, Result};
 pub use external::{
     ExternalConfigFile, ExternalDurationStats, ExternalMetricsOutput, ExternalRunner,
@@ -59,7 +61,7 @@ pub use formatter::{ComparisonResult, format_comparison, format_result};
 pub use instrumented_llm::{DeterministicConfig, InstrumentedLlm, LlmCallRecord};
 pub use metrics::{
     BenchmarkResult, ConcurrencyLevel, DurationStats, MemoryMetrics, MetricCollector, RunMetadata,
-    ThroughputMetrics, TokenBreakdown, TokenOverheadMetrics, ToolInvocationMetrics, compute_stats,
+    ThroughputMetrics, compute_stats,
 };
 pub use runner::{BenchRunner, RegressionReport};
 pub use workload::{

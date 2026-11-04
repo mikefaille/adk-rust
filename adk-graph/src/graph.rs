@@ -191,10 +191,14 @@ impl StateGraph {
             deferred_configs: self.deferred_configs,
             max_concurrency: None,
             retry_policies: HashMap::new(),
+            node_effects: HashMap::new(),
+            governed_nodes: HashMap::new(),
             strict_channels: false,
             retention: None,
             #[cfg(feature = "node-cache")]
             cache_policies: HashMap::new(),
+            #[cfg(feature = "node-cache")]
+            node_caches: HashMap::new(),
         })
     }
 
@@ -206,10 +210,10 @@ impl StateGraph {
     /// arriving predecessor, applying its updates repeatedly and reading a
     /// half-built state.
     ///
-    /// Only `Direct` and `Entry` edges count. A conditional predecessor may never
-    /// fire, and waiting for one that cannot arrive would deadlock the join. A
-    /// graph whose fan-in arrives through conditional edges therefore still needs
-    /// `mark_deferred` and a `fan_in_timeout`.
+    /// Only `Direct` and `Entry` edges count toward making a node deferred. Once
+    /// deferred, a node waits only for the predecessors that can still run in the
+    /// current pass, so a merge after a conditional branch, or a node re-entered by
+    /// a loop's back edge, runs with the arrivals it has.
     ///
     /// An explicit configuration always wins, so a caller who wants the earlier
     /// behaviour keeps it by configuring the node themselves.
@@ -297,6 +301,9 @@ impl StateGraph {
         Ok(())
     }
 }
+
+/// A `(source, target)` pair: an executed node and a node it routed to.
+pub(crate) type Route = (String, String);
 
 /// Turns a node failure into state and a route, instead of ending the run.
 ///
@@ -399,6 +406,10 @@ pub struct CompiledGraph {
     pub(crate) max_concurrency: Option<usize>,
     /// Per-node retry policies, keyed by node name.
     pub(crate) retry_policies: HashMap<String, crate::retry::RetryPolicy>,
+    /// Side effects nodes declared, keyed by node name.
+    pub(crate) node_effects: HashMap<String, adk_core::ToolEffect>,
+    /// Nodes whose calls go through the governed path, keyed by node name.
+    pub(crate) governed_nodes: HashMap<String, crate::governed::GovernedNode>,
     /// Whether a node writing an undeclared channel fails the run.
     pub(crate) strict_channels: bool,
     /// How many checkpoints to keep per thread. `None` keeps every one.
@@ -406,6 +417,10 @@ pub struct CompiledGraph {
     /// Per-node cache policies, keyed by node name.
     #[cfg(feature = "node-cache")]
     pub(crate) cache_policies: HashMap<String, crate::cache::NodeCachePolicy>,
+    /// Per-node caches built from `cache_policies`, shared by every run of this
+    /// graph so a later run reuses what an earlier one stored.
+    #[cfg(feature = "node-cache")]
+    pub(crate) node_caches: HashMap<String, Arc<crate::cache::NodeCache>>,
 }
 
 impl CompiledGraph {
@@ -433,7 +448,12 @@ impl CompiledGraph {
         self
     }
 
-    /// Set recursion limit for cycles
+    /// Sets how many super-steps one run may take; 100 when unset.
+    ///
+    /// A run that would take more fails with
+    /// [`GraphError::RecursionLimitExceeded`]. An
+    /// [`ExecutionConfig::with_recursion_limit`](crate::node::ExecutionConfig::with_recursion_limit)
+    /// value overrides it for one run.
     pub fn with_recursion_limit(mut self, limit: usize) -> Self {
         self.recursion_limit = limit;
         self
@@ -604,6 +624,39 @@ impl CompiledGraph {
         self
     }
 
+    /// Declares the most consequential side effect a node can cause.
+    ///
+    /// Under [`Durability::Async`](crate::checkpoint::Durability::Async) or
+    /// [`Durability::Exit`](crate::checkpoint::Durability::Exit), a super-step that
+    /// runs a [`ToolEffect::NonIdempotent`](adk_core::ToolEffect::NonIdempotent) node
+    /// first writes every earlier checkpoint, as
+    /// [`Durability::Sync`](crate::checkpoint::Durability::Sync) does. A node that
+    /// declares nothing is not treated as having an effect.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use adk_core::ToolEffect;
+    /// use adk_graph::edge::{END, START};
+    /// use adk_graph::graph::StateGraph;
+    /// use adk_graph::node::NodeOutput;
+    ///
+    /// # fn build() -> adk_graph::Result<()> {
+    /// let graph = StateGraph::with_channels(&["receipt"])
+    ///     .add_node_fn("charge", |_ctx| async { Ok(NodeOutput::new()) })
+    ///     .add_edge(START, "charge")
+    ///     .add_edge("charge", END)
+    ///     .compile()?
+    ///     .with_node_effect("charge", ToolEffect::NonIdempotent);
+    /// # let _ = graph;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn with_node_effect(mut self, node: &str, effect: adk_core::ToolEffect) -> Self {
+        self.node_effects.insert(node.to_string(), effect);
+        self
+    }
+
     /// A node by name, for a caller that needs to run one on its own.
     pub fn node(&self, name: &str) -> Option<Arc<dyn Node>> {
         self.nodes.get(name).cloned()
@@ -652,20 +705,46 @@ impl CompiledGraph {
     /// otherwise stop and the run would report success having skipped the work.
     pub fn get_next_nodes(&self, executed: &[String], state: &State) -> Result<Vec<String>> {
         let mut next = Vec::new();
+        for (_, target) in self.routes_from(executed, state)? {
+            if !next.contains(&target) {
+                next.push(target);
+            }
+        }
+        Ok(next)
+    }
+
+    /// Each `(source, target)` pair the executed nodes' edges route along, in
+    /// edge declaration order.
+    ///
+    /// A fan-in node counts an arrival only from a source that routed to it, so
+    /// the pairs are kept rather than only the targets. A route to `END` yields
+    /// no pair.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GraphError::UnknownRouteTarget`] on an undeclared route key, as
+    /// [`Self::get_next_nodes`] does.
+    pub(crate) fn routes_from(&self, executed: &[String], state: &State) -> Result<Vec<Route>> {
+        let mut routes: Vec<Route> = Vec::new();
+        let mut push = |source: &String, target: &String| {
+            if !routes.iter().any(|(s, t)| s == source && t == target) {
+                routes.push((source.clone(), target.clone()));
+            }
+        };
 
         for edge in &self.edges {
             match edge {
                 Edge::Direct { source, target: EdgeTarget::Node(n) }
-                    if executed.contains(source) && !next.contains(n) =>
+                    if executed.contains(source) =>
                 {
-                    next.push(n.clone());
+                    push(source, n);
                 }
                 Edge::Conditional { source, router, targets } if executed.contains(source) => {
                     let route = router(state);
                     match targets.get(&route) {
-                        Some(EdgeTarget::Node(n)) if !next.contains(n) => next.push(n.clone()),
-                        // Declared, and either already queued or the end of this branch.
-                        Some(_) => {}
+                        Some(EdgeTarget::Node(n)) => push(source, n),
+                        // Declared, and the end of this branch.
+                        Some(EdgeTarget::End) => {}
                         None => {
                             return Err(GraphError::UnknownRouteTarget(format!(
                                 "node '{source}' routed to '{route}', which is not a declared target. Declared: {declared:?}",
@@ -683,7 +762,31 @@ impl CompiledGraph {
             }
         }
 
-        Ok(next)
+        Ok(routes)
+    }
+
+    /// Every node one declared edge leads to from each node, counting every
+    /// target of a conditional edge.
+    ///
+    /// Used to decide whether a fan-in predecessor can still run, so a `goto`
+    /// to a node no edge reaches is not anticipated.
+    pub(crate) fn successor_map(&self) -> HashMap<&str, Vec<&str>> {
+        let mut successors: HashMap<&str, Vec<&str>> = HashMap::new();
+        for edge in &self.edges {
+            match edge {
+                Edge::Direct { source, target } => {
+                    if let Some(target) = target.node_name() {
+                        successors.entry(source.as_str()).or_default().push(target);
+                    }
+                }
+                Edge::Conditional { source, targets, .. } => {
+                    let entry = successors.entry(source.as_str()).or_default();
+                    entry.extend(targets.values().filter_map(EdgeTarget::node_name));
+                }
+                Edge::Entry { .. } => {}
+            }
+        }
+        successors
     }
 
     /// Reports the conditional dispatches the executed nodes produce.

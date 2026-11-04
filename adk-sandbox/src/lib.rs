@@ -14,11 +14,12 @@
 //!
 //! ## Quick Start
 //!
-//! ```rust,ignore
-//! use adk_sandbox::{ProcessBackend, ExecRequest, Language};
-//! use std::time::Duration;
+//! ```rust,no_run
+//! use adk_sandbox::{ExecRequest, Language, ProcessBackend, SandboxBackend};
 //! use std::collections::HashMap;
+//! use std::time::Duration;
 //!
+//! # async fn run() -> Result<(), adk_sandbox::SandboxError> {
 //! let backend = ProcessBackend::default();
 //! let request = ExecRequest {
 //!     language: Language::Python,
@@ -26,10 +27,12 @@
 //!     stdin: None,
 //!     timeout: Duration::from_secs(30),
 //!     memory_limit_mb: None,
-//!     env: HashMap::new(),
+//!     env: HashMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())]),
 //! };
 //! let result = backend.execute(request).await?;
 //! println!("stdout: {}", result.stdout);
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ## Feature Flags
@@ -38,6 +41,15 @@
 //! |-----------|--------------------------------------|---------|
 //! | `process` | Subprocess execution via tokio       | ✅      |
 //! | `wasm`    | In-process WASM execution via wasmtime | ❌    |
+//! | `sandbox-macos`, `sandbox-linux`, `sandbox-windows` | OS enforcers for `ProcessBackend` (Seatbelt, bubblewrap; the Windows restricted-token enforcer confines only through `WindowsEnforcer::run_confined`) | ❌ |
+//! | `sandbox-native` | All three enforcers; only the target platform's compiles | ❌ |
+//! | `process-tree` | `process_tree::JobObject`, the Job Object that holds a process tree on Windows (implied by `sandbox-windows`), and `process_tree::ProcessGroup`, the session and process group that holds one on Unix | ❌ |
+//! | `egress-proxy` | `egress_proxy::EgressProxy`, the HTTP egress proxy that admits a `Proxied` sandbox's connections by an `adk_core::egress::EgressPolicy` | ❌ |
+//! | `workspace` | Workspace lifecycle and `LocalUnixClient` | ❌ |
+//! | `workspace-docker` | `DockerClient` (implies `workspace`) | ❌ |
+//!
+//! [`SandboxError`] is `#[non_exhaustive]`; its workspace variants exist only with the
+//! `workspace` feature.
 
 pub mod backend;
 pub mod error;
@@ -46,21 +58,34 @@ pub mod tool;
 pub mod types;
 
 // Feature-gated modules
+#[cfg(any(feature = "process", feature = "workspace"))]
+mod child_io;
+
 #[cfg(feature = "process")]
 pub mod process;
 
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
+#[cfg(feature = "egress-proxy")]
+pub mod egress_proxy;
+
 #[cfg(feature = "workspace")]
 pub mod workspace;
+
+#[cfg(all(windows, feature = "process-tree"))]
+pub mod process_tree;
+
+#[cfg(all(unix, feature = "process-tree"))]
+#[path = "process_tree_unix.rs"]
+pub mod process_tree;
 
 // Public re-exports
 pub use backend::{BackendCapabilities, EnforcedLimits, SandboxBackend};
 pub use error::SandboxError;
 pub use sandbox::{
-    AccessMode, AllowedPath, NetworkRule, SandboxEnforcer, SandboxPolicy, SandboxPolicyBuilder,
-    WrappedCommand, get_enforcer,
+    AccessMode, AllowedPath, NetworkAccess, NetworkSupport, ProxyEndpoint, ProxyListener,
+    SandboxEnforcer, SandboxPolicy, SandboxPolicyBuilder, WrappedCommand, get_enforcer,
 };
 pub use tool::SandboxTool;
 pub use types::{ExecRequest, ExecResult, Language};

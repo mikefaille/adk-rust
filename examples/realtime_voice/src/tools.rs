@@ -3,6 +3,7 @@
 //! These are the function schemas registered with the realtime session,
 //! allowing the voice model to invoke tools during a live conversation.
 
+use adk_core::ToolEffect;
 use adk_realtime::config::ToolDefinition;
 use serde_json::json;
 
@@ -15,6 +16,7 @@ pub fn get_weather_tool_def() -> ToolDefinition {
         name: "get_weather".to_string(),
         description: Some("Get current weather conditions for a city".to_string()),
         behavior: None,
+        effect: ToolEffect::ReadOnly,
         parameters: Some(json!({
             "type": "object",
             "properties": {
@@ -38,6 +40,7 @@ pub fn search_flights_tool_def() -> ToolDefinition {
         name: "search_flights".to_string(),
         description: Some("Search for available flights between two cities".to_string()),
         behavior: None,
+        effect: ToolEffect::ReadOnly,
         parameters: Some(json!({
             "type": "object",
             "properties": {
@@ -69,6 +72,7 @@ pub fn set_timer_tool_def() -> ToolDefinition {
         name: "set_timer".to_string(),
         description: Some("Set a timer for a specified number of seconds".to_string()),
         behavior: None,
+        effect: ToolEffect::NonIdempotent,
         parameters: Some(json!({
             "type": "object",
             "properties": {

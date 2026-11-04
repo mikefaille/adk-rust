@@ -1,5 +1,5 @@
 use crate::identity::{AdkIdentity, AppName, ExecutionIdentity, InvocationId, SessionId, UserId};
-use crate::{AdkError, Agent, Result, Toolset, types::Content};
+use crate::{AdkError, Agent, Result, ToolApproval, Toolset, types::Content};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -92,6 +92,57 @@ pub trait ReadonlyContext: Send + Sync {
     fn branch(&self) -> &str;
     /// Returns the user's input content for this invocation.
     fn user_content(&self) -> &Content;
+
+    /// Returns who the running agent is and on whose behalf it acts.
+    ///
+    /// The runtime's contexts answer from the run's [`RunConfig::acting`] for the agent
+    /// that is executing, and wrapper contexts must forward this to the context they
+    /// wrap. The default is the identity ADK-Rust derives when none is configured:
+    /// [`ActingContext::derived`](crate::ActingContext::derived) from the app name, the
+    /// agent name, and the user as a human. The invocation the agent acts in is
+    /// [`invocation_id`](Self::invocation_id).
+    fn acting_context(&self) -> crate::ActingContext {
+        crate::ActingContext::derived(
+            self.app_name(),
+            self.agent_name(),
+            self.user_id(),
+            crate::SubjectKind::Human,
+        )
+    }
+
+    /// Returns whether [`user_id`](Self::user_id) comes from an authenticated
+    /// [`RequestContext`](crate::RequestContext) rather than from the caller's request body.
+    ///
+    /// The runner's invocation context answers `true` when the run carries a
+    /// `RequestContext`, which `adk-server` sets only from a request its
+    /// `RequestContextExtractor` authenticated. A wrapper context should forward it to the
+    /// context it wraps. The default is `false`, so a context that cannot tell treats the
+    /// identity as unauthenticated. Implements spec 3.1 §10 F5.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_core::ReadonlyContext;
+    ///
+    /// /// Standing approvals apply only to a user the server authenticated.
+    /// fn standing_rules_apply(ctx: &dyn ReadonlyContext) -> bool {
+    ///     ctx.is_authenticated()
+    /// }
+    /// ```
+    fn is_authenticated(&self) -> bool {
+        false
+    }
+
+    /// Returns the session state when the runtime exposes it to dynamic toolsets.
+    ///
+    /// The default keeps lightweight contexts and third-party implementations
+    /// source-compatible. Consumers must gracefully handle contexts without
+    /// session state. Dynamic [`Toolset`] implementations use
+    /// this to determine their context-specific tool surface without requiring
+    /// mutable access to the session.
+    fn state(&self) -> Option<&dyn State> {
+        None
+    }
 
     /// Returns the application name as a typed [`AppName`].
     ///
@@ -277,6 +328,54 @@ pub trait Session: Send + Sync {
             None => self.conversation_history(),
         }
     }
+    /// Returns the history `agent_name` sends its model on `branch`.
+    ///
+    /// The agent's own events and the user's keep their turns. What another agent said,
+    /// called and got back becomes user-role context
+    /// ([`other_agent_context`](crate::history::other_agent_context)), so a workflow
+    /// sub-agent never replays an earlier agent's turns as its own, and a request that would
+    /// end on another agent's answer ends on a user turn. A system notice
+    /// ([`system_notice_event`](crate::history::system_notice_event)) keeps its user-role
+    /// turn. Branch scoping is that of
+    /// [`conversation_history_scoped`](Self::conversation_history_scoped).
+    ///
+    /// The default cannot tell authors apart and returns
+    /// `conversation_history_scoped(None, branch)`. Implementations backed by an event log
+    /// override it.
+    fn conversation_history_with_context(&self, _agent_name: &str, branch: &str) -> Vec<Content> {
+        self.conversation_history_scoped(None, branch)
+    }
+    /// Whether this session's history already holds every event of the current invocation
+    /// once the agent that produced it has yielded it.
+    ///
+    /// The runner's session records each event before it asks the agent for the next one, so
+    /// a workflow agent reads its sub-agents' history from it instead of tracking their
+    /// events itself. The default is `false`.
+    fn records_invocation_events(&self) -> bool {
+        false
+    }
+    /// Returns the tool calls `agent_name` holds for confirmation on `branch`.
+    ///
+    /// An agent resumes these at the start of a run once a decision exists for them.
+    /// Implementations backed by an event log return
+    /// [`held_tool_calls`](crate::held_tool_calls) over it. The default returns none,
+    /// so a session without an event log never resumes a held call.
+    fn held_tool_calls(&self, _agent_name: &str, _branch: &str) -> Vec<crate::HeldToolCall> {
+        Vec::new()
+    }
+    /// Returns where the workflow agent `workflow` on `branch` resumes: the positions it
+    /// recorded on the holds that stopped its last run, while those calls are still held.
+    ///
+    /// Implementations backed by an event log return
+    /// [`workflow_resume_positions`](crate::workflow_resume_positions) over it. The default
+    /// returns none, so a workflow over a session without an event log starts over.
+    fn workflow_resume_positions(
+        &self,
+        _workflow: &str,
+        _branch: &str,
+    ) -> Vec<crate::WorkflowPosition> {
+        Vec::new()
+    }
     /// Append content to conversation history (for sequential agent support)
     fn append_to_history(&self, _content: Content) {
         // Default no-op - implementations can override to track history
@@ -356,6 +455,7 @@ pub trait Session: Send + Sync {
 ///   Rust `Result` / timeout path, never from JSON content inspection.
 /// - `duration` — Wall-clock duration of the tool execution.
 /// - `error_message` — Error message if the tool failed; `None` on success.
+/// - `error` — The structured error if the tool failed; `None` on success.
 /// - `attempt` — Retry attempt number (0 = first attempt, 1 = first retry, etc.).
 ///   Always 0 when retries are not configured.
 #[derive(Debug, Clone)]
@@ -369,7 +469,15 @@ pub struct ToolOutcome {
     /// Wall-clock duration of the tool execution.
     pub duration: std::time::Duration,
     /// Error message if the tool failed. `None` on success.
+    ///
+    /// This is the full message, which the model does not see by default; see
+    /// [`tool_error_response`](crate::tool_error_response).
     pub error_message: Option<String>,
+    /// The structured error if the tool failed. `None` on success.
+    ///
+    /// A timeout is an [`ErrorCategory::Timeout`](crate::ErrorCategory::Timeout) error with code
+    /// `tool.timeout`, and a panic an internal error with code `tool.panicked`.
+    pub error: Option<Arc<crate::AdkError>>,
     /// Retry attempt number (0 = first attempt, 1 = first retry, etc.).
     /// Always 0 when retries are not configured.
     pub attempt: u32,
@@ -474,6 +582,14 @@ impl ReadonlyContext for ToolCallbackContext {
     fn user_content(&self) -> &Content {
         self.inner.user_content()
     }
+
+    fn acting_context(&self) -> crate::ActingContext {
+        self.inner.acting_context()
+    }
+
+    fn is_authenticated(&self) -> bool {
+        self.inner.is_authenticated()
+    }
 }
 
 #[async_trait]
@@ -542,10 +658,12 @@ pub trait InvocationContext: CallbackContext {
         vec![]
     }
 
-    /// Returns the request metadata from the auth middleware bridge, if present.
+    /// Returns the run's request metadata: the run's unauthenticated
+    /// [`RunConfig::request_metadata`] overlaid with the metadata of its
+    /// [`RequestContext`](crate::RequestContext), whose values win on a shared key.
     ///
-    /// This provides access to custom key-value pairs extracted from the HTTP
-    /// request by the [`RequestContextExtractor`](crate::RequestContext).
+    /// Only the request context's entries come from a request the server authenticated;
+    /// [`is_authenticated`](ReadonlyContext::is_authenticated) says whether there is one.
     fn request_metadata(&self) -> HashMap<String, serde_json::Value> {
         HashMap::new()
     }
@@ -584,6 +702,19 @@ pub trait InvocationContext: CallbackContext {
     /// without mutating the concrete agent that receives them.
     fn requires_tool_confirmation(&self, _tool_name: &str) -> bool {
         false
+    }
+
+    /// Returns the inbox of user messages sent to this run while it runs, through
+    /// `Runner::steer`.
+    ///
+    /// An agent takes the queued messages at a safe point of its loop, after a tool step's
+    /// results are in its history and before its next model request, and yields each as
+    /// [`SteeringMessage::to_event`](crate::SteeringMessage::to_event). A wrapper context
+    /// forwards it. A context whose agent must not take steering returns `None`: a
+    /// `ParallelAgent` branch, whose message waits for the first safe point after the join.
+    /// The default returns `None`.
+    fn steering_inbox(&self) -> Option<crate::SteeringInbox> {
+        None
     }
 
     /// Retrieve a secret by name from the configured secret provider.
@@ -861,16 +992,16 @@ pub enum ToolConfirmationDecision {
     Deny,
 }
 
-/// Produces a canonical fingerprint of a tool call.
+/// Produces a canonical fingerprint of a tool call's name and arguments.
 ///
 /// The fingerprint is the tool name followed by its arguments in canonical JSON
 /// form, with object keys sorted at every level so that two structurally equal
 /// argument sets always produce the same string. It is deliberately readable
 /// rather than hashed, so a mismatch can be diagnosed by inspection.
 ///
-/// Use it with
-/// [`RunConfig::tool_confirmation_fingerprints`](RunConfig::tool_confirmation_fingerprints)
-/// to bind an approval to the exact arguments it was granted for.
+/// It identifies a call, not a decision: approvals are keyed by
+/// [`ToolConfirmationRequest::fingerprint`], which adds the acting agent and the
+/// tool's [`ToolOrigin`] in front of this string.
 ///
 /// # Example
 ///
@@ -896,7 +1027,7 @@ pub fn tool_call_fingerprint(tool_name: &str, args: &Value) -> String {
 }
 
 /// Writes `value` as canonical JSON, with object keys sorted at every level.
-fn write_canonical(value: &Value, out: &mut String) {
+pub(crate) fn write_canonical(value: &Value, out: &mut String) {
     match value {
         Value::Object(map) => {
             let mut keys: Vec<&String> = map.keys().collect();
@@ -967,6 +1098,105 @@ impl ToolConfirmationPolicy {
     }
 }
 
+/// [`Tool::origin`](crate::Tool::origin) of a tool attached to an agent directly rather than
+/// published by a toolset or server.
+pub const STATIC_TOOL_ORIGIN: &str = "static";
+
+/// [`ToolOrigin::source`] of a provider-executed built-in tool the agent declares without a
+/// [`Tool`](crate::Tool) of its own.
+pub const BUILTIN_TOOL_ORIGIN: &str = "builtin";
+
+/// Who published a tool and what it declared, as recorded on a call held for approval.
+///
+/// The origin is part of the call's [fingerprint](ToolConfirmationRequest::fingerprint), so
+/// an approval granted for a tool one MCP server publishes never authorizes the same name
+/// published by another, and a tool whose description or parameters changed after the
+/// approval needs a new one.
+///
+/// # Example
+///
+/// ```rust
+/// use adk_core::ToolOrigin;
+/// use serde_json::json;
+///
+/// let wire = json!({ "name": "wire", "parameters": { "type": "object" } });
+/// let a = ToolOrigin::new("mcp:bank_a", &wire, None);
+/// let b = ToolOrigin::new("mcp:bank_b", &wire, None);
+/// assert_eq!(a.declaration_digest, b.declaration_digest);
+/// assert_ne!(a, b);
+///
+/// let redefined = json!({ "name": "wire", "parameters": { "type": "object", "required": ["memo"] } });
+/// assert_ne!(a.declaration_digest, ToolOrigin::new("mcp:bank_a", &redefined, None).declaration_digest);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolOrigin {
+    /// Who publishes the tool, as [`Tool::origin`](crate::Tool::origin) reports it:
+    /// [`STATIC_TOOL_ORIGIN`] for a tool attached to the agent, `mcp:{toolset}` for a tool an
+    /// MCP server publishes. Calls that have no [`Tool`](crate::Tool) name their publisher
+    /// too: [`BUILTIN_TOOL_ORIGIN`] for a provider-executed built-in tool, `graph:{agent}`
+    /// for a governed graph node, and `realtime` for a native handler registered on an
+    /// `adk-realtime` `RealtimeRunner`.
+    pub source: String,
+    /// `sha256:` followed by the hex SHA-256 of the tool's declaration and annotations in
+    /// canonical JSON.
+    pub declaration_digest: String,
+}
+
+impl ToolOrigin {
+    /// The origin of a tool `source` publishes with `declaration` and `annotations`.
+    pub fn new(
+        source: impl Into<String>,
+        declaration: &Value,
+        annotations: Option<&Value>,
+    ) -> Self {
+        use sha2::{Digest, Sha256};
+        use std::fmt::Write as _;
+
+        let declared =
+            serde_json::json!({ "declaration": declaration, "annotations": annotations });
+        let mut canonical = String::new();
+        write_canonical(&declared, &mut canonical);
+        let mut digest = String::with_capacity(7 + 64);
+        digest.push_str("sha256:");
+        for byte in Sha256::digest(canonical.as_bytes()) {
+            let _ = write!(digest, "{byte:02x}");
+        }
+        Self { source: source.into(), declaration_digest: digest }
+    }
+
+    /// The origin of `tool`: its [`Tool::origin`](crate::Tool::origin) and a digest of its
+    /// [`declaration`](crate::Tool::declaration) and [`annotations`](crate::Tool::annotations).
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_core::{Result, STATIC_TOOL_ORIGIN, Tool, ToolContext, ToolOrigin};
+    /// use serde_json::Value;
+    /// use std::sync::Arc;
+    ///
+    /// struct Ping;
+    ///
+    /// #[async_trait::async_trait]
+    /// impl Tool for Ping {
+    ///     fn name(&self) -> &str {
+    ///         "ping"
+    ///     }
+    ///     fn description(&self) -> &str {
+    ///         "Checks the service is up"
+    ///     }
+    ///     async fn execute(&self, _ctx: Arc<dyn ToolContext>, _args: Value) -> Result<Value> {
+    ///         Ok(Value::Null)
+    ///     }
+    /// }
+    ///
+    /// assert_eq!(ToolOrigin::of(&Ping).source, STATIC_TOOL_ORIGIN);
+    /// ```
+    pub fn of(tool: &dyn crate::Tool) -> Self {
+        Self::new(tool.origin(), &tool.declaration(), tool.annotations())
+    }
+}
+
 /// Payload describing a tool call awaiting human confirmation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -978,6 +1208,239 @@ pub struct ToolConfirmationRequest {
     pub function_call_id: Option<String>,
     /// Arguments the tool would be called with.
     pub args: Value,
+    /// The agent that made the call and the subject it acted for.
+    ///
+    /// Recorded for the approver and the audit trail. The agent's id is part of the
+    /// [`fingerprint`](Self::fingerprint), so a decision for this call never authorizes
+    /// another agent's call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acting: Option<Box<crate::ActingContext>>,
+    /// Who published the tool and what it declared when the call was held.
+    ///
+    /// Part of the [`fingerprint`](Self::fingerprint). `None` in requests recorded before
+    /// origins were, and in requests for calls the governed path saw without their tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<ToolOrigin>,
+}
+
+impl ToolConfirmationRequest {
+    /// A request for a call to `tool_name` with `args`.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_core::ToolConfirmationRequest;
+    /// use serde_json::json;
+    ///
+    /// let request = ToolConfirmationRequest::new("transfer", json!({ "amount": 5 }))
+    ///     .with_function_call_id("call-1");
+    /// assert_eq!(request.function_call_id.as_deref(), Some("call-1"));
+    /// ```
+    pub fn new(tool_name: impl Into<String>, args: Value) -> Self {
+        Self {
+            tool_name: tool_name.into(),
+            function_call_id: None,
+            args,
+            acting: None,
+            origin: None,
+        }
+    }
+
+    /// A request for a call to `tool` with `args`, carrying the tool's [`ToolOrigin`].
+    ///
+    /// With the acting agent set, its [`fingerprint`](Self::fingerprint) is the key the
+    /// governed path looks a decision up under for that agent's call, so a deployment can
+    /// approve a call before any run makes it.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_core::principal::{ActingContext, AgentPrincipal};
+    /// use adk_core::{Result, Tool, ToolApproval, ToolConfirmationRequest, ToolContext, RunConfig};
+    /// use serde_json::{Value, json};
+    /// use std::sync::Arc;
+    ///
+    /// struct Transfer;
+    ///
+    /// #[async_trait::async_trait]
+    /// impl Tool for Transfer {
+    ///     fn name(&self) -> &str {
+    ///         "transfer"
+    ///     }
+    ///     fn description(&self) -> &str {
+    ///         "Moves money out of the treasury"
+    ///     }
+    ///     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
+    ///         Ok(args)
+    ///     }
+    /// }
+    ///
+    /// // The agent `treasurer` of app `ops` acts as `urn:adk:agent:ops/treasurer` by default.
+    /// let treasurer = ActingContext::new(AgentPrincipal::derived("ops", "treasurer"));
+    /// let key = ToolConfirmationRequest::for_tool(&Transfer, json!({ "amount": 40 }))
+    ///     .with_acting_context(treasurer)
+    ///     .fingerprint();
+    /// let config = RunConfig::builder().tool_approval(key, ToolApproval::approve()).build();
+    /// assert_eq!(config.tool_approvals.len(), 1);
+    /// ```
+    pub fn for_tool(tool: &dyn crate::Tool, args: Value) -> Self {
+        Self::new(tool.name(), args).with_origin(ToolOrigin::of(tool))
+    }
+
+    /// Records the origin of the tool the call was made to.
+    #[must_use]
+    pub fn with_origin(mut self, origin: ToolOrigin) -> Self {
+        self.origin = Some(origin);
+        self
+    }
+
+    /// Sets the function call ID.
+    #[must_use]
+    pub fn with_function_call_id(mut self, id: impl Into<String>) -> Self {
+        self.function_call_id = Some(id.into());
+        self
+    }
+
+    /// Records the acting context of the agent that made the call.
+    #[must_use]
+    pub fn with_acting_context(mut self, acting: crate::ActingContext) -> Self {
+        self.acting = Some(Box::new(acting));
+        self
+    }
+
+    /// The call's fingerprint: the acting agent's id, the tool's [`ToolOrigin`], the tool
+    /// name, and the canonical arguments.
+    ///
+    /// This is the key a decision is recorded under in [`RunConfig::tool_approvals`], in
+    /// [`RunConfig::tool_confirmation_fingerprints`], and in an
+    /// [`ApprovalStore`](crate::ApprovalStore), so the decision applies to the same call
+    /// re-issued under a new call ID by the same agent to the same tool. It never applies to
+    /// another agent's call, to a tool of the same name another publisher answers, or to a
+    /// tool whose declaration changed. The parts are separated by U+001F; a missing agent or
+    /// origin leaves its part empty.
+    ///
+    /// The governed path records the acting agent on every request it builds, so a
+    /// fingerprint without one never matches a governed call.
+    /// [`RunConfigBuilder::tool_approval`] refuses one; see
+    /// [`fingerprint_agent`](Self::fingerprint_agent).
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_core::principal::{ActingContext, AgentPrincipal};
+    /// use adk_core::ToolConfirmationRequest;
+    /// use serde_json::json;
+    ///
+    /// let call = |agent: &str| {
+    ///     ToolConfirmationRequest::new("transfer", json!({ "amount": 40 }))
+    ///         .with_acting_context(ActingContext::new(AgentPrincipal::derived("ops", agent)))
+    /// };
+    /// assert_eq!(call("treasurer").fingerprint(), call("treasurer").fingerprint());
+    /// assert_ne!(call("treasurer").fingerprint(), call("intern").fingerprint());
+    /// ```
+    pub fn fingerprint(&self) -> String {
+        // Control characters would forge a separator; agent ids already exclude them.
+        let push_clean = |out: &mut String, part: &str| {
+            out.extend(part.chars().map(|c| if c.is_control() { '\u{fffd}' } else { c }));
+        };
+        let call = tool_call_fingerprint(&self.tool_name, &self.args);
+        let mut out = String::with_capacity(call.len() + 160);
+        if let Some(acting) = &self.acting {
+            push_clean(&mut out, acting.agent.id.as_str());
+        }
+        out.push('\u{1f}');
+        if let Some(origin) = &self.origin {
+            push_clean(&mut out, &origin.source);
+            out.push('\u{1f}');
+            push_clean(&mut out, &origin.declaration_digest);
+        } else {
+            out.push('\u{1f}');
+        }
+        out.push('\u{1f}');
+        out.push_str(&call);
+        out
+    }
+
+    /// The id of the acting agent `fingerprint` names, or `None` when it names none.
+    ///
+    /// `None` for the [`fingerprint`](Self::fingerprint) of a request without an acting
+    /// agent, and for a string that is no request fingerprint at all, such as a
+    /// [`tool_call_fingerprint`]. A decision keyed by such a string never authorizes a call
+    /// on the governed path, which keys every call by its acting agent.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_core::principal::{ActingContext, AgentPrincipal};
+    /// use adk_core::{ToolConfirmationRequest, tool_call_fingerprint};
+    /// use serde_json::json;
+    ///
+    /// let call = ToolConfirmationRequest::new("transfer", json!({ "amount": 40 }));
+    /// let owned = call
+    ///     .clone()
+    ///     .with_acting_context(ActingContext::new(AgentPrincipal::derived("ops", "treasurer")));
+    ///
+    /// assert_eq!(
+    ///     ToolConfirmationRequest::fingerprint_agent(&owned.fingerprint()),
+    ///     Some("urn:adk:agent:ops/treasurer")
+    /// );
+    /// assert_eq!(ToolConfirmationRequest::fingerprint_agent(&call.fingerprint()), None);
+    /// let bare = tool_call_fingerprint("transfer", &json!({ "amount": 40 }));
+    /// assert_eq!(ToolConfirmationRequest::fingerprint_agent(&bare), None);
+    /// ```
+    pub fn fingerprint_agent(fingerprint: &str) -> Option<&str> {
+        // Five parts: agent, origin source, declaration digest, tool name, arguments.
+        let mut parts = fingerprint.splitn(5, '\u{1f}');
+        let agent = parts.next().filter(|agent| !agent.is_empty())?;
+        (parts.count() == 4).then_some(agent)
+    }
+}
+
+/// One call of a model turn's batch, as [`ToolConfirmationHandler::batch_started`] sees
+/// it (spec 3.1 §10 C6).
+///
+/// # Example
+///
+/// ```rust
+/// use adk_core::BatchCall;
+/// use serde_json::json;
+///
+/// let args = json!({ "path": "src/lib.rs" });
+/// let call = BatchCall::new("edit_file", &args).with_function_call_id("call-1");
+/// assert_eq!(call.function_call_id, Some("call-1"));
+/// ```
+#[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
+pub struct BatchCall<'a> {
+    /// The tool's name.
+    pub name: &'a str,
+    /// The call's ID.
+    pub function_call_id: Option<&'a str>,
+    /// The call's arguments as the model sent them.
+    pub args: &'a Value,
+    /// Who publishes the tool, when the agent knows it.
+    pub origin: Option<&'a crate::ToolOrigin>,
+}
+
+impl<'a> BatchCall<'a> {
+    /// A call to `name` with `args`.
+    pub fn new(name: &'a str, args: &'a Value) -> Self {
+        Self { name, function_call_id: None, args, origin: None }
+    }
+
+    /// Sets the call's ID.
+    #[must_use]
+    pub fn with_function_call_id(mut self, id: &'a str) -> Self {
+        self.function_call_id = Some(id);
+        self
+    }
+
+    /// Sets the tool's origin.
+    #[must_use]
+    pub fn with_origin(mut self, origin: &'a crate::ToolOrigin) -> Self {
+        self.origin = Some(origin);
+        self
+    }
 }
 
 /// Asynchronous decision source for tool calls that require confirmation.
@@ -986,10 +1449,138 @@ pub struct ToolConfirmationRequest {
 /// invocation while a person or an external policy service reviews the exact
 /// tool call. When no handler is configured, agents preserve the existing
 /// behavior and emit an interrupted confirmation event for a later run.
+///
+/// Agents ask for each call as it is dispatched, with the call's final arguments,
+/// while calls that need no approval keep running. Calls in one batch are decided
+/// concurrently, so a handler that prompts on a shared device such as a terminal
+/// serializes its own prompts. The governed path asks through
+/// [`decide_approval`](Self::decide_approval), which calls `decide` unless overridden. A
+/// decision that takes longer than [`RunConfig::tool_confirmation_timeout`] denies the call.
+/// An error ends the turn after running tools finish; decisions still waiting in the same
+/// batch are dropped.
+///
+/// The timeout denies only in a run without an [`approval_store`](RunConfig::approval_store)
+/// to read a later decision from. With one, a call the handler does not decide in time is
+/// held there (and submitted to the run's
+/// [`approval_service`](RunConfig::approval_service), if any), the run ends with it waiting,
+/// and only a decision recorded for it resumes it; the handler is not asked about it again
+/// (spec 3.3 §7.3). [`RunConfig::deny_on_confirmation_timeout`] restores the denial.
+///
+/// A freeze of one of the run's [`governance`](RunConfig::governance) controls ends the
+/// wait at once, whatever the timeout: the handler's future is dropped, the call is refused
+/// with the freeze error, and an inbox request opened for it is withdrawn, so an answer
+/// given later — during the freeze or after an unfreeze — does not run it.
 #[async_trait]
 pub trait ToolConfirmationHandler: std::fmt::Debug + Send + Sync {
     /// Approve or deny one pending tool call.
     async fn decide(&self, request: &ToolConfirmationRequest) -> Result<ToolConfirmationDecision>;
+
+    /// Decides one pending tool call, optionally with arguments that replace the call's own
+    /// and a message.
+    ///
+    /// The governed path calls this method, not [`decide`](Self::decide). The default
+    /// returns [`ToolApproval::approve`](crate::ToolApproval::approve) or
+    /// [`ToolApproval::deny`](crate::ToolApproval::deny) for `decide`'s answer, so a
+    /// handler that does not override it decides exactly as before.
+    ///
+    /// An approval with [`edited_args`](crate::ToolApproval::edited_args) executes the call
+    /// with them only after they pass the run's [`ToolPolicy`](crate::ToolPolicy) and the
+    /// agent's tool screen again; a denial's [`message`](crate::ToolApproval::message) is
+    /// reported to the model. The approval's expiry is ignored, since it decides this call
+    /// only.
+    ///
+    /// Spec 3.1 §10, C3.
+    ///
+    /// # Errors
+    ///
+    /// An error ends the turn, as an error from `decide` does.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_core::{
+    ///     Result, ToolApproval, ToolConfirmationDecision, ToolConfirmationHandler,
+    ///     ToolConfirmationRequest, async_trait,
+    /// };
+    /// use serde_json::json;
+    ///
+    /// /// Approves transfers, capping the amount at 100.
+    /// #[derive(Debug)]
+    /// struct CapTransfers;
+    ///
+    /// #[async_trait]
+    /// impl ToolConfirmationHandler for CapTransfers {
+    ///     async fn decide(&self, _request: &ToolConfirmationRequest) -> Result<ToolConfirmationDecision> {
+    ///         Ok(ToolConfirmationDecision::Approve)
+    ///     }
+    ///
+    ///     async fn decide_approval(&self, request: &ToolConfirmationRequest) -> Result<ToolApproval> {
+    ///         let amount = request.args["amount"].as_f64().unwrap_or(0.0);
+    ///         Ok(if amount > 100.0 {
+    ///             ToolApproval::approve().with_edited_args(json!({ "amount": 100 }))
+    ///         } else {
+    ///             ToolApproval::approve()
+    ///         })
+    ///     }
+    /// }
+    ///
+    /// # futures::executor::block_on(async {
+    /// let request = ToolConfirmationRequest::new("transfer", json!({ "amount": 250 }));
+    /// let approval = CapTransfers.decide_approval(&request).await?;
+    /// assert_eq!(approval.edited_args, Some(json!({ "amount": 100 })));
+    /// # Ok::<(), adk_core::AdkError>(())
+    /// # }).unwrap();
+    /// ```
+    async fn decide_approval(&self, request: &ToolConfirmationRequest) -> Result<ToolApproval> {
+        Ok(match self.decide(request).await? {
+            ToolConfirmationDecision::Approve => ToolApproval::approve(),
+            ToolConfirmationDecision::Deny => ToolApproval::deny(),
+        })
+    }
+
+    /// Tells the handler the calls one model turn made, once per turn, before any of them
+    /// is dispatched and after the turn's run budget is reserved (spec 3.1 §10 C6, A2).
+    ///
+    /// A handler that reviews several held calls as one — a change set of edits — keeps
+    /// the batch and answers each call's [`decide_approval`](Self::decide_approval) from
+    /// one decision, whichever order the calls are dispatched in. The default does nothing,
+    /// so every call is decided on its own.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use std::sync::Mutex;
+    ///
+    /// use adk_core::{
+    ///     BatchCall, Result, ToolConfirmationDecision, ToolConfirmationHandler,
+    ///     ToolConfirmationRequest, async_trait,
+    /// };
+    ///
+    /// /// Remembers how many calls the last turn made.
+    /// #[derive(Debug, Default)]
+    /// struct Counting(Mutex<usize>);
+    ///
+    /// #[async_trait]
+    /// impl ToolConfirmationHandler for Counting {
+    ///     async fn decide(&self, _request: &ToolConfirmationRequest) -> Result<ToolConfirmationDecision> {
+    ///         Ok(ToolConfirmationDecision::Approve)
+    ///     }
+    ///
+    ///     async fn batch_started(&self, calls: &[BatchCall<'_>]) {
+    ///         *self.0.lock().unwrap() = calls.len();
+    ///     }
+    /// }
+    ///
+    /// # futures::executor::block_on(async {
+    /// let handler = Counting::default();
+    /// let args = serde_json::json!({});
+    /// handler.batch_started(&[BatchCall::new("a", &args), BatchCall::new("b", &args)]).await;
+    /// assert_eq!(*handler.0.lock().unwrap(), 2);
+    /// # });
+    /// ```
+    async fn batch_started(&self, calls: &[BatchCall<'_>]) {
+        let _ = calls;
+    }
 }
 
 /// A toolset attached to one runner invocation rather than compiled into the
@@ -1038,21 +1629,28 @@ pub struct RunConfig {
     /// `delete_file` approval for a scratch path must not authorize a call that
     /// targets a different path.
     ///
-    /// Use [`tool_confirmation_fingerprints`](Self::tool_confirmation_fingerprints)
-    /// to additionally bind a decision to the arguments it was granted for. For
-    /// name-wide or policy-driven decisions, supply a
-    /// [`tool_confirmation_handler`](Self::tool_confirmation_handler) instead.
+    /// A call ID alone does not name the agent: a provider that reuses call IDs gives
+    /// another agent's call the same one. Bind each decision with
+    /// [`tool_confirmation_fingerprints`](Self::tool_confirmation_fingerprints) to the
+    /// agent, tool, and arguments it was granted for. For name-wide or policy-driven
+    /// decisions, supply a [`tool_confirmation_handler`](Self::tool_confirmation_handler)
+    /// instead.
     pub tool_confirmation_decisions: HashMap<String, ToolConfirmationDecision>,
-    /// Optional argument binding for entries in
+    /// Binding for entries in
     /// [`tool_confirmation_decisions`](Self::tool_confirmation_decisions), keyed by
     /// the same function call ID.
     ///
-    /// The value is the fingerprint produced by [`tool_call_fingerprint`] for the
-    /// call the decision was granted for. When an entry is present and the actual
-    /// call does not match it, the decision is ignored and the call is treated as
-    /// unconfirmed — the safe direction. Use this when a decision travels through
-    /// an untrusted round trip, such as a browser, where the arguments could be
-    /// changed while the call ID is replayed.
+    /// The value is the [`ToolConfirmationRequest::fingerprint`] of the request the
+    /// decision was granted for: the acting agent, the tool's origin, the tool name, and
+    /// the arguments. When an entry is present and the actual call does not match it, the
+    /// decision is ignored and the call is treated as unconfirmed — the safe direction.
+    /// Use this whenever a decision travels through a round trip, such as a browser or an
+    /// editor, where the arguments could be changed or another agent's call could carry
+    /// the replayed call ID.
+    ///
+    /// Every governed call names its acting agent, so a binding whose fingerprint names
+    /// none ([`ToolConfirmationRequest::fingerprint_agent`]) matches no call and the
+    /// decision it binds is never applied.
     pub tool_confirmation_fingerprints: HashMap<String, String>,
     /// Optional live decision source for confirmations that have no static
     /// entry in [`tool_confirmation_decisions`](Self::tool_confirmation_decisions).
@@ -1092,17 +1690,177 @@ pub struct RunConfig {
     /// The default (`ToolConcurrencyConfig::default()`) imposes no limits,
     /// preserving backward compatibility with the previous `max_tool_concurrency: None`.
     pub tool_concurrency: ToolConcurrencyConfig,
-    /// Whether tracing spans may include full request, response, and tool
-    /// payloads when the `record-payloads` crate feature is enabled.
+    /// Whether tracing spans and the `llm_request` debug copy on model events
+    /// may include the full request, response, and tool payloads when the
+    /// `record-payloads` crate feature is enabled.
     pub record_payloads: bool,
-    /// Maximum serialized bytes recorded for tracing payload fields when full
-    /// payload recording is disabled.
+    /// Maximum serialized bytes recorded for tracing payload fields, and for the
+    /// `llm_request` debug copy on model events, when full payload recording is
+    /// disabled.
     pub trace_payload_max_bytes: usize,
     /// Maximum number of agent-to-agent transfers allowed in a single run.
     ///
     /// Prevents infinite transfer loops when agents transfer back and forth.
     /// Defaults to 10 when `None`.
     pub max_transfer_depth: Option<u32>,
+    /// Hooks applied to every model and tool call in the invocation, ahead of each agent's own
+    /// callbacks.
+    ///
+    /// The runner prepends its plugin manager here at the start of each run. Because the
+    /// `RunConfig` travels with the invocation, transfer targets and agents behind an agent tool
+    /// run these hooks too. See [`InvocationHooks`](crate::InvocationHooks).
+    pub invocation_hooks: Vec<Arc<dyn crate::InvocationHooks>>,
+    /// Resource limits for the run. `Runner` creates a fresh
+    /// [`budget_tracker`](Self::budget_tracker) from it for every run.
+    pub budget: Option<crate::RunBudget>,
+    /// Shared counters enforcing a budget across the invocation.
+    ///
+    /// `Runner` sets this from [`budget`](Self::budget) at the start of each run
+    /// when it is `None`; a tracker that is already set is kept, so callers can
+    /// share one tracker across runs. See [`crate::budget`].
+    pub budget_tracker: Option<Arc<crate::BudgetTracker>>,
+    /// Ledger that records non-idempotent tool calls so a replayed call never
+    /// executes twice. `None` disables ledgering. See
+    /// [`ActionLedger`](crate::ActionLedger).
+    pub action_ledger: Option<Arc<dyn crate::ActionLedger>>,
+    /// Policy evaluated for every tool call on its final arguments.
+    ///
+    /// `None` allows every call the agent's own confirmation settings allow. See
+    /// [`ToolPolicy`](crate::ToolPolicy) and [`authorize_tool_call`](crate::authorize_tool_call).
+    pub tool_policy: Option<Arc<dyn crate::ToolPolicy>>,
+    /// The operator's network egress ceiling for tool calls.
+    ///
+    /// When set, [`authorize_tool_call`](crate::authorize_tool_call) refuses a call whose
+    /// [`Tool::egress`](crate::Tool::egress) declaration the policy does not admit, and tools
+    /// that open their own connections read it through
+    /// [`ToolContext::egress_policy`](crate::ToolContext::egress_policy). `None` checks no
+    /// declaration. Set it with [`RunConfigBuilder::egress_policy`] or the runner's builder,
+    /// which narrow a policy already set rather than replace it. See
+    /// [`egress`](crate::egress).
+    pub egress_policy: Option<crate::egress::EgressPolicy>,
+    /// Kill switches checked at run start, before each model call, and before each tool
+    /// call, and watched while a call waits for a confirmation decision. The run stops when
+    /// any of them is frozen.
+    pub governance: Vec<crate::GovernanceControl>,
+    /// Confirmation decisions keyed by tool-call fingerprint
+    /// ([`ToolConfirmationRequest::fingerprint`]).
+    ///
+    /// A decision applies to every call in the run by the agent the fingerprint names, to
+    /// a tool with the origin it names, with those canonical arguments, whatever its call
+    /// ID, until it expires. Take the fingerprint from the request a held call surfaced, or
+    /// build it with [`ToolConfirmationRequest::for_tool`] and
+    /// [`with_acting_context`](ToolConfirmationRequest::with_acting_context). Record a
+    /// decision in an [`approval_store`](Self::approval_store) instead for one that is
+    /// consumed by the call it authorizes.
+    ///
+    /// A key that names no acting agent ([`ToolConfirmationRequest::fingerprint_agent`])
+    /// matches no governed call. [`RunConfigBuilder::tool_approval`] refuses one.
+    pub tool_approvals: HashMap<String, crate::ToolApproval>,
+    /// Where calls held for approval are recorded, and decisions taken from, between runs.
+    pub approval_store: Option<Arc<dyn crate::ApprovalStore>>,
+    /// The approval inbox a call held for approval is submitted to, as an
+    /// [`ApprovalRequest`](crate::ApprovalRequest) under the service's routing policy.
+    ///
+    /// Set it with [`RunConfigBuilder::approval_service`], which also installs the
+    /// service's store as the [`approval_store`](Self::approval_store) the decisions are
+    /// taken from.
+    pub approval_service: Option<Arc<dyn crate::ApprovalService>>,
+    /// The [`DurableRunStore`](crate::DurableRunStore) run this invocation executes, if
+    /// any. Approval requests submitted during the run carry it, so a decision wakes the
+    /// run instead of waiting for the next one.
+    pub durable_run_id: Option<String>,
+    /// The identity a server authenticated for this run, which replaces the runner's
+    /// `request_context` for it (spec 3.1 §9.2 I6). The run's contexts then answer
+    /// [`is_authenticated`](crate::ReadonlyContext::is_authenticated) with `true` and
+    /// `user_scopes` with its scopes. Its `user_id` must be the run's user; the runner
+    /// refuses a run whose request context names anyone else. `DurableWorker` sets it for
+    /// a run enqueued by an authenticated caller ([`NewRun::authenticated`](crate::NewRun::authenticated)).
+    pub request_context: Option<crate::RequestContext>,
+    /// Request metadata the run carries without authenticating anyone, such as the thread
+    /// or channel an anonymous visitor wrote in.
+    ///
+    /// Tools read it through `request_metadata()`, where the
+    /// [`request_context`](Self::request_context)'s own metadata wins on a shared key.
+    /// Unlike a request context, it never makes
+    /// [`is_authenticated`](crate::ReadonlyContext::is_authenticated) answer `true`, sets
+    /// no scopes, and names no user.
+    pub request_metadata: HashMap<String, String>,
+    /// The consent gate the run's tool calls and the runner read: a tool the gate names is
+    /// refused without consent for its purpose, the runner refuses a run for a subject being
+    /// erased, and the run's spans carry the user id only with consent for analytics.
+    /// `None` gates nothing.
+    pub consent_gate: Option<crate::subject::ConsentGate>,
+    /// How long the [`tool_confirmation_handler`](Self::tool_confirmation_handler) may take
+    /// to decide one call. A call it does not decide in time waits in the
+    /// [`approval_store`](Self::approval_store) when the run has one, and is denied
+    /// otherwise or under [`deny_on_confirmation_timeout`](Self::deny_on_confirmation_timeout).
+    /// A freeze of the run's [`governance`](Self::governance) ends the wait sooner and
+    /// refuses the call. Defaults to
+    /// [`DEFAULT_TOOL_CONFIRMATION_TIMEOUT`](crate::DEFAULT_TOOL_CONFIRMATION_TIMEOUT).
+    pub tool_confirmation_timeout: std::time::Duration,
+    /// Ledger that model calls and payment tools reserve budget against.
+    ///
+    /// When set, every model call of the run reserves its upper-bound cost
+    /// ([`Llm::max_cost_micro_usd`](crate::Llm::max_cost_micro_usd)) through a
+    /// [`ModelCallScope`](crate::ModelCallScope) built from this config and commits its
+    /// reported cost, and payment tools reserve checkout totals. See [`crate::SpendLedger`].
+    pub spend_ledger: Option<Arc<dyn crate::SpendLedger>>,
+    /// What a call to an unpriced model commits in the [`spend_ledger`](Self::spend_ledger)
+    /// when its response reports no cost.
+    ///
+    /// `None` uses the runner's estimate (`Runner::with_llm_spend_estimate`), which the
+    /// runner writes here at the start of each run, or
+    /// [`LlmSpendEstimate::default`](crate::LlmSpendEstimate::default) outside a runner.
+    pub llm_spend_estimate: Option<crate::LlmSpendEstimate>,
+    /// Where the run writes audit records, and what happens when a record cannot be
+    /// written.
+    ///
+    /// When set, the governed path records every tool decision (allowed, denied, held
+    /// for approval) and every approval decision it applies, payment tools record each
+    /// payment, and agents record calls answered with an unknown outcome. Records carry
+    /// argument digests, never arguments. Under
+    /// [`AuditFailureMode::Block`](crate::audit_log::AuditFailureMode::Block) an action
+    /// whose record cannot be written does not happen. See
+    /// [`AuditTrail`](crate::audit_log::AuditTrail).
+    pub audit: Option<crate::audit_log::AuditTrail>,
+    /// Who the run's agents act as, and for whom.
+    ///
+    /// Each agent acts as its entry in [`ActingConfig::principals`](crate::ActingConfig),
+    /// or as `urn:adk:agent:{app}/{agent}`, on behalf of the session's user as
+    /// [`ActingConfig::subject_kind`](crate::ActingConfig). At the start of each run the
+    /// runner adds the principals its [`IdentitySource`](crate::IdentitySource) gives the
+    /// root agent and the agents it maps, and refuses a run whose
+    /// [`on_behalf_of`](crate::ActingConfig::on_behalf_of) names a subject other than the
+    /// session's user unless a [`SubjectDelegationPolicy`](crate::SubjectDelegationPolicy)
+    /// allows it. An agent tool delegating to another agent sets the delegate's principal
+    /// and appends the delegating agent to the delegation chain.
+    /// See [`acting_context_for`](Self::acting_context_for).
+    pub acting: crate::ActingConfig,
+    /// Deny a call whose [`tool_confirmation_handler`](Self::tool_confirmation_handler) does
+    /// not decide within [`tool_confirmation_timeout`](Self::tool_confirmation_timeout), even
+    /// when the run has an [`approval_store`](Self::approval_store).
+    ///
+    /// `false` (the default) holds such a call in the store instead: it is recorded as
+    /// pending and submitted to the [`approval_service`](Self::approval_service), if any, the
+    /// run ends with it waiting, and a decision recorded for it later resumes it, so nothing
+    /// is decided by silence (spec 3.3 §7.3, §10 C2). A run without a store — including one
+    /// with only an approval service, whose decisions it cannot read — denies the call
+    /// either way.
+    pub deny_on_confirmation_timeout: bool,
+    /// A tool call a person asked for through something an agent drew, which this run
+    /// holds for their decision before any model call (spec 3.3 §7.4 rule 5).
+    ///
+    /// The run's root `LlmAgent` takes it once, after resuming held calls: it refuses a tool
+    /// outside its own toolset, a `kernel_*` tool or a tool that draws, checks the arguments
+    /// against the tool's parameters, runs the before-tool stages a model's call passes, and
+    /// authorizes the call as [`GovernedCall::requested`](crate::GovernedCall::requested), so
+    /// an earlier approval or the confirmation handler never answers it. The call is held as
+    /// the agent, or refused, and the run ends without a model call. A run that is not
+    /// authenticated, or whose user is not the person who asked, has it refused. A root that
+    /// cannot hold a call refuses it before anything else runs: `CodeActAgent`, the workflow
+    /// agents, teams and `GraphAgent` do; another [`Agent`] answers it with
+    /// [`RequestedCall::refusal_events`](crate::RequestedCall::refusal_events).
+    pub requested_call: Option<crate::RequestedCall>,
 }
 
 impl Default for RunConfig {
@@ -1122,6 +1880,27 @@ impl Default for RunConfig {
             record_payloads: false,
             trace_payload_max_bytes: 2048,
             max_transfer_depth: None,
+            invocation_hooks: Vec::new(),
+            budget: None,
+            budget_tracker: None,
+            action_ledger: None,
+            tool_policy: None,
+            egress_policy: None,
+            governance: Vec::new(),
+            tool_approvals: HashMap::new(),
+            approval_store: None,
+            approval_service: None,
+            durable_run_id: None,
+            request_context: None,
+            request_metadata: HashMap::new(),
+            consent_gate: None,
+            tool_confirmation_timeout: crate::DEFAULT_TOOL_CONFIRMATION_TIMEOUT,
+            spend_ledger: None,
+            llm_spend_estimate: None,
+            audit: None,
+            acting: crate::ActingConfig::default(),
+            deny_on_confirmation_timeout: false,
+            requested_call: None,
         }
     }
 }
@@ -1146,6 +1925,76 @@ impl RunConfig {
     /// ```
     pub fn builder() -> RunConfigBuilder {
         RunConfigBuilder::default()
+    }
+
+    /// Returns an error when any of the run's [`governance`](Self::governance) controls
+    /// is frozen.
+    ///
+    /// # Errors
+    ///
+    /// Returns the frozen control's `governance.frozen` error.
+    pub fn check_governance(&self) -> Result<()> {
+        self.governance.iter().try_for_each(crate::GovernanceControl::check)
+    }
+
+    /// Waits until any of the run's [`governance`](Self::governance) controls refuses work,
+    /// and returns its error, as [`check_governance`](Self::check_governance) would give it.
+    ///
+    /// Never resolves for a run without a control. See
+    /// [`GovernanceControl::refused`](crate::GovernanceControl::refused).
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_core::{GOVERNANCE_FROZEN_CODE, GovernanceControl, RunConfig};
+    ///
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() {
+    /// let control = GovernanceControl::new();
+    /// let config = RunConfig::builder().governance(control.clone()).build();
+    /// control.freeze("incident 4012");
+    /// assert_eq!(config.governance_refused().await.code, GOVERNANCE_FROZEN_CODE);
+    /// # }
+    /// ```
+    pub async fn governance_refused(&self) -> crate::AdkError {
+        if self.governance.is_empty() {
+            return std::future::pending().await;
+        }
+        let waits = self.governance.iter().map(|control| Box::pin(control.refused()));
+        futures::future::select_all(waits).await.0
+    }
+
+    /// The acting context of the agent named `agent_name` running for `user_id`.
+    ///
+    /// See [`ActingConfig::acting_context_for`](crate::ActingConfig::acting_context_for).
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_core::{AgentId, AgentPrincipal, RunConfig, SubjectRef};
+    ///
+    /// let derived = RunConfig::default().acting_context_for("shop", "cashier", "alice");
+    /// assert_eq!(derived.agent.id.as_str(), "urn:adk:agent:shop/cashier");
+    ///
+    /// let config = RunConfig::builder()
+    ///     .agent_principal("cashier", AgentPrincipal::new(AgentId::new("spiffe://shop/cashier")?))
+    ///     .build();
+    /// let configured = config.acting_context_for("shop", "cashier", "alice");
+    /// assert_eq!(configured.agent.id.as_str(), "spiffe://shop/cashier");
+    /// assert_eq!(configured.on_behalf_of, Some(SubjectRef::human("alice")));
+    /// assert_eq!(
+    ///     config.acting_context_for("shop", "stocker", "alice").agent.id.as_str(),
+    ///     "urn:adk:agent:shop/stocker"
+    /// );
+    /// # Ok::<(), adk_core::AdkError>(())
+    /// ```
+    pub fn acting_context_for(
+        &self,
+        app_name: &str,
+        agent_name: &str,
+        user_id: &str,
+    ) -> crate::ActingContext {
+        self.acting.acting_context_for(app_name, agent_name, user_id)
     }
 }
 
@@ -1188,12 +2037,26 @@ impl RunConfigBuilder {
         self
     }
 
-    /// Binds confirmation decisions to the arguments they were granted for.
+    /// Binds confirmation decisions to the agent, tool, and arguments they were granted for.
     ///
-    /// Keys are function call IDs and values are fingerprints from
-    /// [`tool_call_fingerprint`]. A decision whose fingerprint does not match the
-    /// actual call is ignored and the call is treated as unconfirmed.
+    /// Keys are function call IDs and values are the [`ToolConfirmationRequest::fingerprint`]
+    /// of the request each decision answers. A decision whose fingerprint does not match
+    /// the actual call is ignored and the call is treated as unconfirmed.
+    ///
+    /// A binding whose fingerprint names no acting agent
+    /// ([`ToolConfirmationRequest::fingerprint_agent`]) matches no governed call, so the
+    /// decision it binds is never applied; each one is logged with `tracing::warn!`.
     pub fn tool_confirmation_fingerprints(mut self, fingerprints: HashMap<String, String>) -> Self {
+        for (call_id, fingerprint) in &fingerprints {
+            if ToolConfirmationRequest::fingerprint_agent(fingerprint).is_none() {
+                tracing::warn!(
+                    function_call.id = %call_id,
+                    "confirmation decision bound to a fingerprint that names no acting agent; \
+                     it never applies. Bind it to the fingerprint of the request the call \
+                     surfaced"
+                );
+            }
+        }
         self.config.tool_confirmation_fingerprints = fingerprints;
         self
     }
@@ -1275,6 +2138,293 @@ impl RunConfigBuilder {
         self
     }
 
+    /// Appends a hook applied to every model and tool call in the invocation.
+    ///
+    /// See [`RunConfig::invocation_hooks`].
+    pub fn invocation_hook(mut self, hook: Arc<dyn crate::InvocationHooks>) -> Self {
+        self.config.invocation_hooks.push(hook);
+        self
+    }
+
+    /// Sets the resource limits for the run.
+    ///
+    /// See [`RunConfig::budget`] and [`crate::budget`].
+    pub fn budget(mut self, budget: crate::RunBudget) -> Self {
+        self.config.budget = Some(budget);
+        self
+    }
+
+    /// Sets the ledger that records non-idempotent tool calls.
+    ///
+    /// See [`RunConfig::action_ledger`].
+    pub fn action_ledger(mut self, ledger: Arc<dyn crate::ActionLedger>) -> Self {
+        self.config.action_ledger = Some(ledger);
+        self
+    }
+
+    /// Sets the policy evaluated for every tool call. See [`RunConfig::tool_policy`].
+    pub fn tool_policy(mut self, policy: Arc<dyn crate::ToolPolicy>) -> Self {
+        self.config.tool_policy = Some(policy);
+        self
+    }
+
+    /// Sets the run's egress policy, or narrows the one already set to the intersection of
+    /// both. See [`RunConfig::egress_policy`].
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_core::RunConfig;
+    /// use adk_core::egress::EgressPolicy;
+    ///
+    /// let config = RunConfig::builder()
+    ///     .egress_policy(EgressPolicy::allowlist(["*.example.com:443"]).unwrap())
+    ///     .egress_policy(EgressPolicy::allowlist(["api.example.com"]).unwrap())
+    ///     .build();
+    /// let policy = config.egress_policy.unwrap();
+    /// assert!(policy.check_url("https://api.example.com/").is_ok());
+    /// assert!(policy.check_url("https://www.example.com/").is_err());
+    /// ```
+    pub fn egress_policy(mut self, policy: crate::egress::EgressPolicy) -> Self {
+        self.config.egress_policy = Some(match self.config.egress_policy.take() {
+            Some(existing) => existing.narrow(&policy),
+            None => policy,
+        });
+        self
+    }
+
+    /// Adds a kill switch the run checks. See [`RunConfig::governance`].
+    pub fn governance(mut self, control: crate::GovernanceControl) -> Self {
+        if !self.config.governance.iter().any(|existing| existing.same_as(&control)) {
+            self.config.governance.push(control);
+        }
+        self
+    }
+
+    /// Records a decision for the call with `fingerprint`. See [`RunConfig::tool_approvals`].
+    ///
+    /// A fingerprint that names no acting agent
+    /// ([`ToolConfirmationRequest::fingerprint_agent`]) is refused: it could never authorize
+    /// a governed call, so the decision is not recorded and the refusal is logged with
+    /// `tracing::warn!`.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_core::principal::{ActingContext, AgentPrincipal};
+    /// use adk_core::{RunConfig, ToolApproval, ToolConfirmationRequest};
+    /// use serde_json::json;
+    ///
+    /// let call = ToolConfirmationRequest::new("transfer", json!({ "amount": 40 }));
+    /// let owned = call
+    ///     .clone()
+    ///     .with_acting_context(ActingContext::new(AgentPrincipal::derived("ops", "treasurer")));
+    ///
+    /// let config = RunConfig::builder()
+    ///     .tool_approval(owned.fingerprint(), ToolApproval::approve())
+    ///     .tool_approval(call.fingerprint(), ToolApproval::approve())
+    ///     .build();
+    /// assert_eq!(config.tool_approvals.keys().collect::<Vec<_>>(), [&owned.fingerprint()]);
+    /// ```
+    pub fn tool_approval(
+        mut self,
+        fingerprint: impl Into<String>,
+        approval: crate::ToolApproval,
+    ) -> Self {
+        let fingerprint = fingerprint.into();
+        if ToolConfirmationRequest::fingerprint_agent(&fingerprint).is_none() {
+            tracing::warn!(
+                "tool approval refused: its fingerprint names no acting agent, so it could \
+                 never authorize a governed call. Build it from the request the call surfaced, \
+                 or with ToolConfirmationRequest::with_acting_context"
+            );
+            return self;
+        }
+        self.config.tool_approvals.insert(fingerprint, approval);
+        self
+    }
+
+    /// Sets where held calls and their decisions are kept between runs.
+    pub fn approval_store(mut self, store: Arc<dyn crate::ApprovalStore>) -> Self {
+        self.config.approval_store = Some(store);
+        self
+    }
+
+    /// Sets the call a person asked for, which the run holds for their decision before any
+    /// model call. See [`RunConfig::requested_call`] (spec 3.3 §7.4 rule 5).
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_core::{RequestedCall, RequestedVia, RunConfig, SubjectRef};
+    /// use serde_json::json;
+    ///
+    /// let call = RequestedCall::new(
+    ///     "send_invoice",
+    ///     json!({ "to": "ana@example.com" }),
+    ///     SubjectRef::human("ana"),
+    ///     RequestedVia::form("invoice-10", 1, "send"),
+    /// );
+    /// let config = RunConfig::builder().requested_call(call.clone()).build();
+    /// assert_eq!(config.requested_call, Some(call));
+    /// ```
+    pub fn requested_call(mut self, call: crate::RequestedCall) -> Self {
+        self.config.requested_call = Some(call);
+        self
+    }
+
+    /// Submits calls held for approval to `service`, and takes their decisions from the
+    /// service's store unless an [`approval_store`](Self::approval_store) is already set.
+    ///
+    /// See [`RunConfig::approval_service`].
+    pub fn approval_service(mut self, service: Arc<dyn crate::ApprovalService>) -> Self {
+        if self.config.approval_store.is_none() {
+            self.config.approval_store = service.approval_store();
+        }
+        self.config.approval_service = Some(service);
+        self
+    }
+
+    /// Records the durable run this invocation executes. See [`RunConfig::durable_run_id`].
+    pub fn durable_run_id(mut self, run_id: impl Into<String>) -> Self {
+        self.config.durable_run_id = Some(run_id.into());
+        self
+    }
+
+    /// Runs as the identity a server authenticated. See [`RunConfig::request_context`].
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_core::{RequestContext, RunConfig};
+    ///
+    /// let config = RunConfig::builder()
+    ///     .request_context(RequestContext {
+    ///         user_id: "alice".to_string(),
+    ///         scopes: vec![],
+    ///         metadata: Default::default(),
+    ///     })
+    ///     .build();
+    /// assert_eq!(config.request_context.map(|context| context.user_id).as_deref(), Some("alice"));
+    /// ```
+    pub fn request_context(mut self, request_context: crate::RequestContext) -> Self {
+        self.config.request_context = Some(request_context);
+        self
+    }
+
+    /// Adds one entry of request metadata that authenticates no one. See
+    /// [`RunConfig::request_metadata`].
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_core::RunConfig;
+    ///
+    /// let config = RunConfig::builder().request_metadata("thread", "chat-7").build();
+    /// assert_eq!(config.request_metadata.get("thread").map(String::as_str), Some("chat-7"));
+    /// assert!(config.request_context.is_none());
+    /// ```
+    pub fn request_metadata(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.config.request_metadata.insert(key.into(), value.into());
+        self
+    }
+
+    /// Sets the consent gate. See [`RunConfig::consent_gate`].
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use std::sync::Arc;
+    /// use adk_core::RunConfig;
+    /// use adk_core::subject::{ConsentGate, ConsentPurpose, InMemoryConsentStore};
+    ///
+    /// let gate = ConsentGate::new(Arc::new(InMemoryConsentStore::new()))
+    ///     .with_tool("subscribe", ConsentPurpose::Newsletter);
+    /// let config = RunConfig::builder().consent_gate(gate).build();
+    /// assert!(config.consent_gate.is_some());
+    /// ```
+    pub fn consent_gate(mut self, gate: crate::subject::ConsentGate) -> Self {
+        self.config.consent_gate = Some(gate);
+        self
+    }
+
+    /// Sets how long the confirmation handler may take to decide one call.
+    pub fn tool_confirmation_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.config.tool_confirmation_timeout = timeout;
+        self
+    }
+
+    /// Denies a call the confirmation handler does not decide in time, instead of holding
+    /// it in the run's approval store (spec 3.3 §10 C2).
+    ///
+    /// See [`RunConfig::deny_on_confirmation_timeout`].
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_core::RunConfig;
+    ///
+    /// assert!(!RunConfig::default().deny_on_confirmation_timeout);
+    /// let config = RunConfig::builder().deny_on_confirmation_timeout(true).build();
+    /// assert!(config.deny_on_confirmation_timeout);
+    /// ```
+    pub fn deny_on_confirmation_timeout(mut self, deny: bool) -> Self {
+        self.config.deny_on_confirmation_timeout = deny;
+        self
+    }
+
+    /// Sets the ledger that model calls and payment tools reserve budget against.
+    ///
+    /// See [`RunConfig::spend_ledger`].
+    pub fn spend_ledger(mut self, ledger: Arc<dyn crate::SpendLedger>) -> Self {
+        self.config.spend_ledger = Some(ledger);
+        self
+    }
+
+    /// Records the run's governed actions through `audit`. See [`RunConfig::audit`].
+    pub fn audit(mut self, audit: crate::audit_log::AuditTrail) -> Self {
+        self.config.audit = Some(audit);
+        self
+    }
+
+    /// Sets the hold reserved in the spend ledger before each model call.
+    ///
+    /// See [`RunConfig::llm_spend_estimate`].
+    pub fn llm_spend_estimate(mut self, estimate: crate::LlmSpendEstimate) -> Self {
+        self.config.llm_spend_estimate = Some(estimate);
+        self
+    }
+
+    /// Sets who the run's agents act as, and for whom. See [`RunConfig::acting`].
+    pub fn acting(mut self, acting: crate::ActingConfig) -> Self {
+        self.config.acting = acting;
+        self
+    }
+
+    /// Sets the principal the agent named `agent_name` acts as. See [`RunConfig::acting`].
+    pub fn agent_principal(
+        mut self,
+        agent_name: impl Into<String>,
+        principal: crate::AgentPrincipal,
+    ) -> Self {
+        self.config.acting.principals.insert(agent_name.into(), principal);
+        self
+    }
+
+    /// Sets what kind of subject the session's user is. See [`RunConfig::acting`].
+    pub fn subject_kind(mut self, kind: crate::SubjectKind) -> Self {
+        self.config.acting.subject_kind = kind;
+        self
+    }
+
+    /// Asks the run to act for `subject`; the runner refuses the run unless `subject` is
+    /// the session's user or a [`SubjectDelegationPolicy`](crate::SubjectDelegationPolicy)
+    /// allows it. See [`RunConfig::acting`].
+    pub fn on_behalf_of(mut self, subject: crate::SubjectRef) -> Self {
+        self.config.acting.on_behalf_of = Some(subject);
+        self
+    }
+
     /// Consumes the builder and returns the configured [`RunConfig`].
     pub fn build(self) -> RunConfig {
         self.config
@@ -1297,6 +2447,8 @@ mod tests {
         assert_eq!(config.trace_payload_max_bytes, 2048);
         assert!(config.tool_confirmation_decisions.is_empty());
         assert_eq!(config.max_transfer_depth, None);
+        assert!(config.invocation_hooks.is_empty());
+        assert!(config.action_ledger.is_none());
     }
 
     #[test]
@@ -1348,6 +2500,26 @@ mod tests {
     #[test]
     fn test_validate_state_key_null_byte() {
         assert!(validate_state_key("foo\0bar").is_err());
+    }
+
+    #[test]
+    fn fingerprint_agent_reads_the_acting_agent_of_a_request_fingerprint() {
+        use crate::principal::{ActingContext, AgentPrincipal};
+        let args = serde_json::json!({ "amount": 40 });
+        let call = ToolConfirmationRequest::new("pay", args.clone());
+        let owned = call
+            .clone()
+            .with_acting_context(ActingContext::new(AgentPrincipal::derived("ops", "treasurer")));
+        let published =
+            owned.clone().with_origin(ToolOrigin::new("mcp:bank", &serde_json::json!({}), None));
+
+        let agent = ToolConfirmationRequest::fingerprint_agent;
+        assert_eq!(agent(&owned.fingerprint()), Some("urn:adk:agent:ops/treasurer"));
+        assert_eq!(agent(&published.fingerprint()), Some("urn:adk:agent:ops/treasurer"));
+        assert_eq!(agent(&call.fingerprint()), None);
+        assert_eq!(agent(&call.with_origin(published.origin.unwrap()).fingerprint()), None);
+        assert_eq!(agent(&tool_call_fingerprint("pay", &args)), None);
+        assert_eq!(agent(""), None);
     }
 
     #[test]

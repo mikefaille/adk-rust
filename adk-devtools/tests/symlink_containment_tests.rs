@@ -8,9 +8,26 @@
 
 #![cfg(unix)]
 
-use adk_devtools::Workspace;
+use adk_core::{ReadonlyContext, Tool, ToolContext};
+use adk_devtools::{DevToolset, Workspace};
+use serde_json::{Value, json};
 use std::fs;
 use std::os::unix::fs::symlink;
+use std::sync::Arc;
+
+mod common;
+use common::TestCtx;
+
+/// Runs the named tool from a full toolset over `workspace`.
+async fn run_tool(workspace: &Workspace, name: &str, args: Value) -> adk_core::Result<Value> {
+    let toolset = DevToolset::new(workspace.clone());
+    let readonly_ctx: Arc<dyn ReadonlyContext> = Arc::new(TestCtx);
+    let tools = adk_core::Toolset::tools(&toolset, readonly_ctx).await.unwrap();
+    let tool: &Arc<dyn Tool> =
+        tools.iter().find(|tool| tool.name() == name).expect("the toolset must expose the tool");
+    let ctx: Arc<dyn ToolContext> = Arc::new(TestCtx);
+    tool.execute(ctx, args).await
+}
 
 /// A workspace root plus an outside directory, both inside one temp dir.
 struct Fixture {
@@ -116,4 +133,296 @@ fn a_symlink_that_stays_inside_the_workspace_is_allowed() {
     let workspace = Workspace::new(&f.root);
     assert!(workspace.resolve("alias.txt").is_ok(), "an inside-pointing link must resolve");
     assert!(workspace.resolve("real.txt").is_ok());
+}
+
+// ── Dangling symlinks ─────────────────────────────────────────────────
+//
+// Canonicalizing a dangling symlink fails, and the check stepped past it to the parent
+// directory. A write then followed the link and created its target outside the
+// workspace, so a cloned repository containing `link -> ~/.zshenv` let `write_file`
+// create `~/.zshenv`.
+
+#[test]
+fn a_dangling_symlink_pointing_outside_is_refused() {
+    let f = fixture();
+    symlink(f.outside.join("planted.txt"), f.root.join("link")).unwrap();
+
+    let workspace = Workspace::new(&f.root);
+    assert!(workspace.resolve("link").is_err(), "a dangling link to a host path was accepted");
+}
+
+#[test]
+fn a_dangling_symlinked_directory_is_refused() {
+    let f = fixture();
+    symlink(f.outside.join("missing-dir"), f.root.join("dir-link")).unwrap();
+
+    let workspace = Workspace::new(&f.root);
+    assert!(
+        workspace.resolve("dir-link/planted.txt").is_err(),
+        "creation beneath a dangling directory link was accepted"
+    );
+}
+
+#[test]
+fn a_dangling_symlink_is_refused_even_when_it_points_inside() {
+    // Where a dangling link lands cannot be verified by canonicalization, so it is
+    // refused rather than trusted. Writing to the target path directly still works.
+    let f = fixture();
+    symlink(f.root.join("not-built-yet.txt"), f.root.join("latest")).unwrap();
+
+    let workspace = Workspace::new(&f.root);
+    assert!(workspace.resolve("latest").is_err());
+    assert!(workspace.resolve("not-built-yet.txt").is_ok());
+}
+
+#[test]
+fn a_symlink_loop_is_refused() {
+    let f = fixture();
+    symlink(f.root.join("b"), f.root.join("a")).unwrap();
+    symlink(f.root.join("a"), f.root.join("b")).unwrap();
+
+    let workspace = Workspace::new(&f.root);
+    assert!(workspace.resolve("a").is_err());
+}
+
+#[tokio::test]
+async fn write_file_through_a_dangling_symlink_does_not_create_the_target() {
+    let f = fixture();
+    let target = f.outside.join("planted.txt");
+    symlink(&target, f.root.join("link")).unwrap();
+    let workspace = Workspace::new(&f.root);
+
+    let result =
+        run_tool(&workspace, "write_file", json!({"path": "link", "content": "export EVIL=1"}))
+            .await;
+
+    let err = result.expect_err("a write through a dangling link was accepted");
+    assert!(err.to_string().contains("escapes the workspace root"), "unexpected error: {err}");
+    assert!(!target.exists(), "the write created a file outside the workspace");
+}
+
+#[tokio::test]
+async fn edit_file_through_a_dangling_symlink_is_refused() {
+    let f = fixture();
+    let target = f.outside.join("planted.txt");
+    symlink(&target, f.root.join("link")).unwrap();
+    let workspace = Workspace::new(&f.root);
+
+    let result = run_tool(
+        &workspace,
+        "edit_file",
+        json!({"path": "link", "old_string": "a", "new_string": "b"}),
+    )
+    .await;
+
+    let err = result.expect_err("an edit through a dangling link was accepted");
+    assert!(err.to_string().contains("escapes the workspace root"), "unexpected error: {err}");
+    assert!(!target.exists(), "the edit created a file outside the workspace");
+}
+
+#[tokio::test]
+async fn write_file_through_an_inside_symlink_updates_its_target() {
+    // The no-follow open must not break writing through a link that stays inside.
+    let f = fixture();
+    fs::write(f.root.join("real.txt"), "old").unwrap();
+    symlink(f.root.join("real.txt"), f.root.join("alias.txt")).unwrap();
+    let workspace = Workspace::new(&f.root);
+
+    run_tool(&workspace, "write_file", json!({"path": "alias.txt", "content": "new"}))
+        .await
+        .expect("a write through an inside-pointing link must succeed");
+
+    assert_eq!(fs::read_to_string(f.root.join("real.txt")).unwrap(), "new");
+    assert!(fs::symlink_metadata(f.root.join("alias.txt")).unwrap().file_type().is_symlink());
+}
+
+#[tokio::test]
+async fn edit_file_still_edits_an_ordinary_file() {
+    let f = fixture();
+    fs::write(f.root.join("notes.txt"), "hello world").unwrap();
+    let workspace = Workspace::new(&f.root);
+
+    run_tool(&workspace, "read_file", json!({"path": "notes.txt"})).await.unwrap();
+    run_tool(
+        &workspace,
+        "edit_file",
+        json!({"path": "notes.txt", "old_string": "world", "new_string": "there"}),
+    )
+    .await
+    .expect("an ordinary edit must succeed");
+
+    assert_eq!(fs::read_to_string(f.root.join("notes.txt")).unwrap(), "hello there");
+}
+
+// ── glob ──────────────────────────────────────────────────────────────
+//
+// `glob` joined the pattern onto the root unchecked. The `glob` crate follows `..`
+// literally and walks symlinked directories, so both listed paths outside the workspace.
+
+/// The paths a glob call returned.
+fn matches(result: &Value) -> Vec<String> {
+    result["matches"]
+        .as_array()
+        .expect("matches must be an array")
+        .iter()
+        .map(|path| path.as_str().unwrap().to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn a_glob_pattern_with_parent_traversal_is_refused() {
+    let f = fixture();
+    let workspace = Workspace::new(&f.root);
+
+    for pattern in ["../*", "../../../*", "../outside/*", "src/../../outside/*"] {
+        let result = run_tool(&workspace, "glob", json!({"pattern": pattern})).await;
+        assert!(result.is_err(), "pattern {pattern} was accepted: {:?}", result.ok());
+    }
+}
+
+#[tokio::test]
+async fn an_absolute_glob_pattern_is_refused() {
+    let f = fixture();
+    let workspace = Workspace::new(&f.root);
+    let pattern = format!("{}/*", f.outside.display());
+
+    let result = run_tool(&workspace, "glob", json!({"pattern": pattern})).await;
+    assert!(result.is_err(), "an absolute pattern was accepted: {:?}", result.ok());
+}
+
+#[tokio::test]
+async fn glob_does_not_list_through_a_symlinked_directory_pointing_outside() {
+    let f = fixture();
+    fs::create_dir_all(f.root.join("src")).unwrap();
+    fs::write(f.root.join("src/main.rs"), "fn main() {}").unwrap();
+    symlink(&f.outside, f.root.join("escape")).unwrap();
+    let workspace = Workspace::new(&f.root);
+
+    let result = run_tool(&workspace, "glob", json!({"pattern": "**/*"})).await.unwrap();
+    let listed = matches(&result);
+
+    assert!(
+        listed.iter().all(|path| !path.starts_with("escape")),
+        "glob listed through a link to the host: {listed:?}"
+    );
+    assert!(listed.contains(&"src/main.rs".to_string()), "ordinary files must still be listed");
+}
+
+#[tokio::test]
+async fn glob_still_lists_through_a_symlink_that_stays_inside() {
+    let f = fixture();
+    fs::create_dir_all(f.root.join("real")).unwrap();
+    fs::write(f.root.join("real/a.txt"), "a").unwrap();
+    symlink(f.root.join("real"), f.root.join("alias")).unwrap();
+    let workspace = Workspace::new(&f.root);
+
+    let result = run_tool(&workspace, "glob", json!({"pattern": "alias/*.txt"})).await.unwrap();
+    assert_eq!(matches(&result), vec!["alias/a.txt".to_string()]);
+}
+
+#[tokio::test]
+async fn glob_treats_metacharacters_in_the_root_literally() {
+    // An unescaped `[` in the root path is read as a character class.
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("ws[1]");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("a.rs"), "").unwrap();
+    let workspace = Workspace::new(&root);
+
+    let result = run_tool(&workspace, "glob", json!({"pattern": "*.rs"})).await.unwrap();
+    assert_eq!(matches(&result), vec!["a.rs".to_string()]);
+}
+
+// ── Swaps after the check (spec 3.1 §10 D4) ───────────────────────────
+//
+// The containment check resolved the path, and the read then opened it again by name,
+// following whatever link stood there by then. A second process that keeps swapping a
+// workspace file for a symlink to a host file made some reads return the host file.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn read_file_never_follows_a_symlink_swapped_in_after_the_check() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let f = fixture();
+    let notes = f.root.join("notes.md");
+    fs::write(&notes, "inside").unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let swapper = {
+        let (stop, root, secret) = (stop.clone(), f.root.clone(), f.outside.join("secret.txt"));
+        std::thread::spawn(move || {
+            let (link, file) = (root.join(".swap-link"), root.join(".swap-file"));
+            while !stop.load(Ordering::Relaxed) {
+                let _ = fs::remove_file(&link);
+                symlink(&secret, &link).unwrap();
+                fs::rename(&link, root.join("notes.md")).unwrap();
+                fs::write(&file, "inside").unwrap();
+                fs::rename(&file, root.join("notes.md")).unwrap();
+            }
+        })
+    };
+    let workspace = Workspace::new(&f.root);
+
+    // A refused read returns in microseconds, so a fixed count of reads can all fall while
+    // the swapper thread is descheduled with the link in place; the reads go on until they
+    // have met both the workspace file and the link.
+    let started = std::time::Instant::now();
+    let (mut leaked, mut read, mut refused, mut attempts) = (0, 0, 0, 0);
+    while attempts < 3000
+        || ((read == 0 || refused == 0) && started.elapsed() < std::time::Duration::from_secs(60))
+    {
+        attempts += 1;
+        match run_tool(&workspace, "read_file", json!({"path": "notes.md"})).await {
+            Ok(result) => {
+                let content = result["content"].as_str().unwrap_or_default().to_string();
+                if content.contains("host secret") {
+                    leaked += 1;
+                } else {
+                    read += 1;
+                }
+            }
+            Err(_) => refused += 1,
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    swapper.join().unwrap();
+
+    assert_eq!(
+        leaked, 0,
+        "{leaked} of {attempts} reads followed a link swapped in after the check"
+    );
+    assert!(read > 0, "none of {attempts} reads saw the workspace file");
+    assert!(refused > 0, "none of {attempts} reads met the swapped-in link");
+}
+
+#[tokio::test]
+async fn read_file_refuses_a_file_with_more_than_one_hard_link() {
+    let f = fixture();
+    fs::hard_link(f.outside.join("secret.txt"), f.root.join("linked.txt")).unwrap();
+    let workspace = Workspace::new(&f.root);
+
+    let read = run_tool(&workspace, "read_file", json!({"path": "linked.txt"})).await;
+    let err = read.expect_err("a hard-linked file was read");
+    assert!(err.to_string().contains("hard links"), "unexpected error: {err}");
+
+    // An edit reads the file too, and its match count would reveal the contents.
+    let edit = run_tool(
+        &workspace,
+        "edit_file",
+        json!({"path": "linked.txt", "old_string": "host", "new_string": "x"}),
+    )
+    .await;
+    assert!(edit.is_err(), "a hard-linked file was edited: {:?}", edit.ok());
+    assert_eq!(fs::read_to_string(f.outside.join("secret.txt")).unwrap(), "host secret");
+}
+
+#[tokio::test]
+async fn write_file_creates_missing_directories_beneath_the_root() {
+    let f = fixture();
+    let workspace = Workspace::new(&f.root);
+
+    run_tool(&workspace, "write_file", json!({"path": "a/b/c.txt", "content": "deep"}))
+        .await
+        .expect("a nested write must create its directories");
+
+    assert_eq!(fs::read_to_string(f.root.join("a/b/c.txt")).unwrap(), "deep");
 }

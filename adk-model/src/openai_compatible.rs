@@ -2,13 +2,13 @@
 
 use crate::openai::{OpenAIReasoningEffort, convert};
 use crate::retry::{RetryConfig, execute_with_retry, is_retryable_model_error};
+use crate::sse::take_line;
 use adk_core::{
     AdkError, Content, ErrorCategory, ErrorComponent, FinishReason, GenericSchemaAdapter, Llm,
     LlmRequest, LlmResponse, LlmResponseStream, Part, SchemaAdapter, SchemaCache, UsageMetadata,
 };
 use async_openai::types::chat::{
     CreateChatCompletionRequestArgs, ReasoningEffort as OaiReasoningEffort, ResponseFormat,
-    ResponseFormatJsonSchema,
 };
 use async_stream::try_stream;
 use async_trait::async_trait;
@@ -16,12 +16,37 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Assistant-message field accepted by an OpenAI-compatible provider for reasoning replay.
+///
+/// Reasoning replay is disabled by default. Enabling it selects `reasoning_content`;
+/// an explicit field overrides that choice for endpoints such as newer vLLM servers.
+///
+/// # Example
+///
+/// ```
+/// use adk_model::ReasoningReplayField;
+///
+/// let field = ReasoningReplayField::ReasoningContent;
+/// assert_eq!(field, ReasoningReplayField::ReasoningContent);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ReasoningReplayField {
+    /// Use the `reasoning_content` assistant-message field.
+    ReasoningContent,
+    /// Use the `reasoning` assistant-message field, as used by newer vLLM servers.
+    Reasoning,
+}
+
 /// Configuration for OpenAI-compatible providers.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// The API key is redacted from `Debug` output and omitted when serializing.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OpenAICompatibleConfig {
     /// Provider display name used in error messages.
     pub provider_name: String,
-    /// API key.
+    /// API key. Never serialized; deserializing a config without it yields an empty key.
+    #[serde(skip_serializing, default)]
     pub api_key: String,
     /// Model name.
     pub model: String,
@@ -39,6 +64,21 @@ pub struct OpenAICompatibleConfig {
     pub reasoning_effort: Option<OaiReasoningEffort>,
     /// Whether to allow the model to call multiple tools in a single turn.
     pub parallel_tool_calls: bool,
+}
+
+impl std::fmt::Debug for OpenAICompatibleConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenAICompatibleConfig")
+            .field("provider_name", &self.provider_name)
+            .field("api_key", &"[REDACTED]")
+            .field("model", &self.model)
+            .field("base_url", &self.base_url)
+            .field("organization_id", &self.organization_id)
+            .field("project_id", &self.project_id)
+            .field("reasoning_effort", &self.reasoning_effort)
+            .field("parallel_tool_calls", &self.parallel_tool_calls)
+            .finish()
+    }
 }
 
 impl OpenAICompatibleConfig {
@@ -155,6 +195,80 @@ impl OpenAICompatibleConfig {
         Self::new(api_key, model).with_provider_name("xai").with_base_url("https://api.x.ai/v1")
     }
 
+    /// OrcaRouter preset.
+    ///
+    /// OrcaRouter routes one OpenAI-compatible endpoint to models from several
+    /// vendors; model IDs carry a vendor prefix such as `openai/` or `anthropic/`.
+    ///
+    /// Default model suggestion: `openai/gpt-5.6-terra`
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use adk_model::{OpenAICompatible, OpenAICompatibleConfig};
+    ///
+    /// let config = OpenAICompatibleConfig::orcarouter("sk-orca-...", "openai/gpt-5.6-terra");
+    /// assert_eq!(config.base_url.as_deref(), Some("https://api.orcarouter.ai/v1"));
+    ///
+    /// let model = OpenAICompatible::new(config)?;
+    /// # let _ = model;
+    /// # Ok::<(), adk_core::AdkError>(())
+    /// ```
+    pub fn orcarouter(api_key: impl Into<String>, model: impl Into<String>) -> Self {
+        Self::new(api_key, model)
+            .with_provider_name("orcarouter")
+            .with_base_url("https://api.orcarouter.ai/v1")
+    }
+
+    /// Cheaper Inference preset.
+    ///
+    /// Cheaper Inference serves models from several vendors behind one
+    /// OpenAI-compatible endpoint; model IDs are bare, such as `gpt-5.4-mini`
+    /// or `claude-sonnet-5`.
+    ///
+    /// Default model suggestion: `gpt-5.4-mini`
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use adk_model::{OpenAICompatible, OpenAICompatibleConfig};
+    ///
+    /// let config = OpenAICompatibleConfig::cheaper_inference("ci_live_...", "gpt-5.4-mini");
+    /// assert_eq!(config.base_url.as_deref(), Some("https://api.cheaperinference.com/v1"));
+    ///
+    /// let model = OpenAICompatible::new(config)?;
+    /// # let _ = model;
+    /// # Ok::<(), adk_core::AdkError>(())
+    /// ```
+    pub fn cheaper_inference(api_key: impl Into<String>, model: impl Into<String>) -> Self {
+        Self::new(api_key, model)
+            .with_provider_name("cheaper-inference")
+            .with_base_url("https://api.cheaperinference.com/v1")
+    }
+
+    /// API Route preset.
+    ///
+    /// API Route serves models from several vendors behind one OpenAI-compatible
+    /// endpoint; `GET /v1/models` lists the model IDs a key can use.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use adk_model::{OpenAICompatible, OpenAICompatibleConfig};
+    ///
+    /// let config = OpenAICompatibleConfig::api_route("sk-...", "gpt-6.1-sol");
+    /// assert_eq!(config.base_url.as_deref(), Some("https://global.api-route.com/v1"));
+    ///
+    /// let model = OpenAICompatible::new(config)?;
+    /// # let _ = model;
+    /// # Ok::<(), adk_core::AdkError>(())
+    /// ```
+    pub fn api_route(api_key: impl Into<String>, model: impl Into<String>) -> Self {
+        Self::new(api_key, model)
+            .with_provider_name("api-route")
+            .with_base_url("https://global.api-route.com/v1")
+    }
+
     /// Google Gemini (OpenAI-compatible) preset.
     ///
     /// Targets Gemini's OpenAI-compatibility endpoint, letting you use a Gemini
@@ -234,9 +348,52 @@ impl OpenAICompatibleConfig {
     }
 }
 
+/// Error codes a compatible client reports.
+///
+/// Native services routed through [`OpenAICompatible`] keep the codes their
+/// dedicated clients reported, because error codes are part of the public contract.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ErrorCodes {
+    /// Transport failure: no response arrived, or its body stopped arriving.
+    pub(crate) request: &'static str,
+    /// Non-success HTTP status without a status-specific code.
+    pub(crate) api_error: &'static str,
+    /// Response body that is not valid JSON.
+    pub(crate) parse: &'static str,
+    /// Stream that ended, or whose connection failed, before the response finished.
+    pub(crate) incomplete_stream: &'static str,
+    /// Error the provider reported inside a response or stream.
+    pub(crate) stream_error: &'static str,
+    /// Status-specific codes that take precedence over `api_error`.
+    pub(crate) status: &'static [(u16, &'static str)],
+}
+
+impl ErrorCodes {
+    /// Codes for providers reached through the generic compatible client.
+    pub(crate) const COMPATIBLE: Self = Self {
+        request: "model.openai_compat.request",
+        api_error: "model.openai_compat.api_error",
+        parse: "model.openai_compat.parse",
+        incomplete_stream: "model.openai_compat.incomplete_stream",
+        stream_error: "model.openai_compat.stream_error",
+        status: &[],
+    };
+
+    fn for_status(&self, status: u16) -> &'static str {
+        self.status
+            .iter()
+            .find_map(|(candidate, code)| (*candidate == status).then_some(*code))
+            .unwrap_or(self.api_error)
+    }
+}
+
 /// Shared OpenAI-compatible client implementation.
 pub struct OpenAICompatible {
+    completion_url: Option<String>,
     http: reqwest::Client,
+    /// Headers added to every request, kept so later calls extend rather than replace them.
+    default_headers: http::HeaderMap,
+    request_adapter: Option<crate::openai::RequestAdapter>,
     api_key: String,
     base_url: String,
     model: String,
@@ -245,8 +402,31 @@ pub struct OpenAICompatible {
     reasoning_effort: Option<OpenAIReasoningEffort>,
     organization_id: Option<String>,
     parallel_tool_calls: bool,
+    reasoning_replay_field: Option<ReasoningReplayField>,
+    error_codes: ErrorCodes,
     adapter: std::sync::Arc<dyn SchemaAdapter>,
     cache: SchemaCache,
+}
+
+/// Builds the redirect-free HTTP client; adapters receive defaults on each request.
+fn compatible_http_client(
+    timeouts: crate::HttpTimeouts,
+    provider_name: &str,
+) -> Result<reqwest::Client, AdkError> {
+    timeouts
+        .apply(reqwest::Client::builder())
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|err| {
+            AdkError::new(
+                ErrorComponent::Model,
+                ErrorCategory::Internal,
+                "model.openai.http_client_init",
+                format!("failed to initialize the {provider_name} HTTP client: {err}"),
+            )
+            .with_provider(provider_name)
+            .with_source(err)
+        })
 }
 
 impl OpenAICompatible {
@@ -280,8 +460,12 @@ impl OpenAICompatible {
         };
         let cache = SchemaCache::for_adapter(std::sync::Arc::clone(&adapter));
 
+        let timeouts = crate::HttpTimeouts::default();
         Ok(Self {
-            http: reqwest::Client::new(),
+            completion_url: None,
+            http: compatible_http_client(timeouts, &config.provider_name)?,
+            default_headers: http::HeaderMap::new(),
+            request_adapter: None,
             api_key: config.api_key,
             base_url,
             model: config.model,
@@ -290,9 +474,62 @@ impl OpenAICompatible {
             reasoning_effort,
             organization_id: config.organization_id,
             parallel_tool_calls: config.parallel_tool_calls,
+            reasoning_replay_field: None,
+            error_codes: ErrorCodes::COMPATIBLE,
             adapter,
             cache,
         })
+    }
+
+    /// Adds default HTTP headers to every request, replacing earlier defaults with the same name.
+    ///
+    /// The bearer token and organization headers set per request take precedence.
+    /// Headers are applied per request without replacing the HTTP transport or its
+    /// timeout settings; redirects stay disabled.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use adk_model::{OpenAICompatible, OpenAICompatibleConfig};
+    /// use http::header::{HeaderMap, HeaderValue};
+    ///
+    /// let mut headers = HeaderMap::new();
+    /// headers.insert("x-session-id", HeaderValue::from_static("conversation-1"));
+    /// let client = OpenAICompatible::new(OpenAICompatibleConfig::new("api-key", "model"))?
+    ///     .with_default_headers(headers)?;
+    /// # Ok::<(), adk_core::AdkError>(())
+    /// ```
+    pub fn with_default_headers(mut self, headers: http::HeaderMap) -> Result<Self, AdkError> {
+        self.default_headers.extend(headers);
+        Ok(self)
+    }
+
+    /// Sets the connect and idle timeouts of the HTTP transport.
+    ///
+    /// The idle timeout bounds each wait for data, so a stream that stalls fails with a
+    /// `Timeout` error instead of holding the run; see [`HttpTimeouts`](crate::HttpTimeouts)
+    /// for the defaults. This rebuilds the `reqwest` client, so it returns `Result`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use std::time::Duration;
+    ///
+    /// use adk_model::{HttpTimeouts, OpenAICompatible, OpenAICompatibleConfig};
+    ///
+    /// let client = OpenAICompatible::new(OpenAICompatibleConfig::new("api-key", "model"))?
+    ///     .with_timeouts(HttpTimeouts::new(Duration::from_secs(10), Duration::from_secs(120)))?;
+    /// # let _ = client;
+    /// # Ok::<(), adk_core::AdkError>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an `Internal` error with code `model.openai.http_client_init` when the
+    /// HTTP client cannot be built.
+    pub fn with_timeouts(mut self, timeouts: crate::HttpTimeouts) -> Result<Self, AdkError> {
+        self.http = compatible_http_client(timeouts, &self.provider_name)?;
+        Ok(self)
     }
 
     /// Access the custom schema adapter for this provider.
@@ -307,6 +544,33 @@ impl OpenAICompatible {
         self
     }
 
+    /// Customize generation request fields and headers before each HTTP attempt.
+    ///
+    /// The adapter runs under this client's [`RetryConfig`]; see
+    /// [`RequestAdapter`](crate::openai::RequestAdapter) for an example.
+    #[must_use]
+    pub fn with_request_adapter(mut self, adapter: crate::openai::RequestAdapter) -> Self {
+        self.request_adapter = Some(adapter);
+        self
+    }
+
+    /// Use a native service's fully qualified Chat Completions route.
+    pub(crate) fn with_completion_url(mut self, url: String) -> Self {
+        self.completion_url = Some(url);
+        self
+    }
+
+    pub(crate) fn with_reasoning_effort(mut self, effort: Option<OpenAIReasoningEffort>) -> Self {
+        self.reasoning_effort = effort;
+        self
+    }
+
+    /// Report a native service's error codes instead of the compatible ones.
+    pub(crate) fn with_error_codes(mut self, error_codes: ErrorCodes) -> Self {
+        self.error_codes = error_codes;
+        self
+    }
+
     /// Set the retry configuration (mutable reference).
     pub fn set_retry_config(&mut self, retry_config: RetryConfig) {
         self.retry_config = retry_config;
@@ -316,18 +580,109 @@ impl OpenAICompatible {
     pub fn retry_config(&self) -> &RetryConfig {
         &self.retry_config
     }
+
+    /// Enables or disables assistant reasoning replay through `reasoning_content`.
+    ///
+    /// Disabled by default. Passing `true` selects `reasoning_content`, replacing
+    /// any previous field selection; passing `false` clears the selection.
+    /// This controls history serialization, not whether the model thinks.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use adk_model::{OpenAICompatible, OpenAICompatibleConfig};
+    ///
+    /// let client = OpenAICompatible::new(OpenAICompatibleConfig::new("key", "model"))?
+    ///     .with_reasoning_replay(true);
+    /// # let _ = client;
+    /// # Ok::<(), adk_core::AdkError>(())
+    /// ```
+    #[must_use]
+    pub fn with_reasoning_replay(mut self, enabled: bool) -> Self {
+        self.reasoning_replay_field = enabled.then_some(ReasoningReplayField::ReasoningContent);
+        self
+    }
+
+    /// Enables assistant reasoning replay with an explicit provider field.
+    ///
+    /// Newer vLLM servers use `ReasoningReplayField::Reasoning`. Older deployments
+    /// may still require `reasoning_content`; select the field the endpoint accepts.
+    /// The last call to either reasoning-replay builder determines the selection.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use adk_model::{
+    ///     OpenAICompatible, OpenAICompatibleConfig, ReasoningReplayField,
+    /// };
+    ///
+    /// let client = OpenAICompatible::new(OpenAICompatibleConfig::new("key", "model"))?
+    ///     .with_reasoning_replay_field(ReasoningReplayField::Reasoning);
+    /// # let _ = client;
+    /// # Ok::<(), adk_core::AdkError>(())
+    /// ```
+    #[must_use]
+    pub fn with_reasoning_replay_field(mut self, field: ReasoningReplayField) -> Self {
+        self.reasoning_replay_field = Some(field);
+        self
+    }
+}
+
+/// Adds the reasoning of each assistant content to the message it became; `owners[i]` is the
+/// index in `contents` of the content that produced message `i`.
+fn inject_assistant_reasoning(
+    body: &mut serde_json::Value,
+    contents: &[Content],
+    owners: &[usize],
+    field: Option<ReasoningReplayField>,
+) {
+    let Some(field) = field else {
+        return;
+    };
+    let Some(messages) = body.get_mut("messages").and_then(serde_json::Value::as_array_mut) else {
+        return;
+    };
+    let field_name = match field {
+        ReasoningReplayField::ReasoningContent => "reasoning_content",
+        ReasoningReplayField::Reasoning => "reasoning",
+    };
+
+    for (message, content) in messages.iter_mut().zip(owners.iter().map(|owner| &contents[*owner]))
+    {
+        if !matches!(content.role.as_str(), "model" | "assistant") {
+            continue;
+        }
+        let Some(reasoning) = convert::extract_reasoning_content(&content.parts) else {
+            continue;
+        };
+        let Some(message) = message.as_object_mut() else {
+            continue;
+        };
+
+        message.insert(field_name.to_string(), serde_json::Value::String(reasoning));
+    }
+}
+
+/// Provider capabilities that shape a Chat Completions request body.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ChatCapabilities {
+    /// Value of `parallel_tool_calls` sent with tool declarations.
+    pub(crate) parallel_tool_calls: bool,
+    /// Send inline PDFs as `file` parts. Only OpenAI and Azure OpenAI accept them,
+    /// so every other compatible provider keeps the text fallback.
+    pub(crate) native_pdf: bool,
 }
 
 /// Build the serialized JSON request body from an `LlmRequest`.
 ///
 /// This is shared between the streaming and non-streaming paths so that
 /// request parameter construction is identical regardless of mode.
-/// Also used by `AzureOpenAIClient` for consistent request building.
 pub(crate) fn build_request_json(
     model: &str,
     request: &LlmRequest,
     reasoning_effort: &Option<OpenAIReasoningEffort>,
-    parallel_tool_calls: bool,
+    capabilities: ChatCapabilities,
+    reasoning_replay_field: Option<ReasoningReplayField>,
     adapter: &dyn SchemaAdapter,
     cache: &SchemaCache,
 ) -> Result<serde_json::Value, AdkError> {
@@ -347,7 +702,15 @@ pub(crate) fn build_request_json(
         )
         .with_provider("gemini"));
     }
-    let messages: Vec<_> = request.contents.iter().map(convert::content_to_message).collect();
+    let contents = crate::tool_result::with_images(&request.contents);
+    let mut messages = Vec::with_capacity(contents.len());
+    let mut owners = Vec::with_capacity(contents.len());
+    for (index, content) in contents.iter().enumerate() {
+        for message in convert::content_to_messages(content, capabilities.native_pdf) {
+            messages.push(message);
+            owners.push(index);
+        }
+    }
 
     let mut request_builder = CreateChatCompletionRequestArgs::default();
     request_builder.model(model).messages(messages);
@@ -356,12 +719,25 @@ pub(crate) fn build_request_json(
         let tools = convert::convert_tools(&request.tools, adapter, cache)?;
         request_builder.tools(tools);
         // OpenAI defaults parallel_tool_calls to true.
-        request_builder.parallel_tool_calls(parallel_tool_calls);
+        request_builder.parallel_tool_calls(capabilities.parallel_tool_calls);
     }
 
+    let reasoning_effort =
+        crate::openai::request_reasoning_effort(model, *reasoning_effort, request);
     if let Some(effort) = reasoning_effort.and_then(to_oai_reasoning_effort) {
         request_builder.reasoning_effort(effort);
     }
+
+    crate::generation_config::reject_unsupported(
+        "openai-compatible",
+        request.config.as_ref(),
+        crate::generation_config::Supports {
+            stop_sequences: true,
+            seed: true,
+            penalties: true,
+            top_logprobs: true,
+        },
+    )?;
 
     if let Some(config) = &request.config {
         if let Some(temp) = config.temperature {
@@ -375,16 +751,7 @@ pub(crate) fn build_request_json(
         }
 
         if let Some(schema) = &config.response_schema {
-            let mut schema_with_strict = schema.clone();
-            if let Some(obj) = schema_with_strict.as_object_mut() {
-                obj.insert("additionalProperties".to_string(), serde_json::json!(false));
-            }
-            let json_schema = ResponseFormatJsonSchema {
-                name: request.model.replace(['-', '.', '/'], "_"),
-                description: None,
-                schema: schema_with_strict,
-                strict: Some(true),
-            };
+            let json_schema = convert::json_schema_format(&request.model, schema);
             request_builder.response_format(ResponseFormat::JsonSchema { json_schema });
         }
     }
@@ -400,13 +767,29 @@ pub(crate) fn build_request_json(
         body["reasoning_effort"] = serde_json::Value::String("max".to_string());
     }
 
-    // GPT-5.6 defaults to medium reasoning, while Chat Completions function
-    // tools require effective reasoning `none`. ADK's public reasoning enum
-    // predates that value, so preserve source compatibility and make the safe
-    // effective setting explicit only for this otherwise-invalid combination.
-    if model.starts_with("gpt-5.6") && !request.tools.is_empty() && reasoning_effort.is_none() {
-        body["reasoning_effort"] = serde_json::Value::String("none".to_string());
+    // Written into the body: the typed request marks `seed` deprecated.
+    if let Some(config) = &request.config
+        && let Some(fields) = body.as_object_mut()
+    {
+        if !config.stop_sequences.is_empty() {
+            fields.insert("stop".to_string(), serde_json::json!(config.stop_sequences));
+        }
+        if let Some(seed) = config.seed {
+            fields.insert("seed".to_string(), serde_json::json!(seed));
+        }
+        if let Some(penalty) = config.frequency_penalty {
+            fields.insert("frequency_penalty".to_string(), serde_json::json!(penalty));
+        }
+        if let Some(penalty) = config.presence_penalty {
+            fields.insert("presence_penalty".to_string(), serde_json::json!(penalty));
+        }
+        if let Some(top_logprobs) = config.top_logprobs {
+            fields.insert("logprobs".to_string(), serde_json::Value::Bool(true));
+            fields.insert("top_logprobs".to_string(), serde_json::json!(top_logprobs));
+        }
     }
+
+    inject_assistant_reasoning(&mut body, &contents, &owners, reasoning_replay_field);
 
     // Merge provider-specific extensions from config.extensions["openai"] into
     // the request body.  This allows users to pass provider-specific fields
@@ -436,6 +819,18 @@ fn to_oai_reasoning_effort(effort: OpenAIReasoningEffort) -> Option<OaiReasoning
     }
 }
 
+/// Destination, credentials and error codes of one generation request.
+#[derive(Clone)]
+struct RequestTarget {
+    url: String,
+    headers: http::HeaderMap,
+    api_key: String,
+    organization_id: Option<String>,
+    provider_name: String,
+    adapter: Option<crate::openai::RequestAdapter>,
+    error_codes: ErrorCodes,
+}
+
 /// Send an HTTP POST and handle error status codes.
 ///
 /// Returns the raw `reqwest::Response` on success so the caller can decide
@@ -443,103 +838,120 @@ fn to_oai_reasoning_effort(effort: OpenAIReasoningEffort) -> Option<OaiReasoning
 /// stream (streaming).
 async fn send_request(
     http: &reqwest::Client,
-    url: &str,
-    api_key: &str,
-    organization_id: &Option<String>,
+    target: &RequestTarget,
     body: &serde_json::Value,
-    provider_name: &str,
 ) -> Result<reqwest::Response, AdkError> {
-    let mut http_req = http.post(url).bearer_auth(api_key).json(body);
-
-    if let Some(org_id) = organization_id {
-        http_req = http_req.header("OpenAI-Organization", org_id);
-    }
-
-    let http_resp = http_req.send().await.map_err(|e| {
+    let RequestTarget {
+        url,
+        headers,
+        api_key,
+        organization_id,
+        provider_name,
+        adapter,
+        error_codes,
+    } = target;
+    let request_error = |error: reqwest::Error| {
         AdkError::new(
             ErrorComponent::Model,
-            ErrorCategory::Unavailable,
-            "model.openai_compat.request",
-            format!("{provider_name} request error: {e}"),
+            crate::http_timeouts::transport_category(&error),
+            error_codes.request,
+            format!("{provider_name} request error: {error}"),
         )
         .with_provider(provider_name)
-    })?;
+    };
+    let mut builder = http.post(url).json(body);
+    if !api_key.is_empty() {
+        builder = builder.bearer_auth(api_key);
+    }
+    if let Some(org_id) = organization_id {
+        builder = builder.header("OpenAI-Organization", org_id);
+    }
+    let mut request = builder.build().map_err(&request_error)?;
+    for (name, value) in headers {
+        request.headers_mut().entry(name).or_insert_with(|| value.clone());
+    }
+    if let Some(adapter) = adapter {
+        let mut body = body.clone();
+        adapter(&mut body, request.headers_mut())?;
+        *request.body_mut() = Some(body.to_string().into());
+        request.headers_mut().remove(reqwest::header::CONTENT_LENGTH);
+    }
+    let http_resp = http.execute(request).await.map_err(request_error)?;
 
     if !http_resp.status().is_success() {
         let status = http_resp.status();
         let status_code = status.as_u16();
+        let retry_after = http_resp
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(crate::retry::parse_retry_after);
         let body = http_resp.text().await.unwrap_or_default();
-        let category = match status_code {
-            401 => ErrorCategory::Unauthorized,
-            403 => ErrorCategory::Forbidden,
-            404 => ErrorCategory::NotFound,
-            408 => ErrorCategory::Timeout,
-            429 => ErrorCategory::RateLimited,
-            503 | 529 => ErrorCategory::Unavailable,
-            _ if status_code >= 500 => ErrorCategory::Internal,
-            _ => ErrorCategory::InvalidInput,
-        };
-        return Err(AdkError::new(
+        let error = AdkError::new(
             ErrorComponent::Model,
-            category,
-            "model.openai_compat.api_error",
-            format!("{provider_name} API error (HTTP {status}): {body}"),
+            crate::retry::category_for_status_code(status_code),
+            error_codes.for_status(status_code),
+            format!(
+                "{provider_name} API error (HTTP {status}): {}",
+                adk_core::upstream_excerpt(&body)
+            ),
         )
         .with_upstream_status(status_code)
-        .with_provider(provider_name));
+        .with_provider(provider_name);
+        return Err(crate::retry::with_retry_after(
+            crate::error_metadata::from_body(error, &body),
+            retry_after,
+        ));
     }
 
     Ok(http_resp)
 }
 
 /// Parse a finish_reason string into an ADK `FinishReason`.
+///
+/// `"error"` is not a finish reason but a failure, and callers reject it first.
 fn parse_finish_reason(fr: &str) -> FinishReason {
     match fr {
-        "stop" => FinishReason::Stop,
+        "stop" | "tool_calls" | "function_call" => FinishReason::Stop,
         "length" => FinishReason::MaxTokens,
-        "tool_calls" => FinishReason::Stop,
         "content_filter" => FinishReason::Safety,
-        "function_call" => FinishReason::Stop,
-        _ => FinishReason::Stop,
+        _ => FinishReason::Other,
+    }
+}
+
+/// Accumulate string deltas while treating structured values as complete snapshots.
+fn append_tool_call_arguments(accumulator: &mut String, arguments: &serde_json::Value) {
+    match arguments {
+        serde_json::Value::String(fragment) => accumulator.push_str(fragment),
+        serde_json::Value::Null => {}
+        structured => {
+            let empty_snapshot = matches!(structured, serde_json::Value::Object(fields) if fields.is_empty())
+                || matches!(structured, serde_json::Value::Array(items) if items.is_empty());
+            if !empty_snapshot {
+                accumulator.clear();
+                accumulator.push_str(&structured.to_string());
+            }
+        }
     }
 }
 
 /// Parse usage metadata from a raw SSE chunk JSON value.
 fn parse_usage_from_chunk(chunk: &serde_json::Value) -> Option<UsageMetadata> {
-    let u = chunk.get("usage")?;
-    let prompt_tokens = u.get("prompt_tokens").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-    let completion_tokens = u.get("completion_tokens").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-    let total_tokens = u.get("total_tokens").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-
-    let prompt_details = u.get("prompt_tokens_details");
-    let completion_details = u.get("completion_tokens_details");
-
-    Some(UsageMetadata {
-        prompt_token_count: prompt_tokens,
-        candidates_token_count: completion_tokens,
-        total_token_count: total_tokens,
-        cache_read_input_token_count: prompt_details
-            .and_then(|d| d.get("cached_tokens"))
-            .and_then(|v| v.as_i64())
-            .map(|v| v as i32),
-        thinking_token_count: completion_details
-            .and_then(|d| d.get("reasoning_tokens"))
-            .and_then(|v| v.as_i64())
-            .map(|v| v as i32),
-        audio_input_token_count: prompt_details
-            .and_then(|d| d.get("audio_tokens"))
-            .and_then(|v| v.as_i64())
-            .map(|v| v as i32),
-        audio_output_token_count: completion_details
-            .and_then(|d| d.get("audio_tokens"))
-            .and_then(|v| v.as_i64())
-            .map(|v| v as i32),
-        ..Default::default()
-    })
+    chunk.get("usage").and_then(convert::usage_metadata_from_raw)
 }
 
 #[async_trait]
 impl Llm for OpenAICompatible {
+    // The request's `max_completion_tokens`, reasoning included, or the model's output limit.
+    fn max_cost_micro_usd(&self, request: &adk_core::LlmRequest) -> Option<u64> {
+        crate::pricing::PricingCatalog::standard().max_cost_micro_usd(
+            Some(&self.provider_name),
+            self.name(),
+            request,
+            crate::pricing::request_output_cap(request),
+        )
+    }
+
     fn name(&self) -> &str {
         &self.model
     }
@@ -560,17 +972,37 @@ impl Llm for OpenAICompatible {
     )]
     async fn generate_content(
         &self,
-        request: LlmRequest,
+        mut request: LlmRequest,
         stream: bool,
     ) -> Result<LlmResponseStream, AdkError> {
+        // Native items reach this provider only from the turns its own origin marks.
+        adk_core::history::retain_replayable(
+            &mut request.contents,
+            &adk_core::history::ProviderOrigin::new(&self.provider_name, &self.model),
+        );
         let model = self.model.clone();
         let provider_name = self.provider_name.clone();
+        let attribution = (self.provider_name.clone(), self.model.clone());
         let http = self.http.clone();
-        let api_key = self.api_key.clone();
-        let base_url = self.base_url.clone();
         let retry_config = self.retry_config.clone();
         let reasoning_effort = self.reasoning_effort;
-        let organization_id = self.organization_id.clone();
+        let reasoning_replay_field = self.reasoning_replay_field;
+        let error_codes = self.error_codes;
+        let target = RequestTarget {
+            headers: self.default_headers.clone(),
+            url: self
+                .completion_url
+                .clone()
+                .unwrap_or_else(|| format!("{}/chat/completions", self.base_url)),
+            api_key: self.api_key.clone(),
+            organization_id: self.organization_id.clone(),
+            provider_name: provider_name.clone(),
+            adapter: self.request_adapter.clone(),
+            error_codes,
+        };
+        // Text-encoded tool calls are honoured only for tools this request declared.
+        let declared_tools: std::collections::HashSet<String> =
+            request.tools.keys().cloned().collect();
 
         // Normalize tool schemas at request time using the instance schema adapter and cache.
         let adapter = self.schema_adapter();
@@ -578,7 +1010,11 @@ impl Llm for OpenAICompatible {
             &model,
             &request,
             &reasoning_effort,
-            self.parallel_tool_calls,
+            ChatCapabilities {
+                parallel_tool_calls: self.parallel_tool_calls,
+                native_pdf: matches!(provider_name.as_str(), "openai" | "azure-openai"),
+            },
+            reasoning_replay_field,
             adapter,
             &self.cache,
         )?;
@@ -598,60 +1034,110 @@ impl Llm for OpenAICompatible {
                     );
                 }
 
-                let url = format!("{base_url}/chat/completions");
-
                 // Retry covers only the initial HTTP request, not stream consumption.
                 let response = execute_with_retry(&retry_config, is_retryable_model_error, || {
                     let http = http.clone();
-                    let url = url.clone();
-                    let api_key = api_key.clone();
-                    let organization_id = organization_id.clone();
+                    let target = target.clone();
                     let body = body.clone();
-                    let provider_name = provider_name.clone();
-                    async move {
-                        send_request(&http, &url, &api_key, &organization_id, &body, &provider_name).await
-                    }
+                    async move { send_request(&http, &target, &body).await }
                 })
                 .await?;
 
                 // Process SSE byte stream (following DeepSeekClient pattern).
                 let mut byte_stream = response.bytes_stream();
-                let mut buffer = String::new();
+                let mut buffer = Vec::new();
                 let mut tool_call_accumulators: HashMap<u32, (String, String, String)> =
                     HashMap::new();
-                let mut text_tool_buffer = crate::tool_call_parser::ToolCallBuffer::new();
+                let mut text_tool_buffer =
+                    crate::tool_call_parser::ToolCallBuffer::for_declared_tools(declared_tools);
+                // Token log probabilities from every chunk, reported on the final response.
+                let mut logprobs: Vec<serde_json::Value> = Vec::new();
+                // A finish reason or `[DONE]` marks a complete response; without one the
+                // answer or a tool call may be truncated.
+                let mut finished = false;
+                // The model declined in `delta.refusal`, so the turn finishes with `Safety`.
+                let mut refused = false;
+                let mut ended = false;
 
-                while let Some(chunk_result) = byte_stream.next().await {
-                    let chunk = chunk_result.map_err(|e| {
-                        AdkError::model(format!("stream read error: {e}"))
-                    })?;
-
-                    buffer.push_str(&String::from_utf8_lossy(&chunk));
+                'body: while !ended {
+                    match byte_stream.next().await {
+                        Some(Ok(chunk)) => buffer.extend_from_slice(&chunk),
+                        Some(Err(_)) if finished => break,
+                        Some(Err(error)) => Err(crate::stream_error::interrupted(
+                            &provider_name, error_codes.incomplete_stream, &error,
+                        ))?,
+                        None => {
+                            ended = true;
+                            // The last line may arrive without its line ending.
+                            buffer.push(b'\n');
+                        }
+                    }
 
                     // Process complete SSE lines.
-                    while let Some(line_end) = buffer.find('\n') {
-                        let line = buffer[..line_end].trim().to_string();
-                        buffer = buffer[line_end + 1..].to_string();
-
-                        if line.is_empty() || line == "data: [DONE]" {
+                    while let Some(line) = match take_line(&mut buffer) {
+                        Ok(line) => line,
+                        Err(_) if finished => break 'body,
+                        Err(error) => Err(error)?,
+                    } {
+                        let Some(data) = crate::sse::data(&line) else {
                             continue;
+                        };
+
+                        if data == "[DONE]" {
+                            if !tool_call_accumulators.is_empty() {
+                                Err(crate::stream_error::incomplete(
+                                    &provider_name,
+                                    error_codes.incomplete_stream,
+                                    "its tool calls finished",
+                                ))?;
+                            }
+                            finished = true;
+                            ended = true;
+                            break;
                         }
 
-                        if let Some(data) = line.strip_prefix("data: ") {
-                            let chunk_json: serde_json::Value = match serde_json::from_str(data) {
-                                Ok(v) => v,
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "failed to parse SSE chunk: {e} - {data}"
-                                    );
-                                    continue;
-                                }
-                            };
+                        {
+                            let parsed = serde_json::from_str::<serde_json::Value>(data);
+                            // A cut-off trailer after a finished response loses nothing.
+                            if parsed.is_err() && finished {
+                                continue;
+                            }
+                            let chunk_json = parsed.map_err(|error| {
+                                crate::stream_error::undecodable(
+                                    &provider_name,
+                                    error_codes.parse,
+                                    &error,
+                                )
+                            })?;
+                            if let Some(error) =
+                                chunk_json.get("error").filter(|error| !error.is_null())
+                            {
+                                Err(crate::stream_error::reported(
+                                    &provider_name,
+                                    error_codes.stream_error,
+                                    error,
+                                ))?;
+                            }
+                            let usage_metadata = parse_usage_from_chunk(&chunk_json);
 
                             let choice = match chunk_json.get("choices").and_then(|c| c.get(0)) {
                                 Some(c) => c,
-                                None => continue,
+                                None => {
+                                    if let Some(usage_metadata) = usage_metadata {
+                                        yield LlmResponse {
+                                            usage_metadata: Some(usage_metadata),
+                                            partial: true,
+                                            ..Default::default()
+                                        };
+                                    }
+                                    continue;
+                                }
                             };
+                            if let Some(tokens) =
+                                choice.pointer("/logprobs/content").and_then(|v| v.as_array())
+                            {
+                                logprobs.extend(tokens.iter().cloned());
+                            }
                             let delta = match choice.get("delta") {
                                 Some(d) => d,
                                 None => continue,
@@ -686,92 +1172,16 @@ impl Llm for OpenAICompatible {
                                         if let Some(name) = func.get("name").and_then(|v| v.as_str()) {
                                             entry.1 = name.to_string();
                                         }
-                                        if let Some(args_chunk) =
-                                            func.get("arguments").and_then(|v| v.as_str())
-                                        {
-                                            entry.2.push_str(args_chunk);
+                                        if let Some(arguments) = func.get("arguments") {
+                                            append_tool_call_arguments(&mut entry.2, arguments);
                                         }
                                     }
                                 }
                             }
 
-                            // Check for finish_reason → emit final response.
-                            if let Some(ref fr) = finish_reason_str {
-                                let finish_reason = Some(parse_finish_reason(fr));
-                                let usage_metadata = parse_usage_from_chunk(&chunk_json);
-
-                                // Emit accumulated tool calls if any.
-                                if !tool_call_accumulators.is_empty() {
-                                    let mut sorted_calls: Vec<_> =
-                                        tool_call_accumulators.drain().collect();
-                                    sorted_calls.sort_by_key(|(idx, _)| *idx);
-
-                                    let parts: Vec<Part> = sorted_calls
-                                        .into_iter()
-                                        .map(|(_, (id, name, args_str))| {
-                                            let args: serde_json::Value =
-                                                serde_json::from_str(&args_str)
-                                                    .unwrap_or(serde_json::json!({}));
-                                            Part::FunctionCall {
-                                                name,
-                                                args,
-                                                id: Some(id),
-                                                thought_signature: None,
-                                            }
-                                        })
-                                        .collect();
-
-                                    yield LlmResponse {
-                                        content: Some(Content {
-                                            role: "model".to_string(),
-                                            parts,
-                                        }),
-                                        usage_metadata,
-                                        finish_reason,
-                                        citation_metadata: None,
-                                        partial: false,
-                                        // Tool-call turns are not complete — tool
-                                        // results must still be processed (issue #401).
-                                        turn_complete: false,
-                                        interrupted: false,
-                                        error_code: None,
-                                        error_message: None,
-                                        provider_metadata: None,
-                                        interaction_id: None,
-                                    };
-                                    continue;
-                                }
-
-                                // Final response without tool calls.
-                                let mut parts = Vec::new();
-                                if let Some(text) = delta.get("content").and_then(|v| v.as_str())
-                                    && !text.is_empty() {
-                                        parts.push(Part::Text { text: text.to_string() });
-                                    }
-
-                                yield LlmResponse {
-                                    content: if parts.is_empty() { None } else {
-                                        Some(Content {
-                                            role: "model".to_string(),
-                                            parts,
-                                        })
-                                    },
-                                    usage_metadata,
-                                    finish_reason,
-                                    citation_metadata: None,
-                                    partial: false,
-                                    turn_complete: true,
-                                    interrupted: false,
-                                    error_code: None,
-                                    error_message: None,
-                                    provider_metadata: None,
-                                    interaction_id: None,
-                                };
-                                continue;
-                            }
-
-                            // Emit partial reasoning_content as Part::Thinking.
-                            // Fallback to "reasoning" field for OpenRouter, Kilo Gateway, SambaNova, Cerebras, Groq
+                            // A terminal chunk may still carry reasoning. Emit it before
+                            // the final response so neither stop nor tool calls drop it.
+                            // Some compatible providers use "reasoning" instead.
                             let reasoning = delta.get("reasoning_content")
                                 .or_else(|| delta.get("reasoning"))
                                 .and_then(|v| v.as_str());
@@ -795,8 +1205,126 @@ impl Llm for OpenAICompatible {
                                         error_message: None,
                                         provider_metadata: None,
                                         interaction_id: None,
+                                        model: None,
+                                        provider: None,
                                     };
                                 }
+
+                            // A refusal is the turn's answer text; it never encodes a tool call.
+                            if let Some(refusal) = delta.get("refusal").and_then(|v| v.as_str())
+                                && !refusal.is_empty() {
+                                    refused = true;
+                                    yield LlmResponse {
+                                        content: Some(Content {
+                                            role: "model".to_string(),
+                                            parts: vec![Part::Text { text: refusal.to_string() }],
+                                        }),
+                                        partial: true,
+                                        turn_complete: false,
+                                        ..Default::default()
+                                    };
+                                }
+
+                            // Check for finish_reason → emit final response.
+                            if let Some(ref fr) = finish_reason_str {
+                                if fr == "error" {
+                                    Err(crate::stream_error::reported(
+                                        &provider_name,
+                                        error_codes.stream_error,
+                                        &serde_json::Value::Null,
+                                    ))?;
+                                }
+                                finished = true;
+                                let finish_reason = Some(if refused {
+                                    FinishReason::Safety
+                                } else {
+                                    parse_finish_reason(fr)
+                                });
+                                let provider_metadata = (!logprobs.is_empty()).then(|| {
+                                    serde_json::json!({
+                                        "logprobs": {"content": std::mem::take(&mut logprobs)}
+                                    })
+                                });
+
+                                // Emit accumulated tool calls if any.
+                                if !tool_call_accumulators.is_empty() {
+                                    let mut sorted_calls: Vec<_> =
+                                        tool_call_accumulators.drain().collect();
+                                    sorted_calls.sort_by_key(|(idx, _)| *idx);
+
+                                    let parts: Vec<Part> = sorted_calls
+                                        .into_iter()
+                                        .map(|(_, (id, name, args_str))| {
+                                            let args = crate::tool_args::streamed_tool_arguments(
+                                                &provider_name,
+                                                &name,
+                                                &args_str,
+                                            );
+                                            Part::FunctionCall {
+                                                name,
+                                                args,
+                                                id: Some(id),
+                                                thought_signature: None,
+                                            }
+                                        })
+                                        .collect();
+
+                                    let mut buffered = text_tool_buffer.flush();
+                                    buffered.extend(parts);
+                                    let response = LlmResponse {
+                                        content: Some(Content {
+                                            role: "model".to_string(),
+                                            parts: buffered,
+                                        }),
+                                        usage_metadata,
+                                        finish_reason,
+                                        citation_metadata: None,
+                                        partial: false,
+                                        // Tool-call turns are not complete — tool
+                                        // results must still be processed (issue #401).
+                                        turn_complete: false,
+                                        interrupted: false,
+                                        error_code: None,
+                                        error_message: None,
+                                        provider_metadata,
+                                        interaction_id: None,
+                                        model: None,
+                                        provider: None,
+                                    };
+                                    yield response;
+                                    continue;
+                                }
+
+                                // Flush literal prefixes before the final becomes authoritative.
+                                let mut parts = text_tool_buffer.flush();
+                                if let Some(text) = delta.get("content").and_then(|v| v.as_str())
+                                    && !text.is_empty() {
+                                        parts.push(Part::Text { text: text.to_string() });
+                                    }
+
+                                let response = LlmResponse {
+                                    content: if parts.is_empty() { None } else {
+                                        Some(Content {
+                                            role: "model".to_string(),
+                                            parts,
+                                        })
+                                    },
+                                    usage_metadata,
+                                    finish_reason,
+                                    citation_metadata: None,
+                                    partial: false,
+                                    turn_complete: true,
+                                    interrupted: false,
+                                    error_code: None,
+                                    error_message: None,
+                                    provider_metadata,
+                                    interaction_id: None,
+                                    model: None,
+                                    provider: None,
+                                };
+                                yield response;
+                                continue;
+                            }
 
                             // Emit partial text content via tool call buffer.
                             // The buffer detects <tool_call> tags split across chunks
@@ -822,6 +1350,8 @@ impl Llm for OpenAICompatible {
                                                     error_message: None,
                                                     provider_metadata: None,
                                                     interaction_id: None,
+                                                    model: None,
+                                                    provider: None,
                                                 };
                                             }
                                         }
@@ -832,6 +1362,18 @@ impl Llm for OpenAICompatible {
                                 }
                         }
                     }
+                }
+
+                if !finished {
+                    Err(crate::stream_error::incomplete(
+                        &provider_name,
+                        error_codes.incomplete_stream,
+                        if tool_call_accumulators.is_empty() {
+                            "the response finished"
+                        } else {
+                            "its tool calls finished"
+                        },
+                    ))?;
                 }
 
                 // Flush any remaining buffered content from the tool call buffer
@@ -852,11 +1394,18 @@ impl Llm for OpenAICompatible {
                         error_message: None,
                         provider_metadata: None,
                         interaction_id: None,
+                        model: None,
+                        provider: None,
                     };
                 }
             };
 
-            Ok(crate::usage_tracking::with_usage_tracking(Box::pin(response_stream), usage_span))
+            Ok(crate::usage_tracking::with_priced_usage_tracking(
+                crate::usage_tracking::with_terminal_usage(Box::pin(response_stream)),
+                usage_span,
+                attribution.0,
+                attribution.1,
+            ))
         } else {
             // ── Non-streaming path (preserved identically) ──────────
             let response_stream = try_stream! {
@@ -864,22 +1413,29 @@ impl Llm for OpenAICompatible {
                     let model = model.clone();
                     let provider_name = provider_name.clone();
                     let http = http.clone();
-                    let api_key = api_key.clone();
-                    let base_url = base_url.clone();
+                    let target = target.clone();
                     let body = request_body.clone();
-                    let organization_id = organization_id.clone();
                     async move {
-                        let url = format!("{base_url}/chat/completions");
-                        let http_resp =
-                            send_request(&http, &url, &api_key, &organization_id, &body, &provider_name)
-                                .await?;
+                        let http_resp = send_request(&http, &target, &body).await?;
 
-                        let raw_json: serde_json::Value = http_resp.json().await.map_err(|e| {
+                        let bytes = http_resp.bytes().await.map_err(|e| {
+                            AdkError::new(
+                                ErrorComponent::Model,
+                                crate::http_timeouts::transport_category(&e),
+                                error_codes.request,
+                                format!("{provider_name} response could not be read: {e}"),
+                            )
+                            .with_provider(&provider_name)
+                        })?;
+                        let raw_json: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
                             AdkError::new(
                                 ErrorComponent::Model,
                                 ErrorCategory::Internal,
-                                "model.openai_compat.parse",
-                                format!("{provider_name} response parse error: {e}"),
+                                error_codes.parse,
+                                format!(
+                                    "{provider_name} response parse error: {}",
+                                    adk_core::json_error_summary(&e)
+                                ),
                             )
                             .with_provider(&provider_name)
                         })?;
@@ -898,11 +1454,29 @@ impl Llm for OpenAICompatible {
                 })
                 .await?;
 
-                let adk_response = convert::from_raw_openai_response(&response);
-                yield adk_response;
+                // Some providers answer HTTP 200 with an error object or an `error` finish.
+                let reported_error = response.get("error").filter(|error| !error.is_null()).or_else(|| {
+                    (response.pointer("/choices/0/finish_reason").and_then(serde_json::Value::as_str)
+                        == Some("error"))
+                    .then_some(&serde_json::Value::Null)
+                });
+                if let Some(error) = reported_error {
+                    Err(crate::stream_error::reported(&provider_name, error_codes.stream_error, error))?;
+                }
+
+                yield convert::from_raw_openai_response(
+                    &provider_name,
+                    &response,
+                    &declared_tools,
+                );
             };
 
-            Ok(crate::usage_tracking::with_usage_tracking(Box::pin(response_stream), usage_span))
+            Ok(crate::usage_tracking::with_priced_usage_tracking(
+                Box::pin(response_stream),
+                usage_span,
+                attribution.0,
+                attribution.1,
+            ))
         }
     }
 }
@@ -912,6 +1486,52 @@ mod tests {
     use super::*;
     use adk_core::{GenericSchemaAdapter, LlmRequest, SchemaCache};
     use std::sync::Arc;
+
+    mod sse_lines {
+        use super::take_line;
+
+        #[test]
+        fn preserves_every_split() {
+            let expected = r#"data: {"text":"é中文🙂�","arguments":"{\"path\":\"资料.txt\",\"text\":\"改动🙂\"}"}"#;
+            let framed = format!("{expected}\r\n");
+            for split in 0..framed.len() {
+                let mut buffer = framed.as_bytes()[..split].to_vec();
+                assert_eq!(take_line(&mut buffer).unwrap(), None);
+                buffer.extend_from_slice(&framed.as_bytes()[split..]);
+                assert_eq!(take_line(&mut buffer).unwrap().as_deref(), Some(expected));
+                assert!(buffer.is_empty());
+            }
+        }
+
+        #[test]
+        fn accepts_bytewise_delivery() {
+            let expected = "data: 中文🙂é";
+            let mut buffer = Vec::new();
+            for byte in expected.as_bytes() {
+                buffer.push(*byte);
+                assert_eq!(take_line(&mut buffer).unwrap(), None);
+            }
+            buffer.push(b'\n');
+            assert_eq!(take_line(&mut buffer).unwrap().as_deref(), Some(expected));
+            assert!(buffer.is_empty());
+        }
+
+        #[test]
+        fn leaves_following_lines() {
+            let mut buffer = "data: 第一行\r\n\r\ndata: 第二行🙂\n".as_bytes().to_vec();
+            assert_eq!(take_line(&mut buffer).unwrap().as_deref(), Some("data: 第一行"));
+            assert_eq!(take_line(&mut buffer).unwrap().as_deref(), Some(""));
+            assert_eq!(take_line(&mut buffer).unwrap().as_deref(), Some("data: 第二行🙂"));
+            assert_eq!(take_line(&mut buffer).unwrap(), None);
+        }
+
+        #[test]
+        fn rejects_invalid_utf8() {
+            for invalid in [b"data: \xc3(\n".as_slice(), b"data: \xf0\x9f\n".as_slice()] {
+                assert!(take_line(&mut invalid.to_vec()).is_err());
+            }
+        }
+    }
 
     #[test]
     fn test_parallel_tool_calls_config() {
@@ -935,7 +1555,62 @@ mod tests {
     }
 
     #[test]
-    fn gpt_56_chat_tools_default_to_no_reasoning() {
+    fn streamed_tool_arguments_require_valid_json() {
+        let parse = |name: &str, arguments: &str| {
+            crate::tool_args::streamed_tool_arguments("compatible-provider", name, arguments)
+        };
+        assert_eq!(parse("bash", r#"{"command":"pwd"}"#)["command"], "pwd");
+        for empty in ["", "   ", "[]"] {
+            assert_eq!(parse("no_args", empty), serde_json::json!({}), "{empty:?}");
+        }
+        // A truncated or non-object payload is marked, never run with substituted arguments.
+        for malformed in [r#"{"command":"#, r#"["pwd"]"#] {
+            let args = parse("bash", malformed);
+            assert!(adk_core::invalid_tool_arguments_reason(&args).is_some(), "{malformed:?}");
+        }
+    }
+
+    #[test]
+    fn streamed_structured_tool_arguments_are_canonicalized() {
+        let mut arguments = String::new();
+        append_tool_call_arguments(&mut arguments, &serde_json::json!({"command": "pwd"}));
+
+        assert_eq!(
+            crate::tool_args::streamed_tool_arguments("compatible-provider", "bash", &arguments),
+            serde_json::json!({"command": "pwd"})
+        );
+    }
+
+    #[test]
+    fn streamed_empty_snapshot_before_string_fragments_is_ignored() {
+        for placeholder in [serde_json::json!({}), serde_json::json!([])] {
+            let mut arguments = String::new();
+            append_tool_call_arguments(&mut arguments, &placeholder);
+            assert_eq!(
+                crate::tool_args::streamed_tool_arguments(
+                    "compatible-provider",
+                    "no_args",
+                    &arguments
+                ),
+                serde_json::json!({})
+            );
+
+            append_tool_call_arguments(&mut arguments, &serde_json::json!(r#"{"command""#));
+            append_tool_call_arguments(&mut arguments, &serde_json::json!(r#": "pwd"}"#));
+
+            assert_eq!(
+                crate::tool_args::streamed_tool_arguments(
+                    "compatible-provider",
+                    "bash",
+                    &arguments
+                ),
+                serde_json::json!({"command": "pwd"})
+            );
+        }
+    }
+
+    #[test]
+    fn gpt_56_chat_tools_preserve_configured_reasoning() {
         let adapter = GenericSchemaAdapter;
         let cache = SchemaCache::for_adapter(Arc::new(GenericSchemaAdapter));
         let mut request = LlmRequest {
@@ -953,17 +1628,24 @@ mod tests {
             }),
         );
 
-        let body = build_request_json(
-            crate::catalog::OPENAI_DEFAULT,
-            &request,
-            &None,
-            true,
-            &adapter,
-            &cache,
-        )
-        .expect("request should build");
+        for (configured_effort, expected) in [
+            (None, None),
+            (Some(OpenAIReasoningEffort::Medium), Some("medium")),
+            (Some(OpenAIReasoningEffort::Max), Some("max")),
+        ] {
+            let body = build_request_json(
+                crate::catalog::OPENAI_DEFAULT,
+                &request,
+                &configured_effort,
+                ChatCapabilities { parallel_tool_calls: true, native_pdf: false },
+                None,
+                &adapter,
+                &cache,
+            )
+            .expect("request should build");
 
-        assert_eq!(body["reasoning_effort"], "none");
+            assert_eq!(body.get("reasoning_effort").and_then(serde_json::Value::as_str), expected);
+        }
     }
 
     #[test]
@@ -982,7 +1664,8 @@ mod tests {
             crate::catalog::OPENAI_DEFAULT,
             &request,
             &None,
-            true,
+            ChatCapabilities { parallel_tool_calls: true, native_pdf: false },
+            None,
             &adapter,
             &cache,
         )
@@ -1007,7 +1690,8 @@ mod tests {
             crate::catalog::OPENAI_DEFAULT,
             &request,
             &Some(OpenAIReasoningEffort::Max),
-            true,
+            ChatCapabilities { parallel_tool_calls: true, native_pdf: false },
+            None,
             &adapter,
             &cache,
         )
@@ -1027,13 +1711,50 @@ mod tests {
             "gemini-3.7-flash",
             &request,
             &None,
-            true,
+            ChatCapabilities { parallel_tool_calls: true, native_pdf: false },
+            None,
             &GenericSchemaAdapter,
             &cache,
         )
         .expect_err("sampling should be rejected before network I/O");
 
         assert_eq!(error.code, "model.gemini.sampling_unsupported");
+    }
+
+    #[test]
+    fn orcarouter_preset_sets_endpoint_and_provider() {
+        let config = OpenAICompatibleConfig::orcarouter("test-key", "openai/gpt-5.6-terra");
+        assert_eq!(config.provider_name, "orcarouter");
+        assert_eq!(config.model, "openai/gpt-5.6-terra");
+        assert_eq!(config.base_url.as_deref(), Some("https://api.orcarouter.ai/v1"));
+        assert_eq!(config.api_key, "test-key");
+
+        let client = OpenAICompatible::new(config).expect("client builds");
+        assert_eq!(client.name(), "openai/gpt-5.6-terra");
+    }
+
+    #[test]
+    fn cheaper_inference_preset_sets_endpoint_and_provider() {
+        let config = OpenAICompatibleConfig::cheaper_inference("test-key", "gpt-5.4-mini");
+        assert_eq!(config.provider_name, "cheaper-inference");
+        assert_eq!(config.model, "gpt-5.4-mini");
+        assert_eq!(config.base_url.as_deref(), Some("https://api.cheaperinference.com/v1"));
+        assert_eq!(config.api_key, "test-key");
+
+        let client = OpenAICompatible::new(config).expect("client builds");
+        assert_eq!(client.name(), "gpt-5.4-mini");
+    }
+
+    #[test]
+    fn api_route_preset_sets_endpoint_and_provider() {
+        let config = OpenAICompatibleConfig::api_route("test-key", "gpt-6.1-sol");
+        assert_eq!(config.provider_name, "api-route");
+        assert_eq!(config.model, "gpt-6.1-sol");
+        assert_eq!(config.base_url.as_deref(), Some("https://global.api-route.com/v1"));
+        assert_eq!(config.api_key, "test-key");
+
+        let client = OpenAICompatible::new(config).expect("client builds");
+        assert_eq!(client.name(), "gpt-6.1-sol");
     }
 
     #[test]
@@ -1061,6 +1782,143 @@ mod tests {
         let config = OpenAICompatibleConfig::gemini("k", "gemini-3.5-flash");
         let client = OpenAICompatible::new(config).expect("client builds");
         assert_eq!(client.name(), "gemini-3.5-flash");
+    }
+
+    fn chat_body(contents: Vec<Content>) -> serde_json::Value {
+        let request = LlmRequest::new("gpt-4.1-mini", contents);
+        let cache = SchemaCache::for_adapter(Arc::new(GenericSchemaAdapter));
+        build_request_json(
+            "gpt-4.1-mini",
+            &request,
+            &None,
+            ChatCapabilities { parallel_tool_calls: true, native_pdf: false },
+            Some(ReasoningReplayField::ReasoningContent),
+            &GenericSchemaAdapter,
+            &cache,
+        )
+        .expect("request should build")
+    }
+
+    fn response(id: &str, value: serde_json::Value) -> Part {
+        Part::FunctionResponse {
+            function_response: adk_core::FunctionResponseData::new("get_weather", value),
+            id: Some(id.to_string()),
+            annotations: None,
+        }
+    }
+
+    #[test]
+    fn several_function_responses_become_one_tool_message_each() {
+        let call = |id: &str| Part::FunctionCall {
+            name: "get_weather".to_string(),
+            args: serde_json::json!({"city": id}),
+            id: Some(id.to_string()),
+            thought_signature: None,
+        };
+        let body = chat_body(vec![
+            Content::new("user").with_text("Weather in Paris and Tokyo?"),
+            Content {
+                role: "model".to_string(),
+                parts: vec![
+                    Part::Thinking { thinking: "two cities".to_string(), signature: None },
+                    call("call_paris"),
+                    call("call_tokyo"),
+                ],
+            },
+            Content {
+                role: "function".to_string(),
+                parts: vec![
+                    response("call_paris", serde_json::json!({"error": "not run"})),
+                    response("call_tokyo", serde_json::json!({"error": "not run"})),
+                    Part::Text { text: "Both calls were refused.".to_string() },
+                ],
+            },
+            Content::new("model").with_text("I could not check."),
+        ]);
+
+        let messages = body["messages"].as_array().expect("messages");
+        let shape: Vec<(String, Option<String>)> = messages
+            .iter()
+            .map(|message| {
+                (
+                    message["role"].as_str().unwrap_or_default().to_string(),
+                    message["tool_call_id"].as_str().map(str::to_string),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                ("user".to_string(), None),
+                ("assistant".to_string(), None),
+                ("tool".to_string(), Some("call_paris".to_string())),
+                ("tool".to_string(), Some("call_tokyo".to_string())),
+                ("user".to_string(), None),
+                ("assistant".to_string(), None),
+            ]
+        );
+        assert_eq!(messages[4]["content"], "Both calls were refused.");
+        // Reasoning stays on the assistant message its content became.
+        assert_eq!(messages[1]["reasoning_content"], "two cities");
+        assert!(messages[5].get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn user_role_function_responses_are_tool_messages() {
+        let body = chat_body(vec![Content {
+            role: "user".to_string(),
+            parts: vec![response("call_1", serde_json::json!({"ok": true}))],
+        }]);
+        assert_eq!(body["messages"][0]["role"], "tool");
+        assert_eq!(body["messages"][0]["tool_call_id"], "call_1");
+        assert_eq!(body["messages"].as_array().map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn generation_config_fields_reach_the_chat_request() {
+        let mut request =
+            LlmRequest::new("gpt-4.1-mini", vec![Content::new("user").with_text("hi")]);
+        request.config = Some(adk_core::GenerateContentConfig {
+            stop_sequences: vec!["7".to_string()],
+            seed: Some(42),
+            presence_penalty: Some(0.5),
+            frequency_penalty: Some(0.25),
+            top_logprobs: Some(2),
+            ..Default::default()
+        });
+        let cache = SchemaCache::for_adapter(Arc::new(GenericSchemaAdapter));
+        let body = build_request_json(
+            "gpt-4.1-mini",
+            &request,
+            &None,
+            ChatCapabilities { parallel_tool_calls: true, native_pdf: false },
+            None,
+            &GenericSchemaAdapter,
+            &cache,
+        )
+        .expect("request should build");
+
+        assert_eq!(body["stop"], serde_json::json!(["7"]));
+        assert_eq!(body["seed"], 42);
+        assert_eq!(body["presence_penalty"], 0.5);
+        assert_eq!(body["frequency_penalty"], 0.25);
+        assert_eq!(body["logprobs"], true);
+        assert_eq!(body["top_logprobs"], 2);
+    }
+
+    #[test]
+    fn returned_logprobs_are_kept_in_provider_metadata() {
+        let raw = serde_json::json!({
+            "model": "gpt-4.1-mini",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "1"},
+                "logprobs": {"content": [{"token": "1", "logprob": -0.01, "top_logprobs": []}]},
+                "finish_reason": "stop"
+            }]
+        });
+        let response = convert::from_raw_openai_response("openai", &raw, &Default::default());
+        assert_eq!(response.provider_metadata.unwrap()["logprobs"]["content"][0]["token"], "1");
     }
 
     #[test]
@@ -1108,7 +1966,8 @@ mod tests {
             "moonshot-v1-8k",
             &invalid_request,
             &None,
-            false,
+            ChatCapabilities { parallel_tool_calls: false, native_pdf: false },
+            None,
             client.schema_adapter(),
             &client.cache,
         );
@@ -1135,7 +1994,8 @@ mod tests {
             "moonshot-v1-8k",
             &overlong_request,
             &None,
-            false,
+            ChatCapabilities { parallel_tool_calls: false, native_pdf: false },
+            None,
             client.schema_adapter(),
             &client.cache,
         );
@@ -1166,7 +2026,8 @@ mod tests {
             "moonshot-v1-8k",
             &unsupported_request,
             &None,
-            false,
+            ChatCapabilities { parallel_tool_calls: false, native_pdf: false },
+            None,
             client.schema_adapter(),
             &client.cache,
         );
@@ -1205,7 +2066,8 @@ mod tests {
             "moonshot-v1-8k",
             &valid_mfjs_request,
             &None,
-            false,
+            ChatCapabilities { parallel_tool_calls: false, native_pdf: false },
+            None,
             client.schema_adapter(),
             &client.cache,
         )

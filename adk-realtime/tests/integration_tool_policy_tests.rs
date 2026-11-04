@@ -82,6 +82,28 @@ impl EnhancedPlugin for FailingPlugin {
     }
 }
 
+/// A redaction plugin whose backend is down, so its after-tool pipeline fails.
+#[derive(Debug)]
+struct FailingRedactor;
+
+#[async_trait]
+impl EnhancedPlugin for FailingRedactor {
+    fn name(&self) -> &str {
+        "failing-redactor"
+    }
+
+    async fn after_tool_call(
+        &self,
+        _tool: Arc<dyn Tool>,
+        _args: &serde_json::Value,
+        _result: serde_json::Value,
+        _ctx: Arc<dyn adk_core::CallbackContext>,
+        _plugin_ctx: &adk_plugin::PluginContext,
+    ) -> adk_core::Result<adk_plugin::AfterToolCallResult> {
+        Err(adk_core::AdkError::tool("redaction backend unreachable"))
+    }
+}
+
 /// A model that never connects; these tests exercise dispatch, not transport.
 struct MockModel;
 
@@ -112,6 +134,16 @@ fn runner_with_plugin(
     plugin: Arc<dyn EnhancedPlugin>,
     executions: Arc<AtomicUsize>,
 ) -> adk_realtime::integration::IntegratedRealtimeRunner {
+    runner_with_plugin_exposing(plugin, executions, false)
+}
+
+/// Builds an integrated runner with one counting tool and the supplied plugin, sending plugin
+/// error messages to the model when `expose` is set.
+fn runner_with_plugin_exposing(
+    plugin: Arc<dyn EnhancedPlugin>,
+    executions: Arc<AtomicUsize>,
+    expose: bool,
+) -> adk_realtime::integration::IntegratedRealtimeRunner {
     let manager = EnhancedPluginManager::new(vec![plugin]);
 
     IntegratedRealtimeRunnerBuilder::new()
@@ -119,8 +151,17 @@ fn runner_with_plugin(
         .identity("test-app", "user-1", "session-1")
         .adk_tool(Arc::new(CountingTool { executions }) as Arc<dyn Tool>)
         .plugin_manager(Arc::new(manager))
+        .expose_tool_error_messages(expose)
         .build()
         .expect("builder should succeed")
+}
+
+fn guarded_call() -> adk_realtime::events::ToolCall {
+    adk_realtime::events::ToolCall {
+        call_id: "call-1".to_string(),
+        name: "guarded".to_string(),
+        arguments: serde_json::json!({}),
+    }
 }
 
 #[tokio::test]
@@ -167,8 +208,278 @@ async fn a_failing_plugin_pipeline_refuses_the_tool_rather_than_running_it() {
     );
     let message = result["error"].as_str().unwrap_or_default();
     assert!(message.contains("refused"), "the refusal must be reported: {message}");
+    assert!(message.contains("tool.internal (tool.legacy)"), "the failure is named: {message}");
+    assert!(!message.contains("policy backend unreachable"), "its message stays local: {message}");
+
+    let exposing =
+        runner_with_plugin_exposing(Arc::new(FailingPlugin), Arc::clone(&executions), true);
+    let result = exposing.execute_tool_with_plugins_for_test(&tool, &guarded_call()).await.unwrap();
+    let message = result["error"].as_str().unwrap_or_default();
+    assert!(message.contains("policy backend unreachable"), "opted in: {message}");
+}
+
+#[tokio::test]
+async fn a_failing_after_tool_pipeline_withholds_the_result() {
+    let executions = Arc::new(AtomicUsize::new(0));
+    let runner = runner_with_plugin(Arc::new(FailingRedactor), Arc::clone(&executions));
+
+    let call = adk_realtime::events::ToolCall {
+        call_id: "call-1".to_string(),
+        name: "guarded".to_string(),
+        arguments: serde_json::json!({}),
+    };
+    let tool: Arc<dyn Tool> = Arc::new(CountingTool { executions: Arc::clone(&executions) });
+
+    let result = runner.execute_tool_with_plugins_for_test(&tool, &call).await.expect("dispatch");
+
+    assert_eq!(executions.load(Ordering::SeqCst), 1, "the tool runs before the pipeline");
     assert!(
-        message.contains("policy backend unreachable"),
-        "the underlying failure must be reported so it can be fixed: {message}"
+        result.get("ran").is_none(),
+        "the unscreened result must not reach the model: {result}"
     );
+    let message = result["error"].as_str().unwrap_or_default();
+    assert!(message.contains("ran"), "the model must learn the tool already ran: {message}");
+    assert!(message.contains("do not call it again"), "a retry must be discouraged: {message}");
+    assert_eq!(result["status"], adk_core::RESULT_WITHHELD_STATUS, "{result}");
+    assert!(message.contains("tool.internal (tool.legacy)"), "the failure is named: {message}");
+    assert!(
+        !message.contains("redaction backend unreachable"),
+        "its message stays local: {message}"
+    );
+
+    let exposing =
+        runner_with_plugin_exposing(Arc::new(FailingRedactor), Arc::clone(&executions), true);
+    let result = exposing.execute_tool_with_plugins_for_test(&tool, &guarded_call()).await.unwrap();
+    let message = result["error"].as_str().unwrap_or_default();
+    assert!(message.contains("redaction backend unreachable"), "opted in: {message}");
+}
+
+/// Returns a customer record, or fails with a message quoting a credential.
+struct CustomerTool {
+    fails: bool,
+}
+
+#[async_trait]
+impl Tool for CustomerTool {
+    fn name(&self) -> &str {
+        "customer"
+    }
+    fn description(&self) -> &str {
+        "looks up a customer"
+    }
+    async fn execute(
+        &self,
+        _ctx: Arc<dyn ToolContext>,
+        _args: serde_json::Value,
+    ) -> adk_core::Result<serde_json::Value> {
+        if self.fails {
+            return Err(adk_core::AdkError::new(
+                adk_core::ErrorComponent::Tool,
+                adk_core::ErrorCategory::Unavailable,
+                "tool.crm.unavailable",
+                "connect postgres://admin:hunter2@db.internal/crm failed",
+            ));
+        }
+        Ok(serde_json::json!({ "name": "Jane", "ssn": "123-45-6789" }))
+    }
+}
+
+/// Redacts a result's `ssn`.
+struct SsnScreen;
+
+#[async_trait]
+impl adk_core::ToolResultScreen for SsnScreen {
+    async fn screen_result(
+        &self,
+        _tool_name: &str,
+        _args: &serde_json::Value,
+        result: &serde_json::Value,
+    ) -> std::result::Result<serde_json::Value, String> {
+        let mut result = result.clone();
+        if result.get("ssn").is_some() {
+            result["ssn"] = serde_json::json!("[SSN REDACTED]");
+        }
+        Ok(result)
+    }
+}
+
+fn customer_call() -> adk_realtime::events::ToolCall {
+    adk_realtime::events::ToolCall {
+        call_id: "call-1".to_string(),
+        name: "customer".to_string(),
+        arguments: serde_json::json!({}),
+    }
+}
+
+#[tokio::test]
+async fn integrated_results_are_screened_before_they_are_persisted_or_sent() {
+    use adk_session::{CreateRequest, GetRequest, InMemorySessionService, SessionService};
+
+    let sessions = Arc::new(InMemorySessionService::new());
+    sessions
+        .create(CreateRequest {
+            app_name: "test-app".into(),
+            user_id: "user-1".into(),
+            session_id: Some("session-1".into()),
+            state: Default::default(),
+        })
+        .await
+        .unwrap();
+    let tool: Arc<dyn Tool> = Arc::new(CustomerTool { fails: false });
+    let runner = IntegratedRealtimeRunnerBuilder::new()
+        .model(Arc::new(MockModel))
+        .identity("test-app", "user-1", "session-1")
+        .session_service(sessions.clone())
+        .adk_tool(Arc::clone(&tool))
+        .tool_result_screen(Arc::new(SsnScreen))
+        .build()
+        .unwrap();
+
+    let result = runner.execute_tool_with_plugins_for_test(&tool, &customer_call()).await.unwrap();
+
+    assert_eq!(result, serde_json::json!({ "name": "Jane", "ssn": "[SSN REDACTED]" }));
+    let saved = sessions
+        .get(GetRequest {
+            app_name: "test-app".into(),
+            user_id: "user-1".into(),
+            session_id: "session-1".into(),
+            num_recent_events: None,
+            after: None,
+        })
+        .await
+        .unwrap()
+        .events()
+        .all();
+    let saved = serde_json::to_string(&saved).unwrap();
+    assert!(saved.contains("[SSN REDACTED]"), "the tool event is persisted: {saved}");
+    assert!(!saved.contains("123-45-6789"), "the persisted event is screened: {saved}");
+}
+
+#[tokio::test]
+async fn integrated_tool_errors_reach_the_model_redacted_by_default() {
+    let tool: Arc<dyn Tool> = Arc::new(CustomerTool { fails: true });
+    let runner = IntegratedRealtimeRunnerBuilder::new()
+        .model(Arc::new(MockModel))
+        .identity("test-app", "user-1", "session-1")
+        .adk_tool(Arc::clone(&tool))
+        .build()
+        .unwrap();
+
+    let result = runner.execute_tool_with_plugins_for_test(&tool, &customer_call()).await.unwrap();
+
+    assert_eq!(
+        result,
+        serde_json::json!({
+            "error": "tool 'customer' failed: tool.unavailable (tool.crm.unavailable)"
+        })
+    );
+}
+
+#[tokio::test]
+async fn the_run_policy_governs_integrated_tool_calls() {
+    let executions = Arc::new(AtomicUsize::new(0));
+    let deny_all = adk_core::RunConfig::builder()
+        .tool_policy(Arc::new(adk_core::DeclarativePolicy::builder().allow("other").build()))
+        .build();
+    let runner = IntegratedRealtimeRunnerBuilder::new()
+        .model(Arc::new(MockModel))
+        .identity("test-app", "user-1", "session-1")
+        .adk_tool(Arc::new(CountingTool { executions: Arc::clone(&executions) }) as Arc<dyn Tool>)
+        .tool_governance(deny_all)
+        .build()
+        .expect("builder should succeed");
+
+    let call = adk_realtime::events::ToolCall {
+        call_id: "call-1".to_string(),
+        name: "guarded".to_string(),
+        arguments: serde_json::json!({}),
+    };
+    let tool: Arc<dyn Tool> = Arc::new(CountingTool { executions: Arc::clone(&executions) });
+
+    let result = runner.execute_tool_with_plugins_for_test(&tool, &call).await.expect("dispatch");
+
+    assert_eq!(executions.load(Ordering::SeqCst), 0, "an unlisted tool must not run: {result}");
+    let message = result["error"].as_str().unwrap_or_default();
+    assert!(message.contains("denied by policy"), "{message}");
+}
+
+/// Whether each call was authenticated, and the scopes it reported.
+type SeenIdentities = Arc<std::sync::Mutex<Vec<(bool, Vec<String>)>>>;
+
+/// Records what each call's context says about its user.
+struct IdentityProbe {
+    seen: SeenIdentities,
+}
+
+#[async_trait]
+impl Tool for IdentityProbe {
+    fn name(&self) -> &str {
+        "probe"
+    }
+    fn description(&self) -> &str {
+        "records the caller's identity"
+    }
+    async fn execute(
+        &self,
+        ctx: Arc<dyn ToolContext>,
+        _args: serde_json::Value,
+    ) -> adk_core::Result<serde_json::Value> {
+        self.seen.lock().unwrap().push((ctx.is_authenticated(), ctx.user_scopes()));
+        Ok(serde_json::json!({ "ok": true }))
+    }
+}
+
+fn probe_call() -> adk_realtime::events::ToolCall {
+    adk_realtime::events::ToolCall {
+        call_id: "call-probe".to_string(),
+        name: "probe".to_string(),
+        arguments: serde_json::json!({}),
+    }
+}
+
+fn operator() -> adk_core::RequestContext {
+    adk_core::RequestContext {
+        user_id: "user-1".to_string(),
+        scopes: vec!["operator".to_string()],
+        metadata: Default::default(),
+    }
+}
+
+#[tokio::test]
+async fn a_voice_session_reports_the_identity_the_server_authenticated() {
+    // spec 3.1 §7.17: the integration's tool context forwards the run's identity flag.
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let tool: Arc<dyn Tool> = Arc::new(IdentityProbe { seen: Arc::clone(&seen) });
+    let authenticated = IntegratedRealtimeRunnerBuilder::new()
+        .model(Arc::new(MockModel))
+        .identity("voice", "user-1", "session-1")
+        .request_context(operator())
+        .adk_tool(Arc::clone(&tool))
+        .build()
+        .expect("builder should succeed");
+    let anonymous = IntegratedRealtimeRunnerBuilder::new()
+        .model(Arc::new(MockModel))
+        .identity("voice", "user-1", "session-1")
+        .adk_tool(Arc::clone(&tool))
+        .build()
+        .expect("builder should succeed");
+
+    authenticated.execute_tool_with_plugins_for_test(&tool, &probe_call()).await.unwrap();
+    anonymous.execute_tool_with_plugins_for_test(&tool, &probe_call()).await.unwrap();
+
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![(true, vec!["operator".to_string()]), (false, Vec::new())]
+    );
+}
+
+#[test]
+fn a_request_context_for_another_user_is_refused() {
+    let result = IntegratedRealtimeRunnerBuilder::new()
+        .model(Arc::new(MockModel))
+        .identity("voice", "user-2", "session-1")
+        .request_context(operator())
+        .build();
+    let error = result.err().expect("a mismatched identity must not build");
+    assert!(error.to_string().contains("authenticates user 'user-1'"), "{error}");
 }

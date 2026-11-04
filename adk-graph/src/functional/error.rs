@@ -30,8 +30,8 @@ pub enum FunctionalError {
     /// The workflow suspended at an interrupt and needs a resume value.
     ///
     /// `continuation_key` identifies the interrupt site. Supply the value under that key via
-    /// `TaskContext::with_resume_values` and re-invoke the entrypoint; the interrupt call then
-    /// returns the value instead of this error.
+    /// `ExecutionConfig::with_resume_value` (or `TaskContext::with_resume_values`) and re-invoke
+    /// the entrypoint; the interrupt call then returns the value instead of this error.
     ///
     /// Previously an interrupt always produced `InterruptTypeMismatch`, so a caller could not
     /// tell "needs input" from "the value you gave me was the wrong type" — and there was no
@@ -99,8 +99,18 @@ pub enum FunctionalError {
     },
 }
 
+/// A suspension and a cancellation keep their meaning as
+/// [`GraphError::Suspended`] and [`GraphError::Cancelled`], so a `#[task]` retry
+/// policy can tell them from failures; every other error becomes
+/// [`GraphError::Other`].
 impl From<FunctionalError> for GraphError {
     fn from(e: FunctionalError) -> Self {
-        GraphError::Other(e.to_string())
+        match e {
+            FunctionalError::Suspended { continuation_key, message } => {
+                GraphError::Suspended { continuation_key, message }
+            }
+            FunctionalError::Cancelled => GraphError::Cancelled,
+            other => GraphError::Other(other.to_string()),
+        }
     }
 }

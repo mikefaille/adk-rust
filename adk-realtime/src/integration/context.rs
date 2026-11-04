@@ -7,7 +7,8 @@
 use std::sync::{Arc, Mutex};
 
 use adk_core::{
-    Artifacts, CallbackContext, Content, EventActions, MemoryEntry, ReadonlyContext, ToolContext,
+    ActingContext, Artifacts, CallbackContext, Content, EventActions, MemoryEntry, ReadonlyContext,
+    RequestContext, RunConfig, ToolContext,
 };
 use adk_memory::MemoryService;
 use async_trait::async_trait;
@@ -38,6 +39,18 @@ pub struct RealtimeToolContext {
     memory_service: Option<Arc<dyn MemoryService>>,
     actions: Mutex<EventActions>,
     user_content: Content,
+    /// The identity the server authenticated for the session, if any.
+    request_context: Option<RequestContext>,
+    /// The run config the call was governed under, so a tool that checks its run's
+    /// policy (`ToolContext::run_config`) sees the same one the gate applied.
+    run_config: Option<RunConfig>,
+    /// The acting context the gate authorized the call under.
+    acting: Option<ActingContext>,
+    /// The agent the call is governed under.
+    agent_name: String,
+    /// The fence token of the call this context serves, when the runner
+    /// dispatched it under one.
+    cancellation_token: Option<tokio_util::sync::CancellationToken>,
 }
 
 impl RealtimeToolContext {
@@ -65,7 +78,103 @@ impl RealtimeToolContext {
             memory_service,
             actions: Mutex::new(EventActions::default()),
             user_content: Content::new("user"),
+            request_context: None,
+            run_config: None,
+            acting: None,
+            agent_name: crate::runner::DEFAULT_REALTIME_AGENT_NAME.to_string(),
+            cancellation_token: None,
         }
+    }
+
+    /// Carries the fence token of the dispatched call, so
+    /// [`is_cancelled`](adk_core::ToolContext::is_cancelled) reports a
+    /// provider withdrawal of the call while the tool runs.
+    #[must_use]
+    pub fn with_cancellation_token(mut self, token: tokio_util::sync::CancellationToken) -> Self {
+        self.cancellation_token = Some(token);
+        self
+    }
+
+    /// The fence token carried by this context, if any.
+    pub fn cancellation_token(&self) -> Option<&tokio_util::sync::CancellationToken> {
+        self.cancellation_token.as_ref()
+    }
+
+    /// Names the agent the call is governed under, which
+    /// [`agent_name`](ReadonlyContext::agent_name) reports; defaults to
+    /// [`DEFAULT_REALTIME_AGENT_NAME`](crate::runner::DEFAULT_REALTIME_AGENT_NAME).
+    #[must_use]
+    pub fn with_agent_name(mut self, agent_name: impl Into<String>) -> Self {
+        self.agent_name = agent_name.into();
+        self
+    }
+
+    /// Carries the run config the call was governed under, so
+    /// [`run_config`](ToolContext::run_config) answers it: a tool that refuses to run
+    /// outside a governed run (a harness `bash`) sees the policy the gate applied.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_core::{RunConfig, ToolContext};
+    /// use adk_realtime::integration::RealtimeToolContext;
+    ///
+    /// let ctx = RealtimeToolContext::new(
+    ///     "voice".to_string(),
+    ///     "user-1".to_string(),
+    ///     "session-1".to_string(),
+    ///     "call-1".to_string(),
+    ///     None,
+    /// )
+    /// .with_run_config(RunConfig::default());
+    /// assert!(ctx.run_config().is_some());
+    /// ```
+    #[must_use]
+    pub fn with_run_config(mut self, run_config: RunConfig) -> Self {
+        self.run_config = Some(run_config);
+        self
+    }
+
+    /// Carries the acting context the gate authorized the call under, so
+    /// [`acting_context`](ReadonlyContext::acting_context) reports the same agent and
+    /// subject the request's fingerprint and the audit actor name.
+    #[must_use]
+    pub fn with_acting_context(mut self, acting: ActingContext) -> Self {
+        self.acting = Some(acting);
+        self
+    }
+
+    /// Marks the context as acting for the identity the server authenticated (spec 3.1
+    /// §7.17): [`is_authenticated`](ReadonlyContext::is_authenticated) answers `true` and
+    /// [`user_scopes`](ToolContext::user_scopes) answers the context's scopes. The caller
+    /// keeps the context's `user_id` equal to this context's user.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_core::{ReadonlyContext, RequestContext, ToolContext};
+    /// use adk_realtime::integration::RealtimeToolContext;
+    ///
+    /// let identity = RequestContext {
+    ///     user_id: "user-1".to_string(),
+    ///     scopes: vec!["orders:read".to_string()],
+    ///     metadata: Default::default(),
+    /// };
+    /// let ctx = RealtimeToolContext::new(
+    ///     "voice".to_string(),
+    ///     "user-1".to_string(),
+    ///     "session-1".to_string(),
+    ///     "call-1".to_string(),
+    ///     None,
+    /// )
+    /// .with_request_context(identity);
+    /// assert!(ctx.is_authenticated());
+    /// assert_eq!(ctx.user_scopes(), ["orders:read"]);
+    /// ```
+    #[must_use]
+    pub fn with_request_context(mut self, request_context: RequestContext) -> Self {
+        self.request_context = Some(request_context);
+        self
     }
 }
 
@@ -76,7 +185,7 @@ impl ReadonlyContext for RealtimeToolContext {
     }
 
     fn agent_name(&self) -> &str {
-        "realtime"
+        &self.agent_name
     }
 
     fn user_id(&self) -> &str {
@@ -98,6 +207,22 @@ impl ReadonlyContext for RealtimeToolContext {
     fn user_content(&self) -> &Content {
         &self.user_content
     }
+
+    fn acting_context(&self) -> ActingContext {
+        match &self.acting {
+            Some(acting) => acting.clone(),
+            None => ActingContext::derived(
+                self.app_name(),
+                self.agent_name(),
+                self.user_id(),
+                adk_core::SubjectKind::Human,
+            ),
+        }
+    }
+
+    fn is_authenticated(&self) -> bool {
+        self.request_context.is_some()
+    }
 }
 
 #[async_trait]
@@ -113,12 +238,24 @@ impl ToolContext for RealtimeToolContext {
         &self.function_call_id
     }
 
+    fn is_cancelled(&self) -> bool {
+        self.cancellation_token.as_ref().is_some_and(|token| token.is_cancelled())
+    }
+
     fn actions(&self) -> EventActions {
         self.actions.lock().unwrap().clone()
     }
 
     fn set_actions(&self, actions: EventActions) {
         *self.actions.lock().unwrap() = actions;
+    }
+
+    fn run_config(&self) -> Option<&RunConfig> {
+        self.run_config.as_ref()
+    }
+
+    fn user_scopes(&self) -> Vec<String> {
+        self.request_context.as_ref().map(|context| context.scopes.clone()).unwrap_or_default()
     }
 
     async fn search_memory(&self, query: &str) -> adk_core::Result<Vec<MemoryEntry>> {
@@ -168,6 +305,19 @@ pub trait ToolContextFactory: Send + Sync {
     /// * `function_call_id` - The unique identifier for this tool invocation,
     ///   as provided by the realtime provider.
     fn create_context(&self, function_call_id: &str) -> Arc<dyn ToolContext>;
+
+    /// Creates a context carrying the dispatched call's fence `token`, so
+    /// the tool observes a provider withdrawal through
+    /// [`is_cancelled`](adk_core::ToolContext::is_cancelled). The
+    /// default drops the token; factories serving a
+    /// [`RealtimeToolContext`] override it.
+    fn create_context_with_cancellation(
+        &self,
+        function_call_id: &str,
+        _token: Option<tokio_util::sync::CancellationToken>,
+    ) -> Arc<dyn ToolContext> {
+        self.create_context(function_call_id)
+    }
 }
 
 /// Default [`ToolContextFactory`] implementation that creates [`RealtimeToolContext`]
@@ -200,12 +350,73 @@ pub struct DefaultToolContextFactory {
 
 impl ToolContextFactory for DefaultToolContextFactory {
     fn create_context(&self, function_call_id: &str) -> Arc<dyn ToolContext> {
-        Arc::new(RealtimeToolContext::new(
+        self.create_context_with_cancellation(function_call_id, None)
+    }
+
+    fn create_context_with_cancellation(
+        &self,
+        function_call_id: &str,
+        token: Option<tokio_util::sync::CancellationToken>,
+    ) -> Arc<dyn ToolContext> {
+        let mut ctx = RealtimeToolContext::new(
             self.identity.app_name.clone(),
             self.identity.user_id.clone(),
             self.identity.session_id.clone(),
             function_call_id.to_string(),
             self.memory_service.clone(),
-        ))
+        );
+        if let Some(token) = token {
+            ctx = ctx.with_cancellation_token(token);
+        }
+        Arc::new(ctx)
+    }
+}
+
+/// The factory the integrated runner's builder bridges ADK tools with: the session identity,
+/// the memory service, and the authenticated request context when one was given.
+pub(crate) struct IdentityToolContextFactory {
+    pub(crate) identity: SessionIdentity,
+    pub(crate) memory_service: Option<Arc<dyn MemoryService>>,
+    pub(crate) request_context: Option<RequestContext>,
+    /// The governance config, carried into every context as its run config.
+    pub(crate) run_config: Option<RunConfig>,
+    /// The agent calls are governed under.
+    pub(crate) agent_name: String,
+}
+
+impl ToolContextFactory for IdentityToolContextFactory {
+    fn create_context(&self, function_call_id: &str) -> Arc<dyn ToolContext> {
+        self.create_context_with_cancellation(function_call_id, None)
+    }
+
+    fn create_context_with_cancellation(
+        &self,
+        function_call_id: &str,
+        token: Option<tokio_util::sync::CancellationToken>,
+    ) -> Arc<dyn ToolContext> {
+        let mut ctx = RealtimeToolContext::new(
+            self.identity.app_name.clone(),
+            self.identity.user_id.clone(),
+            self.identity.session_id.clone(),
+            function_call_id.to_string(),
+            self.memory_service.clone(),
+        )
+        .with_agent_name(&self.agent_name);
+        if let Some(request_context) = &self.request_context {
+            ctx = ctx.with_request_context(request_context.clone());
+        }
+        if let Some(run_config) = &self.run_config {
+            ctx = ctx
+                .with_acting_context(run_config.acting_context_for(
+                    &self.identity.app_name,
+                    &self.agent_name,
+                    &self.identity.user_id,
+                ))
+                .with_run_config(run_config.clone());
+        }
+        if let Some(token) = token {
+            ctx = ctx.with_cancellation_token(token);
+        }
+        Arc::new(ctx)
     }
 }

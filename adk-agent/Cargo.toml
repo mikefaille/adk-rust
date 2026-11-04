@@ -5,12 +5,16 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Agent implementations for Rust Agent Development Kit (ADK-Rust, LLM, Custom, Workflow agents)"
-repository = "https://github.com/zavora-ai/adk-rust"
+description = "Agent implementations for Rust Agent Development Kit (ADK-Rust): LLM, custom, workflow, and team agents"
+homepage.workspace = true
+repository.workspace = true
 documentation = "https://docs.rs/adk-agent"
 keywords = ["ai", "agent", "adk", "llm", "workflow"]
 categories = ["api-bindings", "asynchronous"]
 readme = "README.md"
+
+[package.metadata.docs.rs]
+features = ["guardrails", "enhanced-plugins", "skills-progressive-disclosure", "team-tools", "codeact", "coding", "sandbox", "ambient", "record-payloads"]
 
 [dependencies]
 adk-core.workspace = true
@@ -45,12 +49,16 @@ default = ["skills"]
 guardrails = ["adk-guardrail"]
 enhanced-plugins = ["dep:adk-plugin"]
 skills = ["dep:adk-skill"]
+# Google ADK-style L1/L2/L3 skill tools. Existing `skills` continues to use
+# prompt injection unless callers explicitly register a SkillToolset.
+skills-progressive-disclosure = ["skills", "adk-skill/progressive-disclosure"]
 sandbox = ["dep:adk-sandbox", "adk-sandbox/workspace"]
 coding = ["dep:adk-devtools"]
 codeact = []
 team-tools = ["dep:adk-tool"]
 record-payloads = []
 ambient = [
+    "adk-core/webhooks",
     "dep:cron",
     "dep:notify",
     "dep:axum",
@@ -63,7 +71,9 @@ ambient = [
 reqwest = { workspace = true }
 # Internal dev-deps are path-only (no version) so cargo strips them from the
 # published manifest — they can never block or reorder a crates.io publish.
-adk-model = { path = "../adk-model", features = ["gemini", "gemini-interactions", "openai"] }
+adk-auth = { path = "../adk-auth", features = ["signed-audit"] }
+adk-model = { path = "../adk-model", features = ["anthropic", "gemini", "gemini-interactions", "openai"] }
+adk-plugin = { path = "../adk-plugin" }
 adk-runner = { path = "../adk-runner" }
 adk-session = { path = "../adk-session" }
 adk-tool = { path = "../adk-tool" }
@@ -71,4 +81,11 @@ anyhow = "1"
 dotenvy = "0.15"
 proptest = "1.5"
 tempfile = "3"
-tokio = { workspace = true, features = ["rt", "macros"] }
+# `rt-multi-thread`: the span-parenting regression test must run on a
+# multi-threaded runtime — a current-thread runtime can mask the thread-affinity
+# half of the bug it covers.
+tokio = { workspace = true, features = ["rt", "macros", "rt-multi-thread", "test-util"] }
+# Capture layer for the span-parenting regression test.
+tracing-subscriber = { workspace = true }
+# Mock provider endpoints for the built-in tool governance tests.
+wiremock = "0.6"

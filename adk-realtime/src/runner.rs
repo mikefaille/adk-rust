@@ -6,6 +6,7 @@
 use crate::config::{RealtimeConfig, SessionUpdateConfig, ToolDefinition};
 use crate::error::{RealtimeError, Result};
 use crate::events::{CallerActivitySource, ServerEvent, ToolCall, ToolResponse};
+use crate::metering::{RealtimePricing, ResponseMeter};
 use crate::model::BoxedModel;
 use crate::recovery::supervisor::{
     ConfigSnapshot, FailureReport, RecoveryOutcome, RecoverySupervisor, TransportStatus,
@@ -17,6 +18,73 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
+
+/// How long a realtime tool may run before its call is answered with a timeout error.
+pub const DEFAULT_REALTIME_TOOL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// The agent a realtime runner governs and meters its tool calls under unless
+/// [`RealtimeRunnerBuilder::agent_name`] names another; `IntegratedRealtimeRunner` also
+/// authors its held-call events with it, where [`adk_core::held_tool_calls`] finds them.
+pub const DEFAULT_REALTIME_AGENT_NAME: &str = "realtime";
+
+/// [`ToolOrigin::source`](adk_core::ToolOrigin::source) of a native handler registered on a
+/// [`RealtimeRunner`] with [`RealtimeRunnerBuilder::tool`].
+///
+/// A governed call to the handler carries this source and a digest of the handler's
+/// [`ToolDefinition`] ([`ToolDefinition::handler_origin`]), so an approval of the call never
+/// authorizes a [`Tool`](adk_core::Tool) of the same name and stops applying when the
+/// handler's description or parameters change.
+pub const REALTIME_HANDLER_ORIGIN: &str = "realtime";
+
+/// Runs `screen` on `result`, returning the result to deliver — the
+/// [`result_blocked_response`](adk_core::result_blocked_response) that replaces a withheld one —
+/// and whether the screen withheld it, which sets the answer's
+/// [`ToolResultStatus`](adk_core::ToolResultStatus).
+pub(crate) async fn screen_result(
+    screen: &dyn adk_core::ToolResultScreen,
+    name: &str,
+    args: &serde_json::Value,
+    result: serde_json::Value,
+) -> (serde_json::Value, bool) {
+    match screen.screen_result(name, args, &result).await {
+        Ok(screened) => (screened, false),
+        Err(reason) => {
+            // The reason can describe the result, so it goes to the model, not the log.
+            tracing::warn!(tool.name = %name, "tool result withheld by its screen");
+            (adk_core::result_blocked_response(name, &reason), true)
+        }
+    }
+}
+
+/// Parses a provider's tool-call arguments.
+///
+/// Empty arguments are an empty object. Anything that is not a JSON object is refused,
+/// so a malformed call is answered with an error instead of running with `{}`.
+pub(crate) fn parse_tool_arguments(
+    arguments: &serde_json::Value,
+) -> std::result::Result<serde_json::Value, String> {
+    match arguments {
+        serde_json::Value::Object(_) => Ok(arguments.clone()),
+        serde_json::Value::Null => Ok(serde_json::Value::Object(Default::default())),
+        serde_json::Value::String(text) if text.trim().is_empty() => {
+            Ok(serde_json::Value::Object(Default::default()))
+        }
+        serde_json::Value::String(text) => match serde_json::from_str::<serde_json::Value>(text) {
+            Ok(value @ serde_json::Value::Object(_)) => Ok(value),
+            Ok(_) => Err("its arguments are not a JSON object".to_string()),
+            Err(error) => Err(format!("its arguments are not valid JSON ({error})")),
+        },
+        _ => Err("its arguments are not a JSON object".to_string()),
+    }
+}
+
+/// The run-wide governance a runner applies to every tool call it dispatches.
+#[derive(Clone)]
+pub(crate) struct ToolGovernance {
+    pub(crate) config: adk_core::RunConfig,
+    pub(crate) scope: adk_core::ApprovalScope,
+}
 
 /// Internal state machine tracking the resumability status of the RealtimeRunner.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -48,6 +116,18 @@ pub enum RunnerState {
 pub trait ToolHandler: Send + Sync {
     /// Execute a tool call and return the result.
     async fn execute(&self, call: &ToolCall) -> Result<serde_json::Value>;
+
+    /// Execute a tool call whose cancellation the runner fences: `token`
+    /// is cancelled when the provider withdraws the call or the response.
+    /// The default ignores it; handlers that create a tool context
+    /// override it so the context reports the cancellation.
+    async fn execute_cancellable(
+        &self,
+        call: &ToolCall,
+        _token: CancellationToken,
+    ) -> Result<serde_json::Value> {
+        self.execute(call).await
+    }
 }
 
 /// A simple function-based tool handler.
@@ -197,6 +277,26 @@ struct PendingToolCall {
     call_id: String,
     name: String,
     arguments: serde_json::Value,
+    /// Fence generation in force when the provider issued this call. A
+    /// `ResponseCancelled` since then fences the call before it runs.
+    epoch: u64,
+}
+
+/// One in-flight tool call in the cancellation fence.
+struct FencedToolCall {
+    token: CancellationToken,
+    abort_handle: Option<tokio::task::AbortHandle>,
+    effect: adk_core::ToolEffect,
+}
+
+/// The cancellation fence for dispatched tool calls.
+#[derive(Default)]
+struct ToolCallFence {
+    /// Bumped by every `ResponseCancelled`; calls registered under an
+    /// older generation are fenced. `SpeechStarted` alone never bumps it:
+    /// speech onset does not withdraw the response's tool calls.
+    epoch: u64,
+    calls: HashMap<String, FencedToolCall>,
 }
 
 /// Configuration for the RealtimeRunner.
@@ -230,7 +330,15 @@ pub struct RealtimeRunnerBuilder {
     runner_config: RunnerConfig,
     recovery_policy: RecoveryPolicy,
     tools: HashMap<String, (ToolDefinition, Arc<dyn ToolHandler>)>,
+    /// The first name registered twice; `build` rejects it.
+    duplicate_tool: Option<String>,
     event_handler: Option<Arc<dyn EventHandler>>,
+    governance: Option<ToolGovernance>,
+    tool_timeout: std::time::Duration,
+    tool_result_screen: Option<Arc<dyn adk_core::ToolResultScreen>>,
+    expose_tool_error_messages: bool,
+    pricing: Option<RealtimePricing>,
+    agent_name: String,
 }
 
 impl Default for RealtimeRunnerBuilder {
@@ -248,8 +356,125 @@ impl RealtimeRunnerBuilder {
             runner_config: RunnerConfig::default(),
             recovery_policy: RecoveryPolicy::default(),
             tools: HashMap::new(),
+            duplicate_tool: None,
             event_handler: None,
+            governance: None,
+            tool_timeout: DEFAULT_REALTIME_TOOL_TIMEOUT,
+            tool_result_screen: None,
+            expose_tool_error_messages: false,
+            pricing: None,
+            agent_name: DEFAULT_REALTIME_AGENT_NAME.to_string(),
         }
+    }
+
+    /// Names the agent every tool call is governed and metered under: the gate's agent
+    /// name, the acting agent of each call's fingerprint and audit record, and the agent in
+    /// the spend key. Defaults to [`DEFAULT_REALTIME_AGENT_NAME`]. A surface that runs an
+    /// existing agent's tools over a realtime session sets that agent's name, so the
+    /// agent's tool policy recognises its own tools (spec 3.1 §7.17).
+    pub fn agent_name(mut self, name: impl Into<String>) -> Self {
+        self.agent_name = name.into();
+        self
+    }
+
+    /// Prices each response's reported usage, so the cost committed in the run's spend
+    /// ledger is the usage's price rather than the run's per-call estimate. Metering needs
+    /// [`tool_governance`](Self::tool_governance) with a `spend_ledger`.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use adk_realtime::metering::RealtimePricing;
+    ///
+    /// let runner = RealtimeRunner::builder()
+    ///     .model(model)
+    ///     .tool_governance(config, scope)
+    ///     .realtime_pricing(RealtimePricing {
+    ///         input_audio_micro_usd_per_million: 32_000_000,
+    ///         output_audio_micro_usd_per_million: 64_000_000,
+    ///         ..RealtimePricing::default()
+    ///     })
+    ///     .build()?;
+    /// ```
+    pub fn realtime_pricing(mut self, pricing: RealtimePricing) -> Self {
+        self.pricing = Some(pricing);
+        self
+    }
+
+    /// Governs every tool call this runner dispatches.
+    ///
+    /// The config's `tool_policy`, `governance` kill switches, confirmation handler,
+    /// approvals, and approval store apply exactly as they do to an agent run, through
+    /// [`adk_core::authorize_tool_call`]. A call held for confirmation is answered with an
+    /// error and recorded in the approval store under `scope`. A frozen kill switch ends
+    /// [`run`](RealtimeRunner::run) with an error.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use adk_core::{ApprovalScope, DeclarativePolicy, RunConfig};
+    ///
+    /// let runner = RealtimeRunner::builder()
+    ///     .model(model)
+    ///     .tool_governance(
+    ///         RunConfig::builder()
+    ///             .tool_policy(Arc::new(DeclarativePolicy::builder().allow("get_weather").build()))
+    ///             .build(),
+    ///         ApprovalScope::new("voice", "user-1", "call-42"),
+    ///     )
+    ///     .build()?;
+    /// ```
+    pub fn tool_governance(
+        mut self,
+        config: adk_core::RunConfig,
+        scope: adk_core::ApprovalScope,
+    ) -> Self {
+        self.governance = Some(ToolGovernance { config, scope });
+        self
+    }
+
+    /// Sets how long a tool may run before its call is answered with a timeout error.
+    /// Defaults to [`DEFAULT_REALTIME_TOOL_TIMEOUT`].
+    pub fn tool_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.tool_timeout = timeout;
+        self
+    }
+
+    /// Screens every tool result before it is sent to the model.
+    ///
+    /// The screen sees each handler's result, or its error response, before
+    /// `function_call_output` is sent. A result the screen rewrites is sent rewritten; a result it
+    /// withholds, or that it cannot decide on (`Err`), is replaced by
+    /// [`result_blocked_response`](adk_core::result_blocked_response), so the runner fails
+    /// closed. `adk-guardrail`'s `ToolGuardrailSet` is a screen.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use adk_guardrail::{PiiRedactor, ResultTextGuardrail, ToolGuardrailSet};
+    ///
+    /// let runner = RealtimeRunner::builder()
+    ///     .model(model)
+    ///     .tool_fn(ToolDefinition::new("lookup_order"), lookup_order)
+    ///     .tool_result_screen(Arc::new(
+    ///         ToolGuardrailSet::new().with(ResultTextGuardrail::new(PiiRedactor::new())),
+    ///     ))
+    ///     .build()?;
+    /// ```
+    pub fn tool_result_screen(mut self, screen: Arc<dyn adk_core::ToolResultScreen>) -> Self {
+        self.tool_result_screen = Some(screen);
+        self
+    }
+
+    /// Sends the full message of a handler's error to the model.
+    ///
+    /// By default a handler that fails is answered with `tool '<name>' failed` only, because
+    /// the message can quote credentials, internal hosts, or upstream bodies, and the output is
+    /// sent to the provider and can be spoken to the user. Timeouts and policy refusals keep
+    /// their message.
+    pub fn expose_tool_error_messages(mut self, expose: bool) -> Self {
+        self.expose_tool_error_messages = expose;
+        self
     }
 
     /// Set the realtime model.
@@ -289,10 +514,11 @@ impl RealtimeRunnerBuilder {
     }
 
     /// Register a tool with its handler.
-    pub fn tool(mut self, definition: ToolDefinition, handler: impl ToolHandler + 'static) -> Self {
-        let name = definition.name.clone();
-        self.tools.insert(name, (definition, Arc::new(handler)));
-        self
+    ///
+    /// Each tool needs a name of its own: [`build`](Self::build) fails when two
+    /// share one.
+    pub fn tool(self, definition: ToolDefinition, handler: impl ToolHandler + 'static) -> Self {
+        self.tool_arc(definition, Arc::new(handler))
     }
 
     /// Register a tool with a sync function handler.
@@ -306,7 +532,9 @@ impl RealtimeRunnerBuilder {
     /// Register a tool with an `Arc<dyn ToolHandler>` directly.
     pub fn tool_arc(mut self, definition: ToolDefinition, handler: Arc<dyn ToolHandler>) -> Self {
         let name = definition.name.clone();
-        self.tools.insert(name, (definition, handler));
+        if self.tools.insert(name.clone(), (definition, handler)).is_some() {
+            self.duplicate_tool.get_or_insert(name);
+        }
         self
     }
 
@@ -323,8 +551,19 @@ impl RealtimeRunnerBuilder {
     }
 
     /// Build the runner (does not connect yet).
+    ///
+    /// # Errors
+    ///
+    /// Returns a config error when no model was set or when two tools were
+    /// registered under one name.
     pub fn build(self) -> Result<RealtimeRunner> {
         let model = self.model.ok_or_else(|| RealtimeError::config("Model is required"))?;
+        if let Some(name) = self.duplicate_tool {
+            return Err(RealtimeError::config(format!(
+                "two tools are registered as '{name}'; the model calls tools by name, so only \
+                 one could ever run. Rename one of them or register it once."
+            )));
+        }
 
         let mut config = self.config;
         if !self.tools.is_empty() {
@@ -335,6 +574,17 @@ impl RealtimeRunnerBuilder {
 
         let max_concurrent_tools = self.runner_config.max_concurrent_tools.max(1);
         let supervisor = Arc::new(RecoverySupervisor::new(self.recovery_policy, config));
+
+        // Every response is metered in the run's spend ledger, as `LlmAgent` meters a call.
+        let meter = self.governance.as_ref().and_then(|governance| {
+            ResponseMeter::for_run(
+                &governance.config,
+                &governance.scope.app_name,
+                &self.agent_name,
+                model.model_id(),
+                self.pricing,
+            )
+        });
 
         Ok(RealtimeRunner {
             model,
@@ -348,8 +598,15 @@ impl RealtimeRunnerBuilder {
             tool_permits: Arc::new(tokio::sync::Semaphore::new(max_concurrent_tools)),
             outstanding_tools: Arc::new(AtomicUsize::new(0)),
             response_closed_awaiting_tools: Arc::new(AtomicBool::new(false)),
+            governance: self.governance,
+            tool_timeout: self.tool_timeout,
+            tool_result_screen: self.tool_result_screen,
+            expose_tool_error_messages: self.expose_tool_error_messages,
+            meter,
+            agent_name: self.agent_name,
             consecutive_tool_failures: Arc::new(AtomicUsize::new(0)),
             circuit_breaker_tripped: Arc::new(AtomicBool::new(false)),
+            tool_fence: Arc::new(std::sync::Mutex::new(ToolCallFence::default())),
         })
     }
 }
@@ -402,8 +659,21 @@ pub struct RealtimeRunner {
     tool_permits: Arc<tokio::sync::Semaphore>,
     outstanding_tools: Arc<AtomicUsize>,
     response_closed_awaiting_tools: Arc<AtomicBool>,
+    /// Policy, kill switch, and confirmation applied to every dispatched call.
+    governance: Option<ToolGovernance>,
+    /// How long one tool call may run.
+    tool_timeout: std::time::Duration,
+    /// Screens every tool result before it is sent to the model.
+    tool_result_screen: Option<Arc<dyn adk_core::ToolResultScreen>>,
+    /// Whether handler error messages reach the model.
+    expose_tool_error_messages: bool,
+    /// Meters each response in the run's spend ledger, when the governance has one.
+    meter: Option<ResponseMeter>,
+    /// The agent every tool call is governed and metered under.
+    agent_name: String,
     consecutive_tool_failures: Arc<AtomicUsize>,
     circuit_breaker_tripped: Arc<AtomicBool>,
+    tool_fence: Arc<std::sync::Mutex<ToolCallFence>>,
 }
 
 impl RealtimeRunner {
@@ -576,6 +846,9 @@ impl RealtimeRunner {
         }
         if let Some(extra) = &update.0.extra {
             base.extra = Some(extra.clone());
+        }
+        if let Some(language) = &update.0.language {
+            base.language = Some(language.clone());
         }
     }
 
@@ -765,7 +1038,7 @@ impl RealtimeRunner {
         current_gen_id: u64,
         session: &Arc<dyn crate::session::RealtimeSession>,
     ) -> Option<Result<ServerEvent>> {
-        tokio::select! {
+        let event = tokio::select! {
             biased;
             _ = watcher.changed() => {
                 if *watcher.borrow() != current_gen_id {
@@ -779,7 +1052,78 @@ impl RealtimeRunner {
                 session.next_event().await
             }
             ev = session.next_event() => ev,
+        };
+
+        // Never yield after an event has been obtained: the caller's `select!`
+        // may cancel this future at a yield point, which would drop the event
+        // a buffered session already handed over.
+        let event = event?;
+        if let Ok(inner) = &event
+            && let Err(error) = self.observe_event(inner).await
+        {
+            return Some(Err(error));
         }
+        Some(event)
+    }
+
+    /// Meters `event` when it starts or ends a response.
+    ///
+    /// Returns the usage a `ResponseDone` reported, priced with
+    /// [`realtime_pricing`](RealtimeRunnerBuilder::realtime_pricing).
+    ///
+    /// # Errors
+    ///
+    /// [`RealtimeError::SpendRefused`] when the run's spend ledger refuses the response's
+    /// hold; the caller ends the session.
+    pub(crate) async fn observe_event(
+        &self,
+        event: &ServerEvent,
+    ) -> Result<Option<adk_core::UsageMetadata>> {
+        let Some(meter) = &self.meter else {
+            return Ok(None);
+        };
+        match event {
+            ServerEvent::ResponseCreated { .. } => {
+                meter.begin_response().await?;
+                Ok(None)
+            }
+            ServerEvent::ResponseDone { response, .. } => meter.end_response(response).await,
+            _ => Ok(None),
+        }
+    }
+
+    /// The agent every tool call is governed and metered under.
+    #[cfg(feature = "integration")]
+    pub(crate) fn agent_name(&self) -> &str {
+        &self.agent_name
+    }
+
+    /// The run config every tool call is governed under, when one was set.
+    #[cfg(feature = "integration")]
+    pub(crate) fn governance_config(&self) -> Option<&adk_core::RunConfig> {
+        self.governance.as_ref().map(|governance| &governance.config)
+    }
+
+    /// The approval scope held calls are recorded under, when governance was set.
+    #[cfg(feature = "integration")]
+    pub(crate) fn approval_scope(&self) -> Option<&adk_core::ApprovalScope> {
+        self.governance.as_ref().map(|governance| &governance.scope)
+    }
+
+    /// Counts a tool dispatch the caller runs outside [`run`](Self::run), so the follow-up
+    /// response waits for it; pair with [`end_dispatch`](Self::end_dispatch).
+    #[cfg(feature = "integration")]
+    pub(crate) fn begin_dispatch(&self) {
+        self.outstanding_tools.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Marks a dispatch counted by [`begin_dispatch`](Self::begin_dispatch) as finished.
+    /// Returns `true` when the dispatching response closed meanwhile, so the caller owes
+    /// the follow-up response ([`respond_after_tools`](Self::respond_after_tools)).
+    #[cfg(feature = "integration")]
+    pub(crate) fn end_dispatch(&self) -> bool {
+        self.outstanding_tools.fetch_sub(1, Ordering::AcqRel) == 1
+            && self.response_closed_awaiting_tools.swap(false, Ordering::AcqRel)
     }
 
     /// Authoritatively spawn planned proactive replacement and notify the application event handler.
@@ -854,6 +1198,17 @@ impl RealtimeRunner {
                 None => {
                     if *watcher.borrow() != current_gen_id {
                         continue;
+                    }
+                    // An event stream that ends while the session is still
+                    // connected is an idle end, not a disconnect: the
+                    // scripted session ends its stream at its idle timeout
+                    // yet stays writable for a later client action. Only a
+                    // stream that ends on a dead session is an unexpected
+                    // EOF worth recovering from; terminalizing a live
+                    // session here would refuse the writes that follow
+                    // (e.g. a resumed held call's tool output).
+                    if session.is_connected() {
+                        return None;
                     }
                     if self.report_read_failure(current_gen_id, RecoveryCause::UnexpectedEof).await
                     {
@@ -994,6 +1349,12 @@ impl RealtimeRunner {
                                     }
                                 }
                             }
+                            // Idle end on a still-connected session (see
+                            // next_event): not a disconnect, no recovery.
+                            if session.is_connected() {
+                                self.event_handler.on_disconnect().await?;
+                                break;
+                            }
                             if self.report_read_failure(current_gen_id, RecoveryCause::UnexpectedEof).await {
                                 continue;
                             }
@@ -1016,16 +1377,40 @@ impl RealtimeRunner {
             }
         }
 
+        struct FenceGuard<'a>(&'a RealtimeRunner, String);
+        impl<'a> Drop for FenceGuard<'a> {
+            fn drop(&mut self) {
+                self.0.unregister_tool_call(&self.1);
+            }
+        }
+
         self.outstanding_tools.fetch_add(1, Ordering::AcqRel);
         let guard = ToolCounterGuard(self);
+        let token = self.register_tool_call_at(&call.call_id, &call.name, call.epoch);
+        let _fence_guard = FenceGuard(self, call.call_id.clone());
 
-        let permit = Arc::clone(&self.tool_permits).acquire_owned().await;
-        let result = self.execute_tool_call(&call.call_id, &call.name, &call.arguments).await;
+        // A call fenced while it waits for a permit never executes.
+        let permit = tokio::select! {
+            biased;
+            _ = token.cancelled() => None,
+            permit = Arc::clone(&self.tool_permits).acquire_owned() => Some(permit),
+        };
+        let Some(permit) = permit else {
+            drop(guard);
+            return Ok(());
+        };
+        let result = if token.is_cancelled() {
+            Ok(())
+        } else {
+            self.execute_tool_call_fenced(&call.call_id, &call.name, &call.arguments, &token).await
+        };
         drop(permit);
 
         drop(guard);
 
-        if self.outstanding_tools.load(Ordering::Acquire) == 0
+        // A cancelled call is owed no follow-up response.
+        if !token.is_cancelled()
+            && self.outstanding_tools.load(Ordering::Acquire) == 0
             && self.response_closed_awaiting_tools.swap(false, Ordering::AcqRel)
         {
             self.respond_after_tools().await?;
@@ -1086,6 +1471,7 @@ impl RealtimeRunner {
                 self.event_handler.on_speech_stopped(audio_end_ms).await?;
             }
             ServerEvent::ToolCallCancelled { call_ids } => {
+                self.cancel_tool_calls(&call_ids);
                 self.event_handler.on_tool_calls_cancelled(&call_ids).await?;
             }
             ServerEvent::PlannedRotation { time_left } => {
@@ -1100,6 +1486,7 @@ impl RealtimeRunner {
                 }
             }
             ServerEvent::ResponseCancelled { .. } => {
+                self.cancel_all_tool_calls();
                 self.pending_tool_response.store(false, Ordering::Release);
                 self.tool_output_failed.store(false, Ordering::Release);
                 self.response_closed_awaiting_tools.store(false, Ordering::Release);
@@ -1119,7 +1506,8 @@ impl RealtimeRunner {
             ServerEvent::FunctionCallDone { call_id, name, arguments, .. }
                 if self.runner_config.auto_execute_tools =>
             {
-                return Ok(Some(PendingToolCall { call_id, name, arguments }));
+                let epoch = self.fence_epoch();
+                return Ok(Some(PendingToolCall { call_id, name, arguments, epoch }));
             }
             ServerEvent::Error { error, .. } => {
                 let err = RealtimeError::server(error.code.unwrap_or_default(), error.message);
@@ -1225,6 +1613,194 @@ impl RealtimeRunner {
         Ok(())
     }
 
+    /// The current fence generation.
+    pub(crate) fn fence_epoch(&self) -> u64 {
+        self.tool_fence.lock().unwrap_or_else(|e| e.into_inner()).epoch
+    }
+
+    /// Register a dispatched call in the fence and return its token.
+    pub(crate) fn register_tool_call(&self, call_id: &str, name: &str) -> CancellationToken {
+        let epoch = self.fence_epoch();
+        self.register_tool_call_at(call_id, name, epoch)
+    }
+
+    /// Register a call issued under an earlier fence generation. A stale
+    /// generation's token is already cancelled, so the call never runs.
+    pub(crate) fn register_tool_call_at(
+        &self,
+        call_id: &str,
+        name: &str,
+        epoch: u64,
+    ) -> CancellationToken {
+        let effect = self
+            .tools
+            .get(name)
+            .map(|(definition, _)| definition.effect)
+            .unwrap_or(adk_core::ToolEffect::NonIdempotent);
+        let mut fence = self.tool_fence.lock().unwrap_or_else(|e| e.into_inner());
+        // One call_id names one call. A second registration (the integration
+        // spawn path registering, then `dispatch_tool_call` registering
+        // again on its way in) must join the existing fence entry, not
+        // replace it: replacing it would swap in an uncancelled token and
+        // drop the recorded abort handle, so a withdrawal arriving during
+        // execution would cancel a token nobody is watching.
+        if let Some(entry) = fence.calls.get(call_id) {
+            let token = entry.token.clone();
+            if epoch != fence.epoch {
+                token.cancel();
+            }
+            return token;
+        }
+        let token = CancellationToken::new();
+        if epoch != fence.epoch {
+            token.cancel();
+        }
+        fence.calls.insert(
+            call_id.to_string(),
+            FencedToolCall { token: token.clone(), abort_handle: None, effect },
+        );
+        token
+    }
+
+    /// The fence token already registered for `call_id`, if any.
+    pub(crate) fn fence_token(&self, call_id: &str) -> Option<CancellationToken> {
+        self.tool_fence
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .calls
+            .get(call_id)
+            .map(|entry| entry.token.clone())
+    }
+
+    /// Record the abort handle of a task spawned for a registered call.
+    #[cfg(feature = "integration")]
+    pub(crate) fn set_tool_abort_handle(&self, call_id: &str, handle: tokio::task::AbortHandle) {
+        let mut fence = self.tool_fence.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(entry) = fence.calls.get_mut(call_id) {
+            entry.abort_handle = Some(handle);
+        }
+    }
+
+    /// Drop a finished call from the fence.
+    pub(crate) fn unregister_tool_call(&self, call_id: &str) {
+        self.tool_fence.lock().unwrap_or_else(|e| e.into_inner()).calls.remove(call_id);
+    }
+
+    /// Fence the named calls: their tokens are cancelled, and a spawned
+    /// task for a retry-safe (read-only or idempotent) call is aborted.
+    /// A non-idempotent task is left to its token so a call cancelled
+    /// after it started can be answered as outcome-unknown.
+    pub(crate) fn cancel_tool_calls(&self, call_ids: &[crate::events::ToolCallId]) {
+        let fence = self.tool_fence.lock().unwrap_or_else(|e| e.into_inner());
+        for id in call_ids {
+            if let Some(entry) = fence.calls.get(id.as_str()) {
+                entry.token.cancel();
+                if entry.effect.is_retry_safe()
+                    && let Some(handle) = &entry.abort_handle
+                {
+                    handle.abort();
+                }
+            }
+        }
+    }
+
+    /// Fence every in-flight call and advance the fence generation, so a
+    /// call issued before this response was cancelled can never start.
+    pub(crate) fn cancel_all_tool_calls(&self) {
+        let mut fence = self.tool_fence.lock().unwrap_or_else(|e| e.into_inner());
+        fence.epoch += 1;
+        for entry in fence.calls.values() {
+            entry.token.cancel();
+            if entry.effect.is_retry_safe()
+                && let Some(handle) = &entry.abort_handle
+            {
+                handle.abort();
+            }
+        }
+        fence.calls.clear();
+    }
+
+    /// Runs one call through the governed path configured with
+    /// [`RealtimeRunnerBuilder::tool_governance`]. Without one, every call executes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RealtimeError::ToolError`] when the kill switch is frozen or the
+    /// confirmation handler or approval store fails; the run ends.
+    pub(crate) async fn authorize_tool_call(
+        &self,
+        call: adk_core::GovernedCall,
+    ) -> Result<adk_core::ToolAuthorization> {
+        let Some(governance) = &self.governance else {
+            return Ok(adk_core::ToolAuthorization::Execute {
+                args: call.args,
+                confirmation: None,
+            });
+        };
+        let gate = adk_core::ToolGate::new(
+            &governance.config,
+            &self.agent_name,
+            &governance.scope.session_id,
+            governance.scope.clone(),
+        );
+        adk_core::authorize_tool_call(&gate, call)
+            .await
+            .map_err(|error| RealtimeError::ToolError(error.to_string()))
+    }
+
+    /// Withdraws `request`, a call's confirmation request that will not be waited on, so no
+    /// decision on it authorizes an identical call ([`adk_core::withdraw_held_call`]).
+    #[cfg(feature = "integration")]
+    pub(crate) async fn withdraw_held_call(
+        &self,
+        request: &adk_core::ToolConfirmationRequest,
+    ) -> Result<()> {
+        let Some(governance) = &self.governance else {
+            return Ok(());
+        };
+        let gate = adk_core::ToolGate::new(
+            &governance.config,
+            &self.agent_name,
+            &governance.scope.session_id,
+            governance.scope.clone(),
+        );
+        adk_core::withdraw_held_call(&gate, request)
+            .await
+            .map_err(|error| RealtimeError::ToolError(error.to_string()))
+    }
+
+    /// How long one tool call may run.
+    #[cfg(feature = "integration")]
+    pub(crate) fn tool_timeout(&self) -> std::time::Duration {
+        self.tool_timeout
+    }
+
+    /// Whether tool error messages reach the model.
+    #[cfg(feature = "integration")]
+    pub(crate) fn exposes_tool_error_messages(&self) -> bool {
+        self.expose_tool_error_messages
+    }
+
+    /// Runs the configured result screen, if any, on `result`, returning the result to deliver
+    /// and whether the screen withheld it.
+    pub(crate) async fn screen_tool_result(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+        result: serde_json::Value,
+    ) -> (serde_json::Value, bool) {
+        match &self.tool_result_screen {
+            Some(screen) => screen_result(screen.as_ref(), name, args, result).await,
+            None => (result, false),
+        }
+    }
+
+    /// Whether tool error messages may be logged: the `record_payloads` of the config passed to
+    /// [`RealtimeRunnerBuilder::tool_governance`]. Without one, only content-free fields are.
+    pub(crate) fn records_payloads(&self) -> bool {
+        self.governance.as_ref().is_some_and(|governance| governance.config.record_payloads)
+    }
+
     /// Execute a tool call and optionally send the response.
     async fn execute_tool_call(
         &self,
@@ -1232,6 +1808,35 @@ impl RealtimeRunner {
         name: &str,
         arguments: &serde_json::Value,
     ) -> Result<()> {
+        // Join a fence entry an outer dispatch path already registered
+        // (and may have attached an abort handle to); only the path that
+        // created the entry removes it.
+        let (token, owns_entry) = match self.fence_token(call_id) {
+            Some(token) => (token, false),
+            None => (self.register_tool_call(call_id, name), true),
+        };
+        let result = self.execute_tool_call_fenced(call_id, name, arguments, &token).await;
+        if owns_entry {
+            self.unregister_tool_call(call_id);
+        }
+        result
+    }
+
+    /// [`execute_tool_call`](Self::execute_tool_call) under a fence token:
+    /// cancellation is checked before authorization and before execution,
+    /// and a fenced call's output and follow-up response are suppressed —
+    /// except a non-idempotent call cancelled after it started, whose
+    /// withheld result is answered as outcome-unknown, never as a success.
+    async fn execute_tool_call_fenced(
+        &self,
+        call_id: &str,
+        name: &str,
+        arguments: &serde_json::Value,
+        token: &CancellationToken,
+    ) -> Result<()> {
+        if token.is_cancelled() {
+            return Ok(());
+        }
         if self.circuit_breaker_tripped.load(Ordering::Acquire) {
             tracing::warn!(
                 call_id,
@@ -1243,7 +1848,7 @@ impl RealtimeRunner {
                 "reason": "tool_unavailable",
                 "error": "circuit_breaker_open"
             });
-            if self.runner_config.auto_respond_tools {
+            if self.runner_config.auto_respond_tools && !token.is_cancelled() {
                 let response =
                     ToolResponse { call_id: call_id.to_string(), output: result, scheduling: None };
                 if let Err(e) =
@@ -1257,54 +1862,172 @@ impl RealtimeRunner {
             return Ok(());
         }
 
-        let handler = self.tools.get(name).map(|(_, h)| h.clone());
-
-        let result = if let Some(handler) = handler {
-            let call = ToolCall {
-                call_id: call_id.to_string(),
-                name: name.to_string(),
-                arguments: arguments.clone(),
-            };
-
-            match handler.execute(&call).await {
-                Ok(value) => {
-                    self.consecutive_tool_failures.store(0, Ordering::Release);
-                    value
-                }
-                Err(e) => {
-                    let failures =
-                        self.consecutive_tool_failures.fetch_add(1, Ordering::AcqRel) + 1;
-                    if failures >= self.runner_config.max_consecutive_tool_failures {
-                        if !self.circuit_breaker_tripped.swap(true, Ordering::AcqRel) {
-                            tracing::error!(
-                                call_id,
-                                name,
-                                failures,
-                                max = self.runner_config.max_consecutive_tool_failures,
-                                "Tool execution circuit breaker TRIPPED: entering Open state"
-                            );
-                            let _ = self.event_handler.on_error(&RealtimeError::provider(format!(
-                                "Tool execution circuit breaker tripped after {} consecutive failures: {}",
-                                failures, e
-                            ))).await;
-                        }
-                        serde_json::json!({
-                            "status": "rejected",
-                            "reason": "tool_unavailable",
-                            "error": format!("circuit_breaker_tripped: {}", e)
-                        })
-                    } else {
-                        serde_json::json!({
-                            "error": e.to_string()
-                        })
+        let args = match parse_tool_arguments(arguments) {
+            Ok(args) => args,
+            Err(reason) => {
+                let result = serde_json::json!({
+                    "error": format!("Tool '{name}' was not run: {reason}")
+                });
+                if self.runner_config.auto_respond_tools && !token.is_cancelled() {
+                    let response = ToolResponse {
+                        call_id: call_id.to_string(),
+                        output: result,
+                        scheduling: None,
+                    };
+                    if let Err(e) = self
+                        .invoke_write(|s| async move { s.send_tool_output(response).await })
+                        .await
+                    {
+                        self.tool_output_failed.store(true, Ordering::Release);
+                        return Err(e);
                     }
+                    self.pending_tool_response.store(true, Ordering::Release);
+                }
+                return Ok(());
+            }
+        };
+
+        let handler = self.tools.get(name).map(|(definition, h)| (definition, h.clone()));
+        // Set when a non-idempotent call is fenced after it started: its
+        // handler's result (if any) is withheld and the call is answered
+        // as outcome-unknown instead.
+        let mut fenced_outcome_unknown = false;
+
+        let result = match handler {
+            None => serde_json::json!({ "error": format!("Unknown tool: {name}") }),
+            Some((definition, handler)) => {
+                let screened_args = self.tool_result_screen.as_ref().map(|_| args.clone());
+                let effect = definition.effect;
+                let mut call =
+                    adk_core::GovernedCall::new(name, call_id, args.clone()).with_effect(effect);
+                call.origin = Some(definition.handler_origin());
+                // Fenced before authorization: a withdrawn call is never
+                // authorized, let alone executed.
+                if token.is_cancelled() {
+                    return Ok(());
+                }
+                let authorized = tokio::select! {
+                    biased;
+                    _ = token.cancelled() => return Ok(()),
+                    authorized = self.authorize_tool_call(call) => authorized?,
+                };
+                let result = match authorized {
+                    adk_core::ToolAuthorization::Execute { args, .. } => {
+                        // Fenced again before execution, and the handler
+                        // runs under the token: cancellation drops it.
+                        if token.is_cancelled() {
+                            return Ok(());
+                        }
+                        let call = ToolCall {
+                            call_id: call_id.to_string(),
+                            name: name.to_string(),
+                            arguments: args,
+                        };
+                        let executed = tokio::select! {
+                            biased;
+                            _ = token.cancelled() => None,
+                            executed = tokio::time::timeout(
+                                self.tool_timeout,
+                                handler.execute_cancellable(&call, token.clone()),
+                            ) => Some(executed),
+                        };
+                        match executed {
+                            None => {
+                                if effect == adk_core::ToolEffect::NonIdempotent {
+                                    fenced_outcome_unknown = true;
+                                    adk_core::outcome_unknown_response(format!(
+                                        "tool '{name}' was cancelled after it started; its outcome is unknown"
+                                    ))
+                                } else {
+                                    return Ok(());
+                                }
+                            }
+                            Some(Ok(Ok(value))) => {
+                                if token.is_cancelled()
+                                    && effect == adk_core::ToolEffect::NonIdempotent
+                                {
+                                    fenced_outcome_unknown = true;
+                                    adk_core::outcome_unknown_response(format!(
+                                        "tool '{name}' was cancelled after it started; its outcome is unknown"
+                                    ))
+                                } else {
+                                    self.consecutive_tool_failures.store(0, Ordering::Release);
+                                    value
+                                }
+                            }
+                            Some(Ok(Err(e))) => {
+                                // A message can quote credentials or internal hosts.
+                                if self.records_payloads() {
+                                    tracing::warn!(
+                                        tool.name = %name,
+                                        error.kind = e.kind(),
+                                        error.message = %e,
+                                        "realtime tool handler failed"
+                                    );
+                                } else {
+                                    tracing::warn!(
+                                        tool.name = %name,
+                                        error.kind = e.kind(),
+                                        "realtime tool handler failed"
+                                    );
+                                }
+                                let failures =
+                                    self.consecutive_tool_failures.fetch_add(1, Ordering::AcqRel)
+                                        + 1;
+                                if failures >= self.runner_config.max_consecutive_tool_failures {
+                                    if !self.circuit_breaker_tripped.swap(true, Ordering::AcqRel) {
+                                        tracing::error!(
+                                            call_id,
+                                            name,
+                                            failures,
+                                            max = self.runner_config.max_consecutive_tool_failures,
+                                            "Tool execution circuit breaker TRIPPED: entering Open state"
+                                        );
+                                        let _ = self
+                                            .event_handler
+                                            .on_error(&RealtimeError::provider(format!(
+                                                "Tool execution circuit breaker tripped after {} consecutive failures: {}",
+                                                failures, e
+                                            )))
+                                            .await;
+                                    }
+                                    serde_json::json!({
+                                        "status": "rejected",
+                                        "reason": "tool_unavailable",
+                                        "error": "circuit_breaker_open"
+                                    })
+                                } else if self.expose_tool_error_messages {
+                                    serde_json::json!({ "error": e.to_string() })
+                                } else {
+                                    serde_json::json!({
+                                        "error": format!("tool '{name}' failed")
+                                    })
+                                }
+                            }
+                            Some(Err(_)) => serde_json::json!({
+                                "error": format!(
+                                    "Tool '{name}' timed out after {:?}",
+                                    self.tool_timeout
+                                )
+                            }),
+                        }
+                    }
+                    adk_core::ToolAuthorization::Refuse { reason, .. }
+                    | adk_core::ToolAuthorization::Pending { reason, .. } => {
+                        serde_json::json!({ "error": reason })
+                    }
+                };
+                match screened_args {
+                    Some(args) => self.screen_tool_result(name, &args, result).await.0,
+                    None => result,
                 }
             }
-        } else {
-            serde_json::json!({
-                "error": format!("Unknown tool: {}", name)
-            })
         };
+
+        if token.is_cancelled() && !fenced_outcome_unknown {
+            // Fenced before it could finish: no output, no follow-up.
+            return Ok(());
+        }
 
         if self.runner_config.auto_respond_tools {
             let response =
@@ -1315,7 +2038,9 @@ impl RealtimeRunner {
                 self.tool_output_failed.store(true, Ordering::Release);
                 return Err(e);
             }
-            self.pending_tool_response.store(true, Ordering::Release);
+            if !fenced_outcome_unknown {
+                self.pending_tool_response.store(true, Ordering::Release);
+            }
         }
 
         Ok(())
@@ -1344,6 +2069,13 @@ impl RealtimeRunner {
             .await;
     }
 
+    /// Forget a pending tool response, so no follow-up response is owed
+    /// for a call the fence has since cancelled.
+    #[cfg(feature = "integration")]
+    pub(crate) fn clear_pending_tool_response(&self) {
+        self.pending_tool_response.store(false, Ordering::Release);
+    }
+
     /// Trigger the single follow-up response owed after a tool-dispatching turn.
     ///
     /// Ensures exactly one follow-up response is created after all concurrent tool executions in a turn finish.
@@ -1369,6 +2101,9 @@ impl RealtimeRunner {
 
     /// Close the session.
     pub async fn close(&self) -> Result<()> {
+        if let Some(meter) = &self.meter {
+            meter.abandon().await;
+        }
         self.supervisor.close().await
     }
 }
@@ -1416,6 +2151,7 @@ mod runner_tests {
         tool_output: AtomicUsize,
         tool_response: AtomicUsize,
         create_response: AtomicUsize,
+        last_output: parking_lot::Mutex<Option<serde_json::Value>>,
     }
 
     struct RecordingSession {
@@ -1446,8 +2182,9 @@ mod runner_tests {
             self.counts.tool_response.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
-        async fn send_tool_output(&self, _response: ToolResponse) -> Result<()> {
+        async fn send_tool_output(&self, response: ToolResponse) -> Result<()> {
             self.counts.tool_output.fetch_add(1, Ordering::SeqCst);
+            *self.counts.last_output.lock() = Some(response.output);
             Ok(())
         }
         async fn commit_audio(&self) -> Result<()> {
@@ -1481,7 +2218,69 @@ mod runner_tests {
     }
 
     fn tool_def(name: &str) -> ToolDefinition {
-        ToolDefinition { name: name.into(), description: None, parameters: None, behavior: None }
+        ToolDefinition {
+            name: name.into(),
+            description: None,
+            parameters: None,
+            behavior: None,
+            effect: adk_core::ToolEffect::NonIdempotent,
+        }
+    }
+
+    #[test]
+    fn runner_builder_rejects_two_tools_with_one_name() {
+        let builder = || {
+            RealtimeRunner::builder()
+                .model(Arc::new(MockModel) as BoxedModel)
+                .tool_fn(tool_def("pay"), |_call| Ok(serde_json::json!({ "paid": 1 })))
+        };
+        let Err(err) = builder()
+            .tool_fn(tool_def("pay"), |_call| Ok(serde_json::json!({ "paid": 2 })))
+            .build()
+        else {
+            panic!("two tools named `pay` must fail the build");
+        };
+        assert!(matches!(err, RealtimeError::ConfigError(_)), "{err}");
+        assert!(err.to_string().contains("'pay'"), "{err}");
+        assert!(
+            builder()
+                .tool_fn(tool_def("refund"), |_call| Ok(serde_json::json!({})))
+                .build()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn agent_builder_rejects_two_tools_with_one_name() {
+        struct Lookup;
+
+        #[async_trait]
+        impl adk_core::Tool for Lookup {
+            fn name(&self) -> &str {
+                "lookup"
+            }
+            fn description(&self) -> &str {
+                "looks things up"
+            }
+            async fn execute(
+                &self,
+                _ctx: Arc<dyn adk_core::ToolContext>,
+                args: serde_json::Value,
+            ) -> adk_core::Result<serde_json::Value> {
+                Ok(args)
+            }
+        }
+
+        let Err(err) = crate::agent::RealtimeAgent::builder("voice")
+            .model(Arc::new(MockModel) as BoxedModel)
+            .tool(Arc::new(Lookup))
+            .tool(Arc::new(Lookup))
+            .build()
+        else {
+            panic!("two tools named `lookup` must fail the build");
+        };
+        assert_eq!(err.code, adk_core::DUPLICATE_TOOL_NAME_CODE);
+        assert!(err.message.contains("'lookup'"), "{}", err.message);
     }
 
     fn ok_tool() -> FnToolHandler<impl Fn(&ToolCall) -> Result<serde_json::Value> + Send + Sync> {
@@ -1510,6 +2309,400 @@ mod runner_tests {
         let session = Arc::new(RecordingSession { counts }) as Arc<dyn RealtimeSession>;
         let _ = runner.set_initial_session(session).await.unwrap();
         runner
+    }
+
+    /// A runner whose `pay` tool counts executions, governed by `config`.
+    async fn governed_runner(
+        counts: Arc<Counts>,
+        executions: Arc<AtomicUsize>,
+        config: adk_core::RunConfig,
+    ) -> RealtimeRunner {
+        let runner = RealtimeRunner::builder()
+            .model(Arc::new(MockModel) as BoxedModel)
+            .tool_fn(tool_def("pay"), move |_call| {
+                executions.fetch_add(1, Ordering::SeqCst);
+                Ok(serde_json::json!({ "paid": true }))
+            })
+            .tool_governance(config, adk_core::ApprovalScope::new("voice", "user", "session"))
+            .build()
+            .unwrap();
+        let _ = runner
+            .set_initial_session(Arc::new(RecordingSession { counts }) as Arc<dyn RealtimeSession>)
+            .await
+            .unwrap();
+        runner
+    }
+
+    /// A runner whose `lookup` handler returns a customer record, or fails quoting a
+    /// credential, configured by `configure`.
+    async fn lookup_runner(
+        counts: Arc<Counts>,
+        fails: bool,
+        configure: impl FnOnce(RealtimeRunnerBuilder) -> RealtimeRunnerBuilder,
+    ) -> RealtimeRunner {
+        let builder = RealtimeRunner::builder().model(Arc::new(MockModel) as BoxedModel).tool_fn(
+            tool_def("lookup"),
+            move |_call| {
+                if fails {
+                    Err(RealtimeError::ToolError(
+                        "connect postgres://admin:hunter2@db.internal/prod failed".into(),
+                    ))
+                } else {
+                    Ok(serde_json::json!({ "ssn": "123-45-6789" }))
+                }
+            },
+        );
+        let runner = configure(builder).build().unwrap();
+        let _ = runner
+            .set_initial_session(Arc::new(RecordingSession { counts }) as Arc<dyn RealtimeSession>)
+            .await
+            .unwrap();
+        runner
+    }
+
+    /// Withholds every result, or redacts its `ssn`.
+    struct SsnScreen {
+        fail: bool,
+    }
+
+    #[async_trait]
+    impl adk_core::ToolResultScreen for SsnScreen {
+        async fn screen_result(
+            &self,
+            _tool_name: &str,
+            _args: &serde_json::Value,
+            result: &serde_json::Value,
+        ) -> std::result::Result<serde_json::Value, String> {
+            if self.fail {
+                return Err("the screening service is unavailable".into());
+            }
+            let mut result = result.clone();
+            if result.get("ssn").is_some() {
+                result["ssn"] = serde_json::json!("[SSN REDACTED]");
+            }
+            Ok(result)
+        }
+    }
+
+    #[tokio::test]
+    async fn handler_errors_reach_the_model_redacted_unless_exposed() {
+        let counts = Arc::new(Counts::default());
+        let runner = lookup_runner(Arc::clone(&counts), true, |b| b).await;
+        runner.dispatch_tool_call("c1", "lookup", &serde_json::json!({})).await.unwrap();
+        let output = counts.last_output.lock().clone().unwrap();
+        assert_eq!(output, serde_json::json!({ "error": "tool 'lookup' failed" }));
+
+        let runner =
+            lookup_runner(Arc::clone(&counts), true, |b| b.expose_tool_error_messages(true)).await;
+        runner.dispatch_tool_call("c2", "lookup", &serde_json::json!({})).await.unwrap();
+        let output = counts.last_output.lock().clone().unwrap();
+        assert!(output["error"].as_str().unwrap_or_default().contains("hunter2"), "{output}");
+    }
+
+    /// Records every event field the runner logs.
+    #[derive(Clone, Default)]
+    struct Logged(Arc<parking_lot::Mutex<Vec<String>>>);
+
+    struct LoggedValues<'a>(&'a mut Vec<String>);
+
+    impl tracing::field::Visit for LoggedValues<'_> {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0.push(format!("{}={value:?}", field.name()));
+        }
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Logged {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            event.record(&mut LoggedValues(&mut self.0.lock()));
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn handler_error_messages_are_logged_only_under_the_payload_rule() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        for record_payloads in [false, true] {
+            let logged = Logged::default();
+            let _guard = tracing::subscriber::set_default(
+                tracing_subscriber::registry().with(logged.clone()),
+            );
+            let counts = Arc::new(Counts::default());
+            let config = adk_core::RunConfig { record_payloads, ..adk_core::RunConfig::default() };
+            let runner = lookup_runner(Arc::clone(&counts), true, |b| {
+                b.tool_governance(config, adk_core::ApprovalScope::new("voice", "user", "s"))
+            })
+            .await;
+            runner.dispatch_tool_call("c1", "lookup", &serde_json::json!({})).await.unwrap();
+
+            let values = logged.0.lock().clone();
+            assert!(values.contains(&"error.kind=\"tool\"".to_string()), "{values:#?}");
+            assert_eq!(
+                values.iter().any(|value| value.contains("hunter2")),
+                record_payloads,
+                "the message is logged only when payloads are recorded: {values:#?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_result_screen_runs_before_the_output_is_sent() {
+        let counts = Arc::new(Counts::default());
+        let runner = lookup_runner(Arc::clone(&counts), false, |b| {
+            b.tool_result_screen(Arc::new(SsnScreen { fail: false }))
+        })
+        .await;
+        runner.dispatch_tool_call("c1", "lookup", &serde_json::json!({})).await.unwrap();
+        let output = counts.last_output.lock().clone().unwrap();
+        assert_eq!(output, serde_json::json!({ "ssn": "[SSN REDACTED]" }));
+
+        let runner = lookup_runner(Arc::clone(&counts), false, |b| {
+            b.tool_result_screen(Arc::new(SsnScreen { fail: true }))
+        })
+        .await;
+        runner.dispatch_tool_call("c2", "lookup", &serde_json::json!({})).await.unwrap();
+        let output = counts.last_output.lock().clone().unwrap();
+        assert_eq!(output["status"], adk_core::RESULT_WITHHELD_STATUS, "{output}");
+        assert!(!output.to_string().contains("123-45-6789"), "{output}");
+    }
+
+    #[tokio::test]
+    async fn malformed_tool_arguments_are_refused() {
+        let counts = Arc::new(Counts::default());
+        let executions = Arc::new(AtomicUsize::new(0));
+        let runner = governed_runner(
+            Arc::clone(&counts),
+            Arc::clone(&executions),
+            adk_core::RunConfig::default(),
+        )
+        .await;
+
+        runner
+            .dispatch_tool_call("c1", "pay", &serde_json::json!(r#"{"amount": 5"#))
+            .await
+            .unwrap();
+
+        assert_eq!(executions.load(Ordering::SeqCst), 0, "a malformed call must not run");
+        let output = counts.last_output.lock().clone().expect("the call is answered");
+        assert!(output["error"].as_str().unwrap_or_default().contains("not valid JSON"));
+    }
+
+    #[tokio::test]
+    async fn the_runner_policy_and_kill_switch_govern_dispatched_calls() {
+        let counts = Arc::new(Counts::default());
+        let executions = Arc::new(AtomicUsize::new(0));
+        let control = adk_core::GovernanceControl::new();
+        let config = adk_core::RunConfig::builder()
+            .tool_policy(Arc::new(adk_core::DeclarativePolicy::builder().allow("get_*").build()))
+            .governance(control.clone())
+            .build();
+        let runner = governed_runner(Arc::clone(&counts), Arc::clone(&executions), config).await;
+
+        runner.dispatch_tool_call("c1", "pay", &serde_json::json!({})).await.unwrap();
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
+        let output = counts.last_output.lock().clone().unwrap();
+        assert!(output["error"].as_str().unwrap_or_default().contains("denied by policy"));
+
+        control.freeze("drill");
+        let error =
+            runner.dispatch_tool_call("c2", "pay", &serde_json::json!({})).await.unwrap_err();
+        assert!(error.to_string().contains("frozen"), "{error}");
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
+    }
+
+    /// The review of #1005: a freeze while the confirmation handler decides ends the wait,
+    /// and the dispatch ends with the freeze before the handler runs, as an agent's call is
+    /// refused.
+    #[tokio::test]
+    async fn a_freeze_ends_the_wait_for_the_confirmation_handler() {
+        #[derive(Debug)]
+        struct NeverAnswers;
+
+        #[async_trait]
+        impl adk_core::ToolConfirmationHandler for NeverAnswers {
+            async fn decide(
+                &self,
+                _request: &adk_core::ToolConfirmationRequest,
+            ) -> adk_core::Result<adk_core::ToolConfirmationDecision> {
+                std::future::pending().await
+            }
+        }
+
+        let counts = Arc::new(Counts::default());
+        let executions = Arc::new(AtomicUsize::new(0));
+        let control = adk_core::GovernanceControl::new();
+        let config = adk_core::RunConfig::builder()
+            .tool_policy(Arc::new(
+                adk_core::DeclarativePolicy::builder()
+                    .require_approval("pay", "payments need a person")
+                    .build(),
+            ))
+            .tool_confirmation_handler(Arc::new(NeverAnswers))
+            .governance(control.clone())
+            .build();
+        let runner = governed_runner(Arc::clone(&counts), Arc::clone(&executions), config).await;
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            control.freeze("incident 4017");
+        });
+
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            runner.dispatch_tool_call("c1", "pay", &serde_json::json!({})),
+        )
+        .await
+        .expect("the freeze ends the wait")
+        .unwrap_err();
+        assert!(error.to_string().contains("incident 4017"), "{error}");
+        assert_eq!(executions.load(Ordering::SeqCst), 0, "the handler never runs");
+        assert_eq!(*counts.last_output.lock(), None, "nothing is sent for the refused call");
+    }
+
+    /// A native handler's held call names the runner's agent and the `realtime` origin of
+    /// the handler's definition, so an approval of it never covers the handler once
+    /// redefined, nor another agent's identical call (#1210).
+    #[tokio::test]
+    async fn a_native_handlers_held_call_names_its_agent_and_handler_origin() {
+        use adk_core::ApprovalStore;
+        let counts = Arc::new(Counts::default());
+        let executions = Arc::new(AtomicUsize::new(0));
+        let store = Arc::new(adk_core::InMemoryApprovalStore::new());
+        let scope = adk_core::ApprovalScope::new("voice", "user", "session");
+        let config = adk_core::RunConfig::builder()
+            .tool_policy(Arc::new(
+                adk_core::DeclarativePolicy::builder()
+                    .require_approval("pay", "payments need a person")
+                    .build(),
+            ))
+            .approval_store(store.clone())
+            .build();
+        let runner = |definition: ToolDefinition, agent: &str| {
+            let executions = Arc::clone(&executions);
+            RealtimeRunner::builder()
+                .model(Arc::new(MockModel) as BoxedModel)
+                .agent_name(agent)
+                .tool_fn(definition, move |_call| {
+                    executions.fetch_add(1, Ordering::SeqCst);
+                    Ok(serde_json::json!({ "paid": true }))
+                })
+                .tool_governance(config.clone(), scope.clone())
+                .build()
+                .unwrap()
+        };
+        let install = |runner: RealtimeRunner| {
+            let counts = Arc::clone(&counts);
+            async move {
+                let _ = runner
+                    .set_initial_session(
+                        Arc::new(RecordingSession { counts }) as Arc<dyn RealtimeSession>
+                    )
+                    .await
+                    .unwrap();
+                runner
+            }
+        };
+        let pay = tool_def("pay").with_description("Pays an invoice");
+        let reworded_pay = pay.clone().with_description("Pays anyone");
+        let voice = install(runner(pay.clone(), "voice")).await;
+
+        voice.dispatch_tool_call("c1", "pay", &serde_json::json!({})).await.unwrap();
+        let pending = store.pending(&scope).await.unwrap();
+        let [held] = pending.as_slice() else { panic!("one held call: {pending:?}") };
+        assert_eq!(held.request.origin, Some(pay.handler_origin()));
+        assert_eq!(held.request.origin.as_ref().unwrap().source, REALTIME_HANDLER_ORIGIN);
+        assert_eq!(
+            held.request.acting.as_ref().map(|acting| acting.agent.id.as_str()),
+            Some("urn:adk:agent:voice/voice")
+        );
+        assert_eq!(
+            adk_core::ToolConfirmationRequest::fingerprint_agent(&held.fingerprint),
+            Some("urn:adk:agent:voice/voice")
+        );
+
+        // Redefined, the handler is not the one approved.
+        store.decide(&scope, &held.fingerprint, adk_core::ToolApproval::approve()).await.unwrap();
+        let reworded = install(runner(reworded_pay.clone(), "voice")).await;
+        reworded.dispatch_tool_call("c2", "pay", &serde_json::json!({})).await.unwrap();
+        assert_eq!(executions.load(Ordering::SeqCst), 0, "a redefined handler needs approval");
+
+        // Another agent's identical call is not the one approved.
+        let intern = install(runner(pay.clone(), "intern")).await;
+        intern.dispatch_tool_call("c3", "pay", &serde_json::json!({})).await.unwrap();
+        assert_eq!(executions.load(Ordering::SeqCst), 0, "another agent needs its own approval");
+
+        // The handler as approved, by the agent it was approved for, runs once.
+        voice.dispatch_tool_call("c4", "pay", &serde_json::json!({})).await.unwrap();
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+        let mut waiting: Vec<_> = store
+            .pending(&scope)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|entry| {
+                let agent =
+                    adk_core::ToolConfirmationRequest::fingerprint_agent(&entry.fingerprint)
+                        .map(str::to_string);
+                (agent, entry.request.origin)
+            })
+            .collect();
+        waiting.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            waiting,
+            [
+                (Some("urn:adk:agent:voice/intern".to_string()), Some(pay.handler_origin())),
+                (
+                    Some("urn:adk:agent:voice/voice".to_string()),
+                    Some(reworded_pay.handler_origin())
+                ),
+            ],
+            "each unapproved call waits on its own"
+        );
+    }
+
+    #[tokio::test]
+    async fn policy_rules_match_the_configured_voice_agent() {
+        let counts = Arc::new(Counts::default());
+        let executions = Arc::new(AtomicUsize::new(0));
+        let principal = adk_core::AgentPrincipal::new(
+            adk_core::AgentId::new("spiffe://acme.test/agent/voice").unwrap(),
+        );
+        let config = adk_core::RunConfig::builder()
+            .tool_policy(Arc::new(
+                adk_core::DeclarativePolicy::builder()
+                    .rule(
+                        adk_core::PolicyRule::allow("pay")
+                            .for_agent("spiffe://acme.test/agent/voice"),
+                    )
+                    .build(),
+            ))
+            .agent_principal("realtime", principal)
+            .build();
+        let runner = governed_runner(Arc::clone(&counts), Arc::clone(&executions), config).await;
+
+        runner.dispatch_tool_call("c1", "pay", &serde_json::json!({})).await.unwrap();
+        assert_eq!(executions.load(Ordering::SeqCst), 1, "the voice agent's rule allows it");
+
+        let unconfigured = adk_core::RunConfig::builder()
+            .tool_policy(Arc::new(
+                adk_core::DeclarativePolicy::builder()
+                    .rule(
+                        adk_core::PolicyRule::allow("pay")
+                            .for_agent("spiffe://acme.test/agent/voice"),
+                    )
+                    .build(),
+            ))
+            .build();
+        let runner =
+            governed_runner(Arc::clone(&counts), Arc::clone(&executions), unconfigured).await;
+        runner.dispatch_tool_call("c2", "pay", &serde_json::json!({})).await.unwrap();
+        assert_eq!(
+            executions.load(Ordering::SeqCst),
+            1,
+            "the derived identity urn:adk:agent:voice/realtime is not the voice agent"
+        );
     }
 
     #[tokio::test]
@@ -2080,6 +3273,352 @@ mod runner_tests {
 
         assert_eq!(audio_events.load(Ordering::SeqCst), 1, "the audio delta was handled");
         assert_eq!(counts.tool_output.load(Ordering::SeqCst), 1, "the tool still reported output");
+    }
+
+    /// A tool handler that records that it started and then never finishes.
+    struct BlockingToolHandler {
+        executions: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ToolHandler for BlockingToolHandler {
+        async fn execute(&self, _call: &ToolCall) -> Result<serde_json::Value> {
+            self.executions.fetch_add(1, Ordering::SeqCst);
+            std::future::pending().await
+        }
+    }
+
+    fn tool_def_effect(name: &str, effect: adk_core::ToolEffect) -> ToolDefinition {
+        tool_def(name).with_effect(effect)
+    }
+
+    async fn fenced_runner(
+        counts: Arc<Counts>,
+        tools: Vec<(ToolDefinition, Arc<dyn ToolHandler>)>,
+        max_concurrent_tools: usize,
+    ) -> Arc<RealtimeRunner> {
+        let mut builder = RealtimeRunner::builder()
+            .model(Arc::new(MockModel) as BoxedModel)
+            .runner_config(RunnerConfig { max_concurrent_tools, ..RunnerConfig::default() });
+        for (definition, handler) in tools {
+            builder = builder.tool_arc(definition, handler);
+        }
+        let runner = Arc::new(builder.build().unwrap());
+        let _ = runner
+            .set_initial_session(Arc::new(RecordingSession { counts }) as Arc<dyn RealtimeSession>)
+            .await
+            .unwrap();
+        runner
+    }
+
+    async fn wait_started(executions: &AtomicUsize) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while executions.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the tool started");
+    }
+
+    fn tool_call_cancelled(call_id: &str) -> ServerEvent {
+        ServerEvent::ToolCallCancelled {
+            call_ids: vec![crate::events::ToolCallId::parse(call_id).unwrap()],
+        }
+    }
+
+    #[test]
+    fn merge_config_merges_language() {
+        let mut base = RealtimeConfig::default();
+        let update =
+            SessionUpdateConfig(RealtimeConfig::default().try_with_language("fr-CA").unwrap());
+        RealtimeRunner::merge_config(&mut base, &update);
+        assert_eq!(base.language.as_ref().map(|code| code.as_str()), Some("fr-CA"));
+    }
+
+    #[tokio::test]
+    async fn tool_call_cancelled_aborts_readonly() {
+        let counts = Arc::new(Counts::default());
+        let executions = Arc::new(AtomicUsize::new(0));
+        let runner = fenced_runner(
+            Arc::clone(&counts),
+            vec![(
+                tool_def_effect("lookup", adk_core::ToolEffect::ReadOnly),
+                Arc::new(BlockingToolHandler { executions: Arc::clone(&executions) })
+                    as Arc<dyn ToolHandler>,
+            )],
+            4,
+        )
+        .await;
+        let pending = runner
+            .handle_event(function_call("c1", "lookup"))
+            .await
+            .unwrap()
+            .expect("the call is dispatched");
+        let task_runner = Arc::clone(&runner);
+        let mut task = tokio::spawn(async move { task_runner.run_tool_call(pending).await });
+        wait_started(&executions).await;
+
+        // Speech onset alone must not fence the call.
+        runner
+            .handle_event(ServerEvent::SpeechStarted {
+                event_id: "e-speech".into(),
+                audio_start_ms: 0,
+            })
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut task).await.is_err(),
+            "SpeechStarted alone fenced an in-flight call"
+        );
+
+        runner.handle_event(tool_call_cancelled("c1")).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("the fenced call ends")
+            .unwrap()
+            .unwrap();
+        assert_eq!(counts.tool_output.load(Ordering::SeqCst), 0, "no output for a fenced call");
+        assert_eq!(counts.create_response.load(Ordering::SeqCst), 0, "no follow-up response");
+    }
+
+    #[tokio::test]
+    async fn response_cancelled_aborts_all_inflight_readonly() {
+        let counts = Arc::new(Counts::default());
+        let executions = Arc::new(AtomicUsize::new(0));
+        let runner = fenced_runner(
+            Arc::clone(&counts),
+            vec![
+                (
+                    tool_def_effect("lookup", adk_core::ToolEffect::ReadOnly),
+                    Arc::new(BlockingToolHandler { executions: Arc::clone(&executions) })
+                        as Arc<dyn ToolHandler>,
+                ),
+                (
+                    tool_def_effect("search", adk_core::ToolEffect::ReadOnly),
+                    Arc::new(BlockingToolHandler { executions: Arc::clone(&executions) })
+                        as Arc<dyn ToolHandler>,
+                ),
+            ],
+            4,
+        )
+        .await;
+        let mut tasks = Vec::new();
+        for (call_id, name) in [("c1", "lookup"), ("c2", "search")] {
+            let pending = runner.handle_event(function_call(call_id, name)).await.unwrap().unwrap();
+            let task_runner = Arc::clone(&runner);
+            tasks.push(tokio::spawn(async move { task_runner.run_tool_call(pending).await }));
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while executions.load(Ordering::SeqCst) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("both tools started");
+
+        runner
+            .handle_event(ServerEvent::ResponseCancelled { event_id: "e-cancel".into() })
+            .await
+            .unwrap();
+        for task in tasks {
+            tokio::time::timeout(Duration::from_secs(5), task)
+                .await
+                .expect("the fenced call ends")
+                .unwrap()
+                .unwrap();
+        }
+        assert_eq!(counts.tool_output.load(Ordering::SeqCst), 0, "no output for fenced calls");
+        assert_eq!(counts.create_response.load(Ordering::SeqCst), 0, "no follow-up response");
+    }
+
+    #[tokio::test]
+    async fn queued_nonidempotent_cancelled_never_executes() {
+        let counts = Arc::new(Counts::default());
+        let blocker_executions = Arc::new(AtomicUsize::new(0));
+        let pay_executions = Arc::new(AtomicUsize::new(0));
+        let pay_count = Arc::clone(&pay_executions);
+        let runner = fenced_runner(
+            Arc::clone(&counts),
+            vec![
+                (
+                    tool_def_effect("blocker", adk_core::ToolEffect::ReadOnly),
+                    Arc::new(BlockingToolHandler { executions: Arc::clone(&blocker_executions) })
+                        as Arc<dyn ToolHandler>,
+                ),
+                (
+                    tool_def_effect("pay", adk_core::ToolEffect::NonIdempotent),
+                    Arc::new(FnToolHandler::new(move |_call: &ToolCall| {
+                        pay_count.fetch_add(1, Ordering::SeqCst);
+                        Ok(serde_json::json!({ "paid": true }))
+                    })) as Arc<dyn ToolHandler>,
+                ),
+            ],
+            1,
+        )
+        .await;
+        let blocker = runner.handle_event(function_call("c1", "blocker")).await.unwrap().unwrap();
+        let task_runner = Arc::clone(&runner);
+        let blocker_task = tokio::spawn(async move { task_runner.run_tool_call(blocker).await });
+        wait_started(&blocker_executions).await;
+
+        // The second call queues behind the single permit.
+        let pay = runner.handle_event(function_call("c2", "pay")).await.unwrap().unwrap();
+        let task_runner = Arc::clone(&runner);
+        let pay_task = tokio::spawn(async move { task_runner.run_tool_call(pay).await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        runner.handle_event(tool_call_cancelled("c2")).await.unwrap();
+        runner.handle_event(tool_call_cancelled("c1")).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), blocker_task)
+            .await
+            .expect("the blocker ends")
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), pay_task)
+            .await
+            .expect("the queued call ends")
+            .unwrap()
+            .unwrap();
+        assert_eq!(pay_executions.load(Ordering::SeqCst), 0, "a fenced queued call never runs");
+        assert_eq!(counts.tool_output.load(Ordering::SeqCst), 0, "no output for fenced calls");
+    }
+
+    #[tokio::test]
+    async fn nonidempotent_cancel_after_start_reports_outcome_unknown_not_success() {
+        let counts = Arc::new(Counts::default());
+        let executions = Arc::new(AtomicUsize::new(0));
+        let runner = fenced_runner(
+            Arc::clone(&counts),
+            vec![(
+                tool_def_effect("pay", adk_core::ToolEffect::NonIdempotent),
+                Arc::new(BlockingToolHandler { executions: Arc::clone(&executions) })
+                    as Arc<dyn ToolHandler>,
+            )],
+            4,
+        )
+        .await;
+        let pending = runner.handle_event(function_call("c1", "pay")).await.unwrap().unwrap();
+        let task_runner = Arc::clone(&runner);
+        let task = tokio::spawn(async move { task_runner.run_tool_call(pending).await });
+        wait_started(&executions).await;
+
+        runner.handle_event(tool_call_cancelled("c1")).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("the fenced call ends")
+            .unwrap()
+            .unwrap();
+        let output = counts.last_output.lock().clone().expect("the call is answered");
+        assert_eq!(output["status"], adk_core::OUTCOME_UNKNOWN_STATUS, "{output}");
+        assert!(adk_core::is_outcome_unknown(&output), "{output}");
+        assert_eq!(counts.create_response.load(Ordering::SeqCst), 0, "no follow-up response");
+    }
+
+    #[tokio::test]
+    async fn nonidempotent_response_cancel_after_start_reports_outcome_unknown_not_success() {
+        let counts = Arc::new(Counts::default());
+        let executions = Arc::new(AtomicUsize::new(0));
+        let runner = fenced_runner(
+            Arc::clone(&counts),
+            vec![(
+                tool_def_effect("pay", adk_core::ToolEffect::NonIdempotent),
+                Arc::new(BlockingToolHandler { executions: Arc::clone(&executions) })
+                    as Arc<dyn ToolHandler>,
+            )],
+            4,
+        )
+        .await;
+        let pending = runner.handle_event(function_call("c1", "pay")).await.unwrap().unwrap();
+        let task_runner = Arc::clone(&runner);
+        let task = tokio::spawn(async move { task_runner.run_tool_call(pending).await });
+        wait_started(&executions).await;
+
+        runner
+            .handle_event(ServerEvent::ResponseCancelled { event_id: "e-cancel".into() })
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("the fenced call ends")
+            .unwrap()
+            .unwrap();
+        let output = counts.last_output.lock().clone().expect("the call is answered");
+        assert_eq!(output["status"], adk_core::OUTCOME_UNKNOWN_STATUS, "{output}");
+        assert!(adk_core::is_outcome_unknown(&output), "{output}");
+        assert_eq!(counts.create_response.load(Ordering::SeqCst), 0, "no follow-up response");
+    }
+
+    #[tokio::test]
+    async fn idempotent_cancel_after_start_is_suppressed_not_outcome_unknown() {
+        let counts = Arc::new(Counts::default());
+        let executions = Arc::new(AtomicUsize::new(0));
+        let runner = fenced_runner(
+            Arc::clone(&counts),
+            vec![(
+                tool_def_effect("charge", adk_core::ToolEffect::Idempotent),
+                Arc::new(BlockingToolHandler { executions: Arc::clone(&executions) })
+                    as Arc<dyn ToolHandler>,
+            )],
+            4,
+        )
+        .await;
+        let pending = runner.handle_event(function_call("c1", "charge")).await.unwrap().unwrap();
+        let task_runner = Arc::clone(&runner);
+        let task = tokio::spawn(async move { task_runner.run_tool_call(pending).await });
+        wait_started(&executions).await;
+
+        runner.handle_event(tool_call_cancelled("c1")).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("the fenced call ends")
+            .unwrap()
+            .unwrap();
+        // A retry-safe call may simply be re-issued, so it is owed no
+        // answer at all — in particular not an outcome-unknown one.
+        assert_eq!(counts.tool_output.load(Ordering::SeqCst), 0, "no output for a fenced call");
+        assert_eq!(*counts.last_output.lock(), None);
+        assert_eq!(counts.create_response.load(Ordering::SeqCst), 0, "no follow-up response");
+    }
+
+    #[tokio::test]
+    async fn response_cancelled_fences_calls_issued_before_it() {
+        let counts = Arc::new(Counts::default());
+        let executions = Arc::new(AtomicUsize::new(0));
+        let exec_count = Arc::clone(&executions);
+        let runner = fenced_runner(
+            Arc::clone(&counts),
+            vec![(
+                tool_def_effect("pay", adk_core::ToolEffect::NonIdempotent),
+                Arc::new(FnToolHandler::new(move |_call: &ToolCall| {
+                    exec_count.fetch_add(1, Ordering::SeqCst);
+                    Ok(serde_json::json!({ "paid": true }))
+                })) as Arc<dyn ToolHandler>,
+            )],
+            4,
+        )
+        .await;
+        // Issued, then the response that produced it is cancelled before
+        // the run loop gets around to dispatching it.
+        let pending = runner.handle_event(function_call("c1", "pay")).await.unwrap().unwrap();
+        runner
+            .handle_event(ServerEvent::ResponseCancelled { event_id: "e-cancel".into() })
+            .await
+            .unwrap();
+        runner.run_tool_call(pending).await.unwrap();
+        assert_eq!(executions.load(Ordering::SeqCst), 0, "a stale-generation call never runs");
+        assert_eq!(counts.tool_output.load(Ordering::SeqCst), 0, "no output for a fenced call");
+    }
+
+    #[tokio::test]
+    async fn reregistering_a_call_joins_its_fence_entry() {
+        let counts = Arc::new(Counts::default());
+        let runner = fenced_runner(Arc::clone(&counts), vec![], 4).await;
+        let first = runner.register_tool_call("c1", "pay");
+        let second = runner.register_tool_call("c1", "pay");
+        runner.cancel_tool_calls(&[crate::events::ToolCallId::parse("c1").unwrap()]);
+        assert!(first.is_cancelled(), "the registered token is fenced");
+        assert!(second.is_cancelled(), "re-registration shares the fenced token, not a fresh one");
     }
 
     #[tokio::test]

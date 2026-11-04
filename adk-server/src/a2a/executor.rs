@@ -33,8 +33,47 @@ impl Executor {
         Self { config }
     }
 
+    /// Runs `message` in the session named by `context_id` for an unauthenticated caller.
+    ///
+    /// The session belongs to the synthetic user `A2A_USER_{context_id}`. Use
+    /// [`execute_for_user`](Self::execute_for_user) when the request carries an
+    /// authenticated principal, so a caller who knows another caller's `contextId`
+    /// cannot reach that caller's session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session cannot be prepared, the message cannot be
+    /// converted, or the runner fails to start.
     pub async fn execute(
         &self,
+        context_id: &str,
+        task_id: &str,
+        message: &Message,
+    ) -> Result<Vec<UpdateEvent>> {
+        self.execute_for_user(None, context_id, task_id, message).await
+    }
+
+    /// Runs `message` in the session named by `context_id`, owned by `user_id`.
+    ///
+    /// `user_id` is the authenticated principal. When it is `None` the session
+    /// belongs to the synthetic user `A2A_USER_{context_id}`, which is only safe
+    /// when no authentication is configured.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let events = executor
+    ///     .execute_for_user(Some("alice"), "ctx-1", "task-1", &message)
+    ///     .await?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session cannot be prepared, the message cannot be
+    /// converted, or the runner fails to start.
+    pub async fn execute_for_user(
+        &self,
+        user_id: Option<&str>,
         context_id: &str,
         task_id: &str,
         message: &Message,
@@ -100,7 +139,7 @@ impl Executor {
             }
         };
 
-        let meta = to_invocation_meta(&self.config.app_name, context_id, None);
+        let meta = to_invocation_meta(&self.config.app_name, context_id, user_id);
         let cancellation_token = self.config.cancellation_token.clone();
 
         // Prepare session
@@ -115,6 +154,12 @@ impl Executor {
             .app_name(self.config.runner_config.app_name.clone())
             .agent(self.config.runner_config.agent.clone())
             .session_service(self.config.runner_config.session_service.clone());
+        if let Some(control) = &self.config.runner_config.governance {
+            runner_builder = runner_builder.governance(control.clone());
+        }
+        if let Some(policy) = &self.config.runner_config.tool_policy {
+            runner_builder = runner_builder.tool_policy(policy.clone());
+        }
         if let Some(ref artifact_service) = self.config.runner_config.artifact_service {
             runner_builder = runner_builder.artifact_service(artifact_service.clone());
         }
@@ -254,11 +299,14 @@ impl Executor {
         })
     }
 
+    /// Creates the session when it does not exist.
+    ///
+    /// Only a `session.not_found` read creates it; any other read failure is returned, so a
+    /// transient backend error never replaces the stored conversation. A create that loses a
+    /// race to a concurrent request finds the session that request created.
     async fn prepare_session(&self, user_id: &str, session_id: &str) -> Result<()> {
         let session_service = &self.config.runner_config.session_service;
-
-        // Try to get existing session
-        let get_result = session_service
+        let existing = session_service
             .get(GetRequest {
                 app_name: self.config.app_name.clone(),
                 user_id: user_id.to_string(),
@@ -267,21 +315,24 @@ impl Executor {
                 after: None,
             })
             .await;
-
-        if get_result.is_ok() {
-            return Ok(());
+        match existing {
+            Ok(_) => Ok(()),
+            Err(error) if error.is_not_found() => {
+                match session_service
+                    .create(CreateRequest {
+                        app_name: self.config.app_name.clone(),
+                        user_id: user_id.to_string(),
+                        session_id: Some(session_id.to_string()),
+                        state: std::collections::HashMap::new(),
+                    })
+                    .await
+                {
+                    Ok(_) => Ok(()),
+                    Err(error) if error.is_conflict() => Ok(()),
+                    Err(error) => Err(error),
+                }
+            }
+            Err(error) => Err(error),
         }
-
-        // Create new session
-        session_service
-            .create(CreateRequest {
-                app_name: self.config.app_name.clone(),
-                user_id: user_id.to_string(),
-                session_id: Some(session_id.to_string()),
-                state: std::collections::HashMap::new(),
-            })
-            .await?;
-
-        Ok(())
     }
 }

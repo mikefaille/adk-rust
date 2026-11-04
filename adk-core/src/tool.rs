@@ -1,5 +1,6 @@
 use crate::{
-    CallbackContext, Event, EventActions, Memory, MemoryEntry, Result, RunConfig, Session,
+    CallbackContext, Event, EventActions, LlmRequest, Memory, MemoryEntry, ReadonlyContext, Result,
+    RunConfig, Session,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -89,7 +90,7 @@ pub trait Tool: Send + Sync {
     ///         "name": self.name(),
     ///         "description": self.description(),
     ///         "x-adk-openai-tool": {
-    ///             "type": "web_search_2025_08_26"
+    ///             "type": "web_search"
     ///         }
     ///     })
     /// }
@@ -143,6 +144,98 @@ pub trait Tool: Send + Sync {
         None
     }
 
+    /// Returns the behaviour annotations the tool's publisher declared, if any.
+    ///
+    /// MCP tools return the server's `annotations` object unchanged, with its
+    /// camelCase keys: `title`, `readOnlyHint`, `destructiveHint`,
+    /// `idempotentHint`, and `openWorldHint`. The values are hints from the
+    /// publisher, not guarantees, so trust them only as far as the publisher.
+    /// The default returns `None`; tools that wrap another tool forward it.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_core::{Result, Tool, ToolContext};
+    /// use serde_json::{Value, json};
+    /// use std::sync::{Arc, LazyLock};
+    ///
+    /// static HINTS: LazyLock<Value> =
+    ///     LazyLock::new(|| json!({ "destructiveHint": true, "openWorldHint": false }));
+    ///
+    /// struct DeleteLogs;
+    ///
+    /// #[async_trait::async_trait]
+    /// impl Tool for DeleteLogs {
+    ///     fn name(&self) -> &str {
+    ///         "delete_logs"
+    ///     }
+    ///     fn description(&self) -> &str {
+    ///         "Deletes the service logs"
+    ///     }
+    ///     fn annotations(&self) -> Option<&Value> {
+    ///         Some(&HINTS)
+    ///     }
+    ///     async fn execute(&self, _ctx: Arc<dyn ToolContext>, _args: Value) -> Result<Value> {
+    ///         Ok(Value::Null)
+    ///     }
+    /// }
+    ///
+    /// let destructive = DeleteLogs
+    ///     .annotations()
+    ///     .and_then(|hints| hints["destructiveHint"].as_bool())
+    ///     .unwrap_or(true);
+    /// assert!(destructive);
+    /// ```
+    fn annotations(&self) -> Option<&Value> {
+        None
+    }
+
+    /// Returns who publishes this tool: the toolset or server it comes from.
+    ///
+    /// A call held for approval records it in the call's [`ToolOrigin`](crate::ToolOrigin),
+    /// with a digest of [`declaration`](Self::declaration) and
+    /// [`annotations`](Self::annotations), and a decision applies only to calls to a tool
+    /// with the same origin and declaration. A held call that resumes against a tool with
+    /// another origin is answered as not run. MCP tools return `mcp:{toolset name}`; tools
+    /// that wrap another tool forward it. The default,
+    /// [`STATIC_TOOL_ORIGIN`](crate::STATIC_TOOL_ORIGIN), fits a tool compiled into the
+    /// agent.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_core::{Result, Tool, ToolContext};
+    /// use serde_json::Value;
+    /// use std::sync::Arc;
+    ///
+    /// /// A tool fetched from a plugin registry, identified by the registry entry.
+    /// struct RegistryTool {
+    ///     origin: String,
+    /// }
+    ///
+    /// #[async_trait::async_trait]
+    /// impl Tool for RegistryTool {
+    ///     fn name(&self) -> &str {
+    ///         "lookup"
+    ///     }
+    ///     fn description(&self) -> &str {
+    ///         "Looks up a customer"
+    ///     }
+    ///     fn origin(&self) -> &str {
+    ///         &self.origin
+    ///     }
+    ///     async fn execute(&self, _ctx: Arc<dyn ToolContext>, _args: Value) -> Result<Value> {
+    ///         Ok(Value::Null)
+    ///     }
+    /// }
+    ///
+    /// let tool = RegistryTool { origin: "registry:crm@4".into() };
+    /// assert_eq!(tool.origin(), "registry:crm@4");
+    /// ```
+    fn origin(&self) -> &str {
+        crate::STATIC_TOOL_ORIGIN
+    }
+
     /// Returns the scopes required to execute this tool.
     ///
     /// When non-empty, the framework can enforce that the calling user
@@ -162,10 +255,94 @@ pub trait Tool: Send + Sync {
 
     /// Indicates whether this tool performs no side effects.
     ///
-    /// [`ToolExecutionStrategy::Auto`] includes a call in its concurrent subset
-    /// only when the selected tool is both read-only and concurrency-safe.
+    /// [`ToolExecutionStrategy::Auto`] overlaps a call with its adjacent
+    /// neighbours only when the selected tool is both read-only and
+    /// concurrency-safe.
     fn is_read_only(&self) -> bool {
         false
+    }
+
+    /// Returns the side-effect class of this tool.
+    ///
+    /// The runtime retries a failed call only when the effect is
+    /// [`ToolEffect::ReadOnly`] or [`ToolEffect::Idempotent`] and the error is
+    /// retryable, and records [`ToolEffect::NonIdempotent`] calls in the
+    /// [`ActionLedger`](crate::ActionLedger) when one is configured. The default
+    /// derives the effect from [`Tool::is_read_only`], so a tool that declares
+    /// nothing is treated as non-idempotent and never retried.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_core::{Result, Tool, ToolContext, ToolEffect};
+    /// use serde_json::{Value, json};
+    /// use std::sync::Arc;
+    ///
+    /// struct SetThermostat;
+    ///
+    /// #[async_trait::async_trait]
+    /// impl Tool for SetThermostat {
+    ///     fn name(&self) -> &str {
+    ///         "set_thermostat"
+    ///     }
+    ///     fn description(&self) -> &str {
+    ///         "Sets the target temperature"
+    ///     }
+    ///     // Setting the same target twice leaves the same state as setting it once.
+    ///     fn effect(&self) -> ToolEffect {
+    ///         ToolEffect::Idempotent
+    ///     }
+    ///     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
+    ///         Ok(json!({ "target": args["celsius"] }))
+    ///     }
+    /// }
+    ///
+    /// assert_eq!(SetThermostat.effect(), ToolEffect::Idempotent);
+    /// ```
+    fn effect(&self) -> ToolEffect {
+        if self.is_read_only() { ToolEffect::ReadOnly } else { ToolEffect::NonIdempotent }
+    }
+
+    /// Overrides the per-call timeout the agent applies to this tool.
+    ///
+    /// | Value | Timeout applied to each call |
+    /// |-------|------------------------------|
+    /// | `None` (default) | The agent's own tool timeout |
+    /// | `Some(None)` | None; the call runs until it finishes or the run is cancelled |
+    /// | `Some(Some(duration))` | `duration` instead of the agent's tool timeout |
+    ///
+    /// Agent-as-tool delegations use this so a long sub-agent run is bounded by
+    /// its own configuration rather than by a timeout sized for ordinary calls.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_core::{Result, Tool, ToolContext};
+    /// use serde_json::Value;
+    /// use std::{sync::Arc, time::Duration};
+    ///
+    /// struct BuildReport;
+    ///
+    /// #[async_trait::async_trait]
+    /// impl Tool for BuildReport {
+    ///     fn name(&self) -> &str {
+    ///         "build_report"
+    ///     }
+    ///     fn description(&self) -> &str {
+    ///         "Builds the quarterly report"
+    ///     }
+    ///     fn timeout_override(&self) -> Option<Option<Duration>> {
+    ///         Some(Some(Duration::from_secs(30 * 60)))
+    ///     }
+    ///     async fn execute(&self, _ctx: Arc<dyn ToolContext>, _args: Value) -> Result<Value> {
+    ///         Ok(Value::Null)
+    ///     }
+    /// }
+    ///
+    /// assert_eq!(BuildReport.timeout_override(), Some(Some(Duration::from_secs(1800))));
+    /// ```
+    fn timeout_override(&self) -> Option<Option<std::time::Duration>> {
+        None
     }
 
     /// Indicates whether this tool is safe for concurrent execution.
@@ -175,6 +352,57 @@ pub trait Tool: Send + Sync {
     /// explicit caller override and does not inspect either signal.
     fn is_concurrency_safe(&self) -> bool {
         false
+    }
+
+    /// Indicates whether this tool delegates work to another agent.
+    ///
+    /// Agent implementations can use this marker to overlap consecutive
+    /// delegation calls while preserving sequential execution for ordinary
+    /// tools.
+    fn is_agent_delegation(&self) -> bool {
+        false
+    }
+
+    /// The network destinations a call with `args` reaches.
+    ///
+    /// Under a run egress policy ([`RunConfig::egress_policy`]),
+    /// [`authorize_tool_call`](crate::authorize_tool_call) refuses the call before it runs
+    /// unless the policy admits the declaration; the default,
+    /// [`ToolEgress::Undeclared`](crate::egress::ToolEgress::Undeclared), is refused. A wrapper
+    /// forwards its inner tool's declaration. See [`ToolEgress`](crate::egress::ToolEgress).
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use std::sync::Arc;
+    ///
+    /// use adk_core::egress::ToolEgress;
+    /// use adk_core::{Result, Tool, ToolContext};
+    /// use serde_json::{Value, json};
+    ///
+    /// struct FetchIssue;
+    ///
+    /// #[async_trait::async_trait]
+    /// impl Tool for FetchIssue {
+    ///     fn name(&self) -> &str {
+    ///         "fetch_issue"
+    ///     }
+    ///     fn description(&self) -> &str {
+    ///         "Reads one GitHub issue"
+    ///     }
+    ///     fn egress(&self, _args: &Value) -> ToolEgress {
+    ///         ToolEgress::for_urls(["https://api.github.com/"])
+    ///     }
+    ///     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
+    ///         Ok(json!({ "issue": args["number"] }))
+    ///     }
+    /// }
+    ///
+    /// let declared = FetchIssue.egress(&json!({ "number": 7 }));
+    /// assert_eq!(declared, ToolEgress::for_urls(["https://api.github.com/"]));
+    /// ```
+    fn egress(&self, _args: &Value) -> crate::egress::ToolEgress {
+        crate::egress::ToolEgress::Undeclared
     }
 
     /// Executes the tool with the given context and arguments.
@@ -189,6 +417,32 @@ pub trait Tool: Send + Sync {
 pub trait ToolContext: CallbackContext {
     /// Returns the function call ID for this tool invocation.
     fn function_call_id(&self) -> &str;
+    /// Returns the key that identifies this tool call across retries and replays.
+    ///
+    /// The default is `"{app}/{user}/{session}/{invocation}/{function_call_id}"`.
+    /// Every attempt of one call shares the key and no other call has it, so a
+    /// tool can pass it to a downstream API that accepts an idempotency key, and
+    /// the [`ActionLedger`](crate::ActionLedger) records non-idempotent calls
+    /// under it.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// async fn execute(&self, ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
+    ///     let key = ctx.idempotency_key();
+    ///     self.payments.charge(&args, &key).await
+    /// }
+    /// ```
+    fn idempotency_key(&self) -> String {
+        format!(
+            "{}/{}/{}/{}/{}",
+            self.app_name(),
+            self.user_id(),
+            self.session_id(),
+            self.invocation_id(),
+            self.function_call_id()
+        )
+    }
     /// Get the current event actions. Returns an owned copy for thread safety.
     fn actions(&self) -> EventActions;
     /// Set the event actions (e.g., to trigger escalation or skip summarization).
@@ -218,12 +472,30 @@ pub trait ToolContext: CallbackContext {
         None
     }
 
+    /// The run's egress policy ([`RunConfig::egress_policy`]), which a tool that opens its own
+    /// connections enforces, for example by building a
+    /// [`GuardedClient`](crate::egress::GuardedClient) from it. `None` when the run has none or
+    /// the runtime does not expose its configuration.
+    fn egress_policy(&self) -> Option<&crate::egress::EgressPolicy> {
+        self.run_config().and_then(|config| config.egress_policy.as_ref())
+    }
+
+    /// The names of the tools the agent making this call has, when its runtime says: a tool
+    /// that names another tool for a person to ask for, such as a drawn form's action, checks
+    /// the name against them (spec 3.3 §7.4 rule 5). `None`, the default, when it does not.
+    fn agent_tool_names(&self) -> Option<Vec<String>> {
+        None
+    }
+
     /// Returns whether the parent invocation has been cancelled.
     fn is_cancelled(&self) -> bool {
         false
     }
 
-    /// Returns authenticated request metadata inherited from the parent run.
+    /// Returns the request metadata inherited from the parent run
+    /// ([`InvocationContext::request_metadata`](crate::InvocationContext::request_metadata)):
+    /// authenticated only when [`is_authenticated`](crate::ReadonlyContext::is_authenticated)
+    /// says so.
     fn request_metadata(&self) -> std::collections::HashMap<String, Value> {
         std::collections::HashMap::new()
     }
@@ -321,11 +593,54 @@ pub trait ToolContext: CallbackContext {
     }
 }
 
+/// The side-effect class of a tool, reported by [`Tool::effect`].
+///
+/// | Effect | Retried after a retryable error | Recorded in the action ledger |
+/// |--------|---------------------------------|-------------------------------|
+/// | `ReadOnly` | Yes | No |
+/// | `Idempotent` | Yes | No |
+/// | `NonIdempotent` | No | Yes, when a ledger is configured |
+///
+/// # Example
+///
+/// ```rust
+/// use adk_core::ToolEffect;
+///
+/// assert!(ToolEffect::Idempotent.is_retry_safe());
+/// assert!(!ToolEffect::NonIdempotent.is_retry_safe());
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ToolEffect {
+    /// Reads without changing anything.
+    ReadOnly,
+    /// Changes state, but repeating a call with the same arguments leaves the
+    /// same state as making it once.
+    Idempotent,
+    /// Changes state, and repeating a call repeats the change — a payment, an
+    /// email, an order.
+    NonIdempotent,
+}
+
+impl ToolEffect {
+    /// Returns `true` when repeating a call cannot repeat a side effect.
+    pub fn is_retry_safe(self) -> bool {
+        match self {
+            Self::ReadOnly | Self::Idempotent => true,
+            Self::NonIdempotent => false,
+        }
+    }
+}
+
 /// Configuration for automatic tool retry on failure.
 ///
-/// Controls how many times a failed tool execution is retried before
-/// propagating the error. Applied as a flat delay between attempts
-/// (no exponential backoff in V1).
+/// A failed call is retried only when its tool's [`Tool::effect`] is
+/// [`ToolEffect::ReadOnly`] or [`ToolEffect::Idempotent`] and the error is
+/// [retryable](crate::AdkError::is_retryable) — a rate limit, an unavailable
+/// dependency, or a timeout. The delay before retry `n` is
+/// `delay * 2^(n - 1)`, capped at `max_delay`, with jitter; see
+/// [`RetryBudget::backoff_delay`].
 ///
 /// # Example
 ///
@@ -333,28 +648,62 @@ pub trait ToolContext: CallbackContext {
 /// use std::time::Duration;
 /// use adk_core::RetryBudget;
 ///
-/// // Retry up to 2 times with 500ms between attempts (3 total attempts)
-/// let budget = RetryBudget::new(2, Duration::from_millis(500));
+/// // Retry up to 2 times, starting at 500ms (3 total attempts)
+/// let budget = RetryBudget::new(2, Duration::from_millis(500))
+///     .with_max_delay(Duration::from_secs(5));
 /// assert_eq!(budget.max_retries, 2);
+/// assert!(budget.backoff_delay(1) <= Duration::from_millis(500));
 /// ```
 #[derive(Debug, Clone)]
 pub struct RetryBudget {
     /// Maximum number of retry attempts (not counting the initial attempt).
     /// E.g., `max_retries: 2` means up to 3 total attempts.
     pub max_retries: u32,
-    /// Delay between retries. Applied as a flat delay (no backoff in V1).
+    /// Base delay before the first retry. Each later retry doubles it.
     pub delay: std::time::Duration,
+    /// Upper bound on the delay before any one retry.
+    pub max_delay: std::time::Duration,
 }
 
 impl RetryBudget {
+    /// The `max_delay` that [`RetryBudget::new`] applies.
+    pub const DEFAULT_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
+
     /// Create a new retry budget.
+    ///
+    /// `max_delay` is [`RetryBudget::DEFAULT_MAX_DELAY`], or `delay` when that is
+    /// larger.
     ///
     /// # Arguments
     ///
     /// * `max_retries` - Maximum retry attempts (not counting the initial attempt)
-    /// * `delay` - Flat delay between retry attempts
+    /// * `delay` - Base delay before the first retry
     pub fn new(max_retries: u32, delay: std::time::Duration) -> Self {
-        Self { max_retries, delay }
+        Self { max_retries, delay, max_delay: delay.max(Self::DEFAULT_MAX_DELAY) }
+    }
+
+    /// Sets the upper bound on the delay before any one retry.
+    pub fn with_max_delay(mut self, max_delay: std::time::Duration) -> Self {
+        self.max_delay = max_delay;
+        self
+    }
+
+    /// Returns the delay before retry number `retry`, where `1` is the first retry.
+    ///
+    /// The ceiling is `delay * 2^(retry - 1)`, capped at `max_delay`. The
+    /// returned delay is drawn uniformly from the upper half of that ceiling, so
+    /// callers that failed together do not retry in lockstep.
+    pub fn backoff_delay(&self, retry: u32) -> std::time::Duration {
+        let exponent = retry.saturating_sub(1).min(31);
+        let ceiling = self.delay.saturating_mul(1u32 << exponent).min(self.max_delay);
+        let ceiling_nanos = ceiling.as_nanos();
+        if ceiling_nanos == 0 {
+            return std::time::Duration::ZERO;
+        }
+        let half = ceiling_nanos / 2;
+        let jitter = uuid::Uuid::new_v4().as_u128() % (ceiling_nanos - half + 1);
+        let nanos = u64::try_from(half + jitter).unwrap_or(u64::MAX);
+        std::time::Duration::from_nanos(nanos)
     }
 }
 
@@ -365,6 +714,48 @@ pub trait Toolset: Send + Sync {
     fn name(&self) -> &str;
     /// Returns the tools available in this toolset for the given context.
     async fn tools(&self, ctx: Arc<dyn crate::ReadonlyContext>) -> Result<Vec<Arc<dyn Tool>>>;
+
+    /// Applies toolset-specific context to an LLM request before each model call.
+    ///
+    /// Toolsets can use this hook to describe a dynamic tool protocol without
+    /// requiring every agent that installs the toolset to repeat that guidance
+    /// in its instruction. The default implementation leaves the request
+    /// unchanged.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// async fn process_llm_request(
+    ///     &self,
+    ///     _ctx: std::sync::Arc<dyn adk_core::ReadonlyContext>,
+    ///     request: &mut adk_core::LlmRequest,
+    /// ) -> adk_core::Result<()> {
+    ///     request.contents.insert(0, adk_core::Content::new("user").with_text("Tool guidance"));
+    ///     Ok(())
+    /// }
+    /// ```
+    async fn process_llm_request(
+        &self,
+        _ctx: Arc<dyn ReadonlyContext>,
+        _request: &mut LlmRequest,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    /// Releases what the toolset holds open, such as a server connection or a subprocess.
+    ///
+    /// The agent that owns the toolset calls this from [`Agent::close`](crate::Agent::close),
+    /// which `adk_runner::Runner::close` reaches for every agent in its tree. Closing twice
+    /// must be harmless. The default does nothing.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// async fn close(&self) {
+    ///     self.connection.lock().await.take();
+    /// }
+    /// ```
+    async fn close(&self) {}
 }
 
 /// Controls how multiple tool calls from a single LLM response are dispatched.
@@ -378,8 +769,10 @@ pub enum ToolExecutionStrategy {
     /// This is an explicit caller override. The caller is responsible for
     /// ensuring every selected tool is safe to execute concurrently.
     Parallel,
-    /// Execute calls whose tools report both read-only and concurrency-safe
-    /// concurrently, then execute all remaining calls sequentially.
+    /// Execute calls in LLM-returned order, overlapping only a run of adjacent
+    /// calls whose tools report both read-only and concurrency-safe. Any other
+    /// call runs alone, in its place: it starts after the calls listed before it
+    /// finish, and the calls listed after it wait for it.
     Auto,
 }
 
@@ -410,6 +803,65 @@ pub trait ToolRegistry: Send + Sync {
 
 /// A predicate function for filtering tools.
 pub type ToolPredicate = Box<dyn Fn(&dyn Tool) -> bool + Send + Sync>;
+
+/// The error code for an agent built with two static tools of one name.
+pub const DUPLICATE_TOOL_NAME_CODE: &str = "agent.duplicate_tool_name";
+
+/// Checks that no two of `tools` share a name.
+///
+/// A model calls a tool by name, so with two tools of one name only one can
+/// ever be called. Agent builders call this on their static tool list, naming
+/// the agent being built as `agent_name`.
+///
+/// # Example
+///
+/// ```rust
+/// use std::sync::Arc;
+///
+/// use adk_core::{DUPLICATE_TOOL_NAME_CODE, Result, Tool, ToolContext, ensure_unique_tool_names};
+/// use async_trait::async_trait;
+/// use serde_json::Value;
+///
+/// struct Lookup;
+///
+/// #[async_trait]
+/// impl Tool for Lookup {
+///     fn name(&self) -> &str {
+///         "lookup"
+///     }
+///     fn description(&self) -> &str {
+///         "Looks things up"
+///     }
+///     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
+///         Ok(args)
+///     }
+/// }
+///
+/// let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(Lookup), Arc::new(Lookup)];
+/// let err = ensure_unique_tool_names("support", &tools).unwrap_err();
+/// assert_eq!(err.code, DUPLICATE_TOOL_NAME_CODE);
+/// assert!(ensure_unique_tool_names("support", &tools[..1]).is_ok());
+/// ```
+///
+/// # Errors
+///
+/// Returns an [`ErrorCategory::InvalidInput`](crate::ErrorCategory::InvalidInput)
+/// error with code [`DUPLICATE_TOOL_NAME_CODE`] naming the first repeated name.
+pub fn ensure_unique_tool_names(agent_name: &str, tools: &[Arc<dyn Tool>]) -> Result<()> {
+    let mut seen = std::collections::HashSet::new();
+    match tools.iter().map(|tool| tool.name()).find(|name| !seen.insert(*name)) {
+        Some(name) => Err(crate::AdkError::new(
+            crate::ErrorComponent::Agent,
+            crate::ErrorCategory::InvalidInput,
+            DUPLICATE_TOOL_NAME_CODE,
+            format!(
+                "agent '{agent_name}' has two tools named '{name}'; the model calls tools by \
+                 name, so only one could ever run. Rename one of them or register it once."
+            ),
+        )),
+        None => Ok(()),
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -507,6 +959,58 @@ mod tests {
         assert_eq!(tool.name(), "test");
         assert_eq!(tool.description(), "test tool");
         assert!(!tool.is_long_running());
+    }
+
+    struct ReadOnlyTool;
+
+    #[async_trait]
+    impl Tool for ReadOnlyTool {
+        fn name(&self) -> &str {
+            "lookup"
+        }
+        fn description(&self) -> &str {
+            "reads"
+        }
+        fn is_read_only(&self) -> bool {
+            true
+        }
+        async fn execute(&self, _ctx: Arc<dyn ToolContext>, _args: Value) -> Result<Value> {
+            Ok(Value::Null)
+        }
+    }
+
+    #[test]
+    fn effect_defaults_follow_is_read_only() {
+        let tool = TestTool { name: "test".to_string() };
+        assert_eq!(tool.effect(), ToolEffect::NonIdempotent);
+        assert_eq!(ReadOnlyTool.effect(), ToolEffect::ReadOnly);
+        assert_eq!(tool.timeout_override(), None);
+    }
+
+    #[test]
+    fn idempotency_key_joins_identity_and_call_id() {
+        let ctx = TestContext::new();
+        assert_eq!(ctx.idempotency_key(), "app/user/session/test/call-123");
+    }
+
+    #[test]
+    fn backoff_grows_exponentially_with_jitter_and_respects_the_cap() {
+        let budget = RetryBudget::new(5, std::time::Duration::from_millis(100))
+            .with_max_delay(std::time::Duration::from_millis(350));
+        for _ in 0..50 {
+            let first = budget.backoff_delay(1);
+            assert!(first >= std::time::Duration::from_millis(50));
+            assert!(first <= std::time::Duration::from_millis(100));
+            let second = budget.backoff_delay(2);
+            assert!(second >= std::time::Duration::from_millis(100));
+            assert!(second <= std::time::Duration::from_millis(200));
+            let capped = budget.backoff_delay(10);
+            assert!(capped >= std::time::Duration::from_millis(175));
+            assert!(capped <= std::time::Duration::from_millis(350));
+        }
+        let zero = RetryBudget::new(1, std::time::Duration::ZERO);
+        assert_eq!(zero.backoff_delay(1), std::time::Duration::ZERO);
+        assert_eq!(zero.max_delay, RetryBudget::DEFAULT_MAX_DELAY);
     }
 
     #[test]

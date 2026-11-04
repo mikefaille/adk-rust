@@ -88,7 +88,10 @@ Use cases:
 
 ### `temp:` - Temporary State
 
-State that is cleared after each invocation. Not persisted.
+State that lasts for the rest of the invocation that set it and is never persisted. A tool,
+a later agent in a workflow or after a transfer, and a `{temp:key}` instruction placeholder
+all read a `temp:` key set earlier in the same invocation; the session service drops it when
+it saves the event, so the next invocation starts without it.
 
 ```rust
 use adk_session::KEY_PREFIX_TEMP;
@@ -223,6 +226,8 @@ The session service handles state scoping automatically:
 3. Load session state
 4. Merge all scopes (app → user → session)
 
+`get` and `list` load the app and user scopes at call time, so a value written through one session is visible to every other session of the same app or user on its next read. `VertexAiSessionService` is the exception: it keeps `app:` and `user:` keys in each session's own state.
+
 ### On Event Append
 
 1. Extract state delta from event
@@ -230,6 +235,17 @@ The session service handles state scoping automatically:
 3. Apply `app:` deltas to app state
 4. Apply `user:` deltas to user state
 5. Apply remaining deltas to session state
+
+Each scope receives only the keys in the delta, applied atomically by the backend, so concurrent appends keep each other's keys. When two concurrent appends write the same key, the later write wins. A `null` value is stored as `null`; it does not remove the key.
+
+| Backend | How a delta is applied |
+|---------|------------------------|
+| PostgreSQL | `state \|\| delta` in SQL under the row lock |
+| SQLite | Read and write inside `BEGIN IMMEDIATE`; a writer waits up to 30 seconds for the lock |
+| Redis | `HSET` of the delta's fields; session scope replaced by a compare-and-set script |
+| MongoDB | `$mergeObjects` update pipeline |
+| Firestore | Merge inside the commit transaction |
+| Neo4j | One node property per key, written with `SET n += $delta` |
 
 ## Complete Example
 
@@ -294,19 +310,28 @@ State values can be injected into agent instructions using `{key}` syntax:
 use adk_rust::prelude::*;
 use std::sync::Arc;
 
+let model = GeminiModel::new(&std::env::var("GOOGLE_API_KEY")?, "gemini-3.7-flash")?;
 let agent = LlmAgentBuilder::new("personalized_assistant")
-    .instruction("You are helping {user:name} with {topic}. Their preferred language is {user:language}.")
+    .instruction("You are helping {user:name} with {topic}. Their preferred language is {user:language?}.")
     .model(Arc::new(model))
     .build()?;
 ```
 
-When the agent runs, `{user:name}`, `{topic}`, and `{user:language}` are replaced with values from session state.
+When the agent runs, `{user:name}`, `{topic}`, and `{user:language?}` are replaced with values from session state.
+
+| Placeholder | When the key is missing |
+|-------------|-------------------------|
+| `{key}`, `{app:key}`, `{user:key}`, `{temp:key}` | The run fails with an error |
+| `{key?}` | Replaced with an empty string |
+| `{artifact.file_name}` | Replaced with the artifact's text; fails when it cannot be loaded |
+
+`${name}`, `\{name}`, `{{name}}`, and braces whose content is not a variable name stay as written.
 
 ## Best Practices
 
 ### 1. Use Appropriate Scopes
 
-```rust
+```text
 // ✅ Good: User preferences in user scope
 "user:theme"
 "user:timezone"
@@ -325,7 +350,7 @@ When the agent runs, `{user:name}`, `{topic}`, and `{user:language}` are replace
 
 ### 2. Use Temporary State for Intermediate Data
 
-```rust
+```text
 // ✅ Good: Intermediate results in temp scope
 "temp:search_results"
 "temp:current_step"
@@ -336,7 +361,7 @@ When the agent runs, `{user:name}`, `{topic}`, and `{user:language}` are replace
 
 ### 3. Keep State Keys Consistent
 
-```rust
+```text
 // ✅ Good: Consistent naming convention
 "user:preferences.theme"
 "user:preferences.language"

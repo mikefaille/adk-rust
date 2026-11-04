@@ -6,11 +6,15 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 description = "Core traits and types for Rust Agent Development Kit (ADK-Rust) agents, tools, sessions, and events"
-repository = "https://github.com/zavora-ai/adk-rust"
+homepage.workspace = true
+repository.workspace = true
 documentation = "https://docs.rs/adk-core"
-keywords = ["ai", "agent", "adk", "llm", "gemini"]
+keywords = ["ai", "agent", "adk", "llm", "tools"]
 categories = ["api-bindings", "asynchronous"]
 readme = "README.md"
+
+[package.metadata.docs.rs]
+all-features = true
 
 [dependencies]
 async-trait = { workspace = true }
@@ -18,18 +22,43 @@ futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["sync", "time"] }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 tracing = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+url = { version = "2.5", features = ["serde"] }
 rustls = { workspace = true, optional = true }
+cron = { version = "0.15", optional = true }
+chrono-tz = { version = "0.10", optional = true }
+hmac = { version = "0.12", optional = true }
+sha2 = { workspace = true }
+base64 = { version = "0.22", optional = true }
+reqwest = { workspace = true, optional = true }
+http = { version = "1", optional = true }
 
 [features]
 default = []
 rustls = ["dep:rustls"]
+# Conformance suites for every durable store backend.
+conformance = ["tokio/rt"]
+# Cron schedule evaluation in IANA time zones (`adk_core::schedule::plan_fires`).
+cron = ["dep:cron", "dep:chrono-tz"]
+# Standard Webhooks signing and verification (`adk_core::webhook`).
+webhooks = ["dep:hmac", "dep:base64"]
+# The operating system resolver for egress checks (`adk_core::egress::SystemResolver`).
+egress-dns = ["tokio/net"]
+# The egress-guarded HTTP client (`adk_core::egress::GuardedClient`, `EgressResolver`).
+egress-client = ["egress-dns", "dep:reqwest"]
+# Signed outbound webhook delivery with retries and an egress guard (`adk_core::webhook_delivery`).
+webhook-delivery = ["webhooks", "egress-client"]
+# The `RequestContextExtractor` trait an HTTP server authenticates requests through
+# (`adk_core::request_context`); here so `adk-auth` implements it without depending on `adk-server`.
+auth-bridge = ["dep:http"]
 
 [dev-dependencies]
+# Path-only self dependency, so the crate's own tests run the conformance suites.
+adk-core = { path = ".", features = ["conformance", "cron", "webhook-delivery"] }
 async-stream = { workspace = true }
 proptest = "1.5"
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["rt", "macros", "test-util"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "test-util", "net", "io-util"] }

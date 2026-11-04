@@ -187,12 +187,16 @@ impl SubgraphNode {
         updates
     }
 
-    /// The thread the subgraph runs on, derived from the parent's.
+    /// The thread one activation of the subgraph runs on, derived from the
+    /// parent's thread and the step the parent ran it in.
     ///
     /// Namespacing by node name keeps two subgraphs of one parent apart, and keeps
-    /// a subgraph's checkpoints from colliding with its parent's.
-    fn child_thread(&self, parent_thread: &str) -> String {
-        format!("{parent_thread}/{}", self.name)
+    /// a subgraph's checkpoints from colliding with its parent's. The step makes
+    /// each activation its own thread: a later pass of a loop, or a later turn,
+    /// runs the subgraph again, while the parent re-entering the same step after
+    /// a pause, a failure, or a retry resumes it, or reads its finished result.
+    fn child_thread(&self, parent_thread: &str, step: usize) -> String {
+        format!("{parent_thread}/{}@{step}", self.name)
     }
 }
 
@@ -200,6 +204,14 @@ impl SubgraphNode {
 impl Node for SubgraphNode {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn kind(&self) -> crate::shape::NodeKind {
+        crate::shape::NodeKind::Subgraph
+    }
+
+    fn subgraph(&self) -> Option<&CompiledGraph> {
+        Some(&self.graph)
     }
 
     /// Rejects a mapping that names a channel the relevant side does not declare.
@@ -268,10 +280,33 @@ impl Node for SubgraphNode {
         })?;
 
         let input = self.project_in(&ctx.state, &parent_schema);
-        let thread = self.child_thread(&ctx.config.thread_id);
-        let config = ExecutionConfig::new(&thread);
+        let thread = self.child_thread(&ctx.config.thread_id, ctx.step);
+        let mut config = ExecutionConfig::new(&thread);
+        if let Some(parent) = ctx.config.parent_context.clone() {
+            config = config.with_parent_context(parent);
+        }
+        // Agents inside the subgraph report to the same caller as the parent's.
+        config.event_sink = ctx.config.event_sink.clone();
+        // Governed nodes inside key their records by the parent's lineage, so a fork of
+        // the parent finds the calls its source made (spec 3.3 §12).
+        config.lineage_root =
+            ctx.config.lineage_root.as_deref().map(|root| self.child_thread(root, ctx.step));
+        // The answer to this node's pause answers the node inside that paused; the
+        // inner run hands it only to a node resuming its own pause.
+        if let Some(answer) = ctx.resume_value() {
+            for node in self.graph.nodes.keys() {
+                config = config.with_resume_value(node.clone(), answer.clone());
+            }
+        }
 
-        match self.graph.invoke_detailed(input, config).await {
+        let outcome = match ctx.run_config() {
+            Some(run_config) => {
+                self.graph.invoke_detailed_with_run_config(input, config, run_config).await
+            }
+            None => self.graph.invoke_detailed(input, config).await,
+        };
+
+        match outcome {
             Ok(outcome) => {
                 let mut output = NodeOutput::new()
                     .with_updates(self.project_out(&outcome.state, &parent_schema));
@@ -288,6 +323,16 @@ impl Node for SubgraphNode {
             // where it happened, and the subgraph's own thread holds the state to
             // resume from.
             Err(GraphError::Interrupted(inner)) => {
+                if let Some(pause) =
+                    crate::interrupt::GraphToolConfirmationPause::from_interrupted_execution(&inner)
+                {
+                    return Ok(NodeOutput::new().with_interrupt(
+                        crate::interrupt::GraphToolConfirmationPause::pending_interrupt(
+                            format!("{}.{}", self.name, pause.node),
+                            pause.request,
+                        ),
+                    ));
+                }
                 let message = match &inner.interrupt {
                     Interrupt::Dynamic { message, .. } => message.clone(),
                     other => other.to_string(),

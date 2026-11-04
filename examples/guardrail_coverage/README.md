@@ -1,0 +1,53 @@
+# Guardrail Coverage
+
+What output guardrails and tool-result screens let reach the client, the session, and the
+model. Every scenario drives the real stack and asserts on what each of them received, never on
+model prose:
+
+- `LlmAgentBuilder` with `adk-guardrail` output guardrails (`PiiRedactor`, and a `ContentFilter`
+  that blocks "wire the funds"), `Runner`, `InMemorySessionService`, and `OpenAIClient` pointed
+  at a scripted OpenAI-compatible Chat Completions server on `127.0.0.1` that writes text and
+  calls a tool in the same turn.
+- `RealtimeAgent` under `Runner`, and `RealtimeRunner` with a native handler, with
+  `OpenAIRealtimeModel` pointed at a scripted WebSocket server on `127.0.0.1` that speaks the
+  OpenAI Realtime event protocol and records each `function_call_output` it is sent. One tool
+  returns an email address and an SSN; another fails with a database credential in its message.
+
+The `live_openai_*` scenarios run against OpenAI when `OPENAI_API_KEY` is set, and
+`live_anthropic_*` against Anthropic when `ANTHROPIC_API_KEY` is set.
+
+## Scenarios
+
+| Scenario | Upstream | Passes when |
+|----------|----------|-------------|
+| `preamble_pii_redacted` | Scripted Chat Completions | Text written beside a tool call reaches neither the client nor the session with the email address, the redacted text is saved and replayed, and the call still runs |
+| `preamble_blocked` | Scripted Chat Completions | Blocked text beside a call ends the run with `guardrail.output_blocked`; the call does not run and nothing of the turn is sent or saved |
+| `block_is_structured` | Scripted Chat Completions | Output and input blocks carry category `InvalidInput` (HTTP 400), codes `guardrail.output_blocked` and `guardrail.input_blocked`, and the guardrail name and severity in `details.metadata` |
+| `low_severity_recorded` | Scripted Chat Completions | A `Low` failure passes the answer and is recorded on the delivered and saved event under `adk.guardrail.warnings` |
+| `llm_tool_result_screened` | Scripted Chat Completions | `ResultTextGuardrail(PiiRedactor)` in `tool_guardrails` redacts a tool result before the next model request and the session |
+| `realtime_agent_result_screened` | Scripted Realtime | `RealtimeAgent::tool_result_screen` redacts the result the model is sent and the tool event the session saves |
+| `realtime_agent_screen_fails_closed` | Scripted Realtime | A screen that cannot decide withholds the result (`result_withheld`) from the model and the session |
+| `realtime_agent_error_redacted` | Scripted Realtime | A tool error reaches the model and the session as its category and code, without the credential; `expose_tool_error_messages(true)` opts in to the message |
+| `realtime_runner_result_screened` | Scripted Realtime | `RealtimeRunner::tool_result_screen` redacts a native handler's result before `function_call_output` |
+| `realtime_runner_screen_fails_closed` | Scripted Realtime | A failing screen withholds a native handler's result |
+| `realtime_runner_error_redacted` | Scripted Realtime | A native handler's error reaches the model without the credential |
+| `live_openai_preamble` | OpenAI `gpt-5.6-terra` | Told to repeat the user's email beside its tool call, the model's text reaches neither the client nor the session with the address |
+| `live_openai_realtime` | OpenAI `gpt-realtime-2.1` | Asked to read back a record with PII, the model only ever had the redacted record, and the session holds no SSN |
+| `pii_cards_local` | None | `PiiRedactor::new()` redacts an American Express and a 19-digit test card number, contiguous and grouped 4-4-4-4-3, whole; an email beside `\|` keeps `\|ticket-7`; a 16-digit order number that fails the Luhn check is kept |
+| `pii_ip_default` | None | `PiiRedactor::new()` leaves an IP address; `with_types` naming `PiiType::IpAddress` redacts it |
+| `live_anthropic_pii_cards` | Anthropic `claude-sonnet-5-5` | Asked to echo the `pii_cards_local` text behind a `PiiRedactor` output guardrail, the agent's answer reaches the client and the session with every card number and the email redacted, `\|ticket-7` intact, and the order number kept |
+| `path_allowlist_shapes` | None (local) | `PathAllowList` on `path` checks the key at any depth: nested and array-held paths inside the root are allowed without `allow_missing()`; a path outside the root, a number, an object, or a URL path under the key is denied with its JSON pointer; an empty array holds no path; a path inside a string value is not examined |
+| `live_anthropic_nested_path` | Anthropic `claude-sonnet-5-5` | A file tool takes its path as `target.path`, under `PathAllowList` on `path` with `allow_missing()`: the nested path inside the root is read, the nested path outside it is refused with the guardrail's reason naming `/target/path`, and the tool never opens it; its text reaches neither the client nor the session |
+| `live_anthropic_array_paths` | Anthropic `claude-sonnet-5-5` | A file tool takes `documents[].path`: an array of two paths inside the root is read, and an array holding a path outside it is refused (`/documents/1/path`) without opening any of its files |
+
+## Running
+
+```bash
+cp examples/guardrail_coverage/.env.example examples/guardrail_coverage/.env   # optional, for the live scenarios
+cargo run --manifest-path examples/guardrail_coverage/Cargo.toml
+cargo run --manifest-path examples/guardrail_coverage/Cargo.toml -- --scenario preamble_blocked,realtime_agent_error_redacted
+```
+
+Each scenario prints `PASS`, `FAIL`, or `SKIP` with its evidence; the process exits non-zero on
+any `FAIL`. Keys are read from the dotenv file named by `ADK_ENV_FILE`, else from `.env` in
+this example's directory, else from the repository's `.env`, ahead of the process environment.

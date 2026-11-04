@@ -16,7 +16,7 @@ include = ["src/**/*", "Cargo.toml", "README.md"]
 
 [dependencies]
 awp-types = { workspace = true }
-adk-core = { workspace = true }
+adk-core = { workspace = true, features = ["webhook-delivery"] }
 axum = { version = "0.8", features = ["macros"] }
 tokio = { workspace = true, features = ["sync", "time", "fs", "rt"] }
 async-trait = { workspace = true }
@@ -35,6 +35,11 @@ chrono = { version = "0.4", features = ["serde"] }
 tower = { version = "0.5", features = ["util"] }
 http = "1"
 bytes = "1"
+jsonschema = { workspace = true }
+adk-auth = { workspace = true, optional = true, features = ["signed-audit"] }
+base64 = { version = "0.22", optional = true }
+zeroize = { version = "1.8.2", optional = true }
+reqwest = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
@@ -42,4 +47,13 @@ proptest = "1"
 tempfile = "3"
 
 [features]
-default = []
+default = ["awp-v1"]
+# The AWP 1.x routes (`awp_routes`, `AwpState`), served beside 2.0 for one release line
+# (spec 3.5 §4.1, §7.1).
+awp-v1 = []
+# Detached JWS (EdDSA) over JCS, keys and delegations, the DNS root anchor, the site log's
+# tiles and checkpoint, and `StaticBundle` (spec 3.5 §7.2, §7.7, D-11, A-I5).
+signing = ["dep:adk-auth", "dep:base64", "dep:zeroize"]
+# `verify` (the library behind `adk-rust awp verify`), the conformance kit and the test-vector
+# generator; fetches over HTTPS (spec 3.5 §7.7).
+verify = ["signing", "dep:reqwest"]

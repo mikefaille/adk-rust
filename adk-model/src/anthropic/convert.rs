@@ -4,28 +4,73 @@ use super::error::ConversionError;
 use crate::attachment;
 use adk_anthropic::ImageMediaType;
 use adk_anthropic::{
-    Base64ImageSource, Base64PdfSource, CacheControlEphemeral, ContentBlock, ContextManagement,
-    DocumentBlock, ImageBlock, Message, MessageCreateParams, MessageParam, MessageRole, Model,
-    PlainTextSource, StopReason, SystemPrompt, TextBlock, ToolParam, ToolResultBlock,
-    ToolResultBlockContent, ToolUnionParam, ToolUseBlock, UrlImageSource, UrlPdfSource,
+    Base64ImageSource, Base64PdfSource, CacheControlEphemeral, CacheTtl, ContentBlock,
+    ContextManagement, DocumentBlock, ImageBlock, Message, MessageCreateParams, MessageParam,
+    MessageRole, Model, PlainTextSource, StopReason, SystemPrompt, TextBlock, ThinkingBlock,
+    ToolParam, ToolResultBlock, ToolResultBlockContent, ToolUnionParam, ToolUseBlock,
+    UrlImageSource, UrlPdfSource,
 };
 use adk_core::{
-    Content, FinishReason, LlmResponse, Part, SchemaAdapter, SchemaCache, UsageMetadata,
+    BuiltinToolUse, Content, FinishReason, LlmResponse, Part, SchemaAdapter, SchemaCache,
+    UsageMetadata,
 };
 use serde_json::Value;
 use std::collections::HashMap;
 
-fn tool_result_content(value: &Value) -> ToolResultBlockContent {
-    match value {
-        Value::String(text) => ToolResultBlockContent::String(text.clone()),
-        Value::Object(_) | Value::Array(_) => {
-            ToolResultBlockContent::String(serde_json::to_string(value).unwrap_or_default())
-        }
-        other => ToolResultBlockContent::String(other.to_string()),
+fn image_media_type(mime_type: &str) -> Option<ImageMediaType> {
+    match mime_type {
+        "image/jpeg" => Some(ImageMediaType::Jpeg),
+        "image/png" => Some(ImageMediaType::Png),
+        "image/gif" => Some(ImageMediaType::Gif),
+        "image/webp" => Some(ImageMediaType::Webp),
+        _ => None,
     }
 }
 
+/// The `tool_result` content for a function response: its JSON as text, then each image or
+/// file the tool returned, so the model reads them with the result.
+fn tool_result_content(response: &adk_core::FunctionResponseData) -> ToolResultBlockContent {
+    let text = match &response.response {
+        Value::String(text) => text.clone(),
+        Value::Object(_) | Value::Array(_) => {
+            serde_json::to_string(&response.response).unwrap_or_default()
+        }
+        other => other.to_string(),
+    };
+    if response.inline_data.is_empty() && response.file_data.is_empty() {
+        return ToolResultBlockContent::String(text);
+    }
+    let mut items = Vec::new();
+    if !text.trim().is_empty() {
+        items.push(adk_anthropic::Content::Text(TextBlock::new(text)));
+    }
+    for data in &response.inline_data {
+        items.push(match image_media_type(&data.mime_type) {
+            Some(media_type) => adk_anthropic::Content::Image(ImageBlock::new_with_base64(
+                Base64ImageSource::new(attachment::encode_base64(&data.data), media_type),
+            )),
+            None => adk_anthropic::Content::Text(TextBlock::new(
+                attachment::inline_attachment_to_text(&data.mime_type, &data.data),
+            )),
+        });
+    }
+    for file in &response.file_data {
+        items.push(match image_media_type(&file.mime_type) {
+            Some(_) => adk_anthropic::Content::Image(ImageBlock::new_with_url(
+                UrlImageSource::new(file.file_uri.clone()),
+            )),
+            None => adk_anthropic::Content::Text(TextBlock::new(
+                attachment::file_attachment_to_text(&file.mime_type, &file.file_uri),
+            )),
+        });
+    }
+    ToolResultBlockContent::Array(items)
+}
+
 /// Convert ADK Content to adk-anthropic MessageParam.
+///
+/// Text that is empty or whitespace is left out, since the API rejects it, so the message
+/// can have no blocks; the caller leaves such a message out of the request.
 ///
 /// When `prompt_caching` is true, eligible content blocks will have
 /// `cache_control: {"type": "ephemeral"}` set on them.
@@ -42,6 +87,13 @@ pub fn content_to_message(
         _ => MessageRole::User,
     };
 
+    if let Some(mut blocks) = super::history::restore(content) {
+        blocks.retain(
+            |block| !matches!(block, ContentBlock::Text(text) if text.text.trim().is_empty()),
+        );
+        return Ok(MessageParam::new_with_blocks(blocks, role));
+    }
+
     // Note: cache_control is applied at the system prompt and top-level request
     // level only (max 4 blocks). Individual message blocks do not get cache_control
     // to avoid exceeding Anthropic's 4-block limit.
@@ -51,7 +103,7 @@ pub fn content_to_message(
         .iter()
         .filter_map(|part| match part {
             Part::Text { text } => {
-                if text.is_empty() {
+                if text.trim().is_empty() {
                     None
                 } else {
                     Some(ContentBlock::Text(TextBlock::new(text.clone())))
@@ -69,20 +121,17 @@ pub fn content_to_message(
             Part::FunctionResponse { function_response, id, .. } => {
                 Some(ContentBlock::ToolResult(ToolResultBlock {
                     tool_use_id: id.clone().unwrap_or_else(|| "unknown".to_string()),
-                    content: Some(tool_result_content(&function_response.response)),
-                    is_error: None,
+                    content: Some(tool_result_content(function_response)),
+                    // Only an answer the agent wrote says the call failed or never ran.
+                    is_error: part
+                        .tool_result_status()
+                        .is_some_and(adk_core::ToolResultStatus::is_error)
+                        .then_some(true),
                     cache_control: None,
                 }))
             }
             Part::InlineData { mime_type, data, .. } => {
-                let media_type = match mime_type.as_str() {
-                    "image/jpeg" => Some(ImageMediaType::Jpeg),
-                    "image/png" => Some(ImageMediaType::Png),
-                    "image/gif" => Some(ImageMediaType::Gif),
-                    "image/webp" => Some(ImageMediaType::Webp),
-                    _ => None,
-                };
-                if let Some(media_type) = media_type {
+                if let Some(media_type) = image_media_type(mime_type) {
                     let encoded = attachment::encode_base64(data);
                     Some(ContentBlock::Image(ImageBlock::new_with_base64(Base64ImageSource::new(
                         encoded, media_type,
@@ -125,30 +174,49 @@ pub fn content_to_message(
                     ))))
                 }
             }
-            Part::Thinking { thinking, .. } => {
-                if thinking.is_empty() {
-                    None
-                } else {
-                    Some(ContentBlock::Text(TextBlock::new(thinking.clone())))
-                }
+            // A signed thinking block is replayed unchanged: the API requires the
+            // blocks of a tool-use turn back exactly, and text in their place is a
+            // different turn. Unsigned thinking (another provider's reasoning, or a
+            // streamed fragment) cannot be verified, so it is not sent.
+            Part::Thinking { thinking, signature: Some(signature) }
+                if role == MessageRole::Assistant && !signature.is_empty() =>
+            {
+                Some(ContentBlock::Thinking(ThinkingBlock::new(
+                    thinking.clone(),
+                    signature.clone(),
+                )))
             }
+            Part::Thinking { .. } => None,
             // Server-side tool parts: convert back to Anthropic types when possible
-            Part::ServerToolCall { server_tool_call } => serde_json::from_value::<
-                adk_anthropic::ServerToolUseBlock,
-            >(server_tool_call.clone())
-            .ok()
-            .map(ContentBlock::ServerToolUse),
-            Part::ServerToolResponse { server_tool_response } => {
-                serde_json::from_value::<adk_anthropic::WebSearchToolResultBlock>(
-                    server_tool_response.clone(),
+            // Provider-executed blocks are assistant content; in any other turn they are input
+            // the model never produced.
+            Part::ServerToolCall { server_tool_call } if role == MessageRole::Assistant => {
+                serde_json::from_value::<adk_anthropic::ServerToolUseBlock>(
+                    server_tool_call.clone(),
                 )
                 .ok()
-                .map(ContentBlock::WebSearchToolResult)
+                .map(ContentBlock::ServerToolUse)
             }
+            // Results keep their `type`, so every server tool result kind converts back.
+            Part::ServerToolResponse { server_tool_response } if role == MessageRole::Assistant => {
+                serde_json::from_value::<ContentBlock>(server_tool_response.clone()).ok().filter(
+                    |block| {
+                        matches!(
+                            block,
+                            ContentBlock::WebSearchToolResult(_)
+                                | ContentBlock::WebFetchToolResult(_)
+                                | ContentBlock::CodeExecutionToolResult(_)
+                                | ContentBlock::BashCodeExecutionToolResult(_)
+                                | ContentBlock::TextEditorCodeExecutionToolResult(_)
+                        )
+                    },
+                )
+            }
+            Part::ServerToolCall { .. } | Part::ServerToolResponse { .. } => None,
             // Embedded resources: text → text block; blob → inline bytes handling.
             Part::EmbeddedResource { resource } => match resource {
                 adk_core::EmbeddedResource::Text(text) => {
-                    if text.text.is_empty() {
+                    if text.text.trim().is_empty() {
                         None
                     } else {
                         Some(ContentBlock::Text(TextBlock::new(text.text.clone())))
@@ -156,14 +224,7 @@ pub fn content_to_message(
                 }
                 adk_core::EmbeddedResource::Blob(blob) => {
                     let mime_type = blob.mime_type.as_deref().unwrap_or("application/octet-stream");
-                    let media_type = match mime_type {
-                        "image/jpeg" => Some(ImageMediaType::Jpeg),
-                        "image/png" => Some(ImageMediaType::Png),
-                        "image/gif" => Some(ImageMediaType::Gif),
-                        "image/webp" => Some(ImageMediaType::Webp),
-                        _ => None,
-                    };
-                    if let Some(media_type) = media_type {
+                    if let Some(media_type) = image_media_type(mime_type) {
                         let encoded = attachment::encode_base64(&blob.data);
                         Some(ContentBlock::Image(ImageBlock::new_with_base64(
                             Base64ImageSource::new(encoded, media_type),
@@ -192,28 +253,23 @@ pub fn content_to_message(
         })
         .collect();
 
-    // If no blocks, add a placeholder for assistant messages
-    let blocks = if blocks.is_empty() && role == MessageRole::Assistant {
-        vec![ContentBlock::Text(TextBlock::new(" ".to_string()))]
-    } else if blocks.is_empty() {
-        vec![ContentBlock::Text(TextBlock::new("".to_string()))]
-    } else {
-        blocks
-    };
-
     Ok(MessageParam::new_with_blocks(blocks, role))
 }
 
 /// Convert ADK tools to adk-anthropic ToolUnionParam format.
+///
+/// Tools are emitted sorted by name: the declarations come from a `HashMap`, and
+/// a stable order keeps the prompt-cache prefix identical across requests.
 pub fn convert_tools(
     tools: &HashMap<String, Value>,
     adapter: &dyn SchemaAdapter,
     cache: &SchemaCache,
 ) -> Result<Vec<ToolUnionParam>, ConversionError> {
+    let mut tools = tools.iter().collect::<Vec<_>>();
+    tools.sort_unstable_by_key(|(name, _)| *name);
     let mut seen_wire_names = std::collections::HashSet::with_capacity(tools.len());
-
     tools
-        .iter()
+        .into_iter()
         .map(|(name, decl)| {
             if let Some(provider_tool) = decl.get("x-adk-anthropic-tool") {
                 return serde_json::from_value::<ToolUnionParam>(provider_tool.clone()).map_err(
@@ -248,21 +304,51 @@ pub fn convert_tools(
 
             let input_schema =
                 decl.get("parameters").cloned().unwrap_or_else(|| adapter.empty_schema());
-            let compiled_schema = cache.get_or_compile(&input_schema, adapter).map_err(|e| {
+            let mut compiled_schema = cache.get_or_compile(&input_schema, adapter).map_err(|e| {
                 ConversionError::InvalidToolDeclaration(format!(
                     "invalid parameter schema for tool '{name}' under adapter '{}': {e}",
                     adapter.identifier()
                 ))
             })?;
+            let strict = decl.get("strict").and_then(Value::as_bool);
+            if strict != Some(true) {
+                super::schema_adapter::nest_composition(&mut compiled_schema);
+            }
 
             let mut tool_param = ToolParam::new(normalized_name.into_owned(), compiled_schema);
             if let Some(desc) = description {
                 tool_param = tool_param.with_description(desc);
             }
+            if let Some(strict) = strict {
+                tool_param = tool_param.with_strict(strict);
+            }
 
             Ok(ToolUnionParam::CustomTool(tool_param))
         })
         .collect()
+}
+
+/// The part for a provider-executed block: a `server_tool_use` call or one of its results,
+/// `None` for any other block.
+pub(super) fn server_tool_part(block: &ContentBlock) -> Option<Part> {
+    match block {
+        ContentBlock::ServerToolUse(server_tool_use) => serde_json::to_value(server_tool_use)
+            .ok()
+            .map(|server_tool_call| Part::ServerToolCall { server_tool_call }),
+        ContentBlock::WebSearchToolResult(web_search_result) => {
+            serde_json::to_value(web_search_result)
+                .ok()
+                .map(|server_tool_response| Part::ServerToolResponse { server_tool_response })
+        }
+        // Serialized with their `type`, so consumers can tell the result kinds apart.
+        ContentBlock::WebFetchToolResult(_)
+        | ContentBlock::CodeExecutionToolResult(_)
+        | ContentBlock::BashCodeExecutionToolResult(_)
+        | ContentBlock::TextEditorCodeExecutionToolResult(_) => serde_json::to_value(block)
+            .ok()
+            .map(|server_tool_response| Part::ServerToolResponse { server_tool_response }),
+        _ => None,
+    }
 }
 
 /// Convert adk-anthropic Message to ADK LlmResponse.
@@ -282,7 +368,11 @@ pub fn from_anthropic_message(message: &Message) -> (LlmResponse, HashMap<String
                     thought_signature: None,
                 });
             }
-            ContentBlock::Thinking(thinking_block) if !thinking_block.thinking.is_empty() => {
+            // Models with `display: "omitted"` return an empty `thinking` field and the
+            // reasoning only in `signature`; the block must still be replayed.
+            ContentBlock::Thinking(thinking_block)
+                if !thinking_block.thinking.is_empty() || !thinking_block.signature.is_empty() =>
+            {
                 parts.push(Part::Thinking {
                     thinking: thinking_block.thinking.clone(),
                     signature: if thinking_block.signature.is_empty() {
@@ -292,39 +382,71 @@ pub fn from_anthropic_message(message: &Message) -> (LlmResponse, HashMap<String
                     },
                 });
             }
-            ContentBlock::ServerToolUse(server_tool_use) => {
-                if let Ok(val) = serde_json::to_value(server_tool_use) {
-                    parts.push(Part::ServerToolCall { server_tool_call: val });
-                }
+            ContentBlock::ServerToolUse(_)
+            | ContentBlock::WebSearchToolResult(_)
+            | ContentBlock::WebFetchToolResult(_)
+            | ContentBlock::CodeExecutionToolResult(_)
+            | ContentBlock::BashCodeExecutionToolResult(_)
+            | ContentBlock::TextEditorCodeExecutionToolResult(_) => {
+                parts.extend(server_tool_part(block));
             }
-            ContentBlock::WebSearchToolResult(web_search_result) => {
-                if let Ok(val) = serde_json::to_value(web_search_result) {
-                    parts.push(Part::ServerToolResponse { server_tool_response: val });
-                }
+            // No ADK part represents it; `history::preserve` keeps it for replay.
+            ContentBlock::Unknown(raw) => {
+                tracing::warn!(
+                    anthropic.block_type = raw["type"].as_str().unwrap_or_default(),
+                    "skipping an anthropic content block type this client does not know"
+                );
             }
             _ => {}
         }
     }
 
+    if let Some(native) = super::history::preserve(message) {
+        parts.push(native);
+    }
     let content =
         if parts.is_empty() { None } else { Some(Content { role: "model".to_string(), parts }) };
 
+    // Anthropic reports uncached input separately from cache reads and writes.
+    let prompt_token_count = message
+        .usage
+        .input_tokens
+        .saturating_add(message.usage.cache_read_input_tokens.unwrap_or(0))
+        .saturating_add(message.usage.cache_creation_input_tokens.unwrap_or(0));
     let usage_metadata = Some(UsageMetadata {
-        prompt_token_count: message.usage.input_tokens,
+        prompt_token_count,
         candidates_token_count: message.usage.output_tokens,
-        total_token_count: (message.usage.input_tokens + message.usage.output_tokens),
+        total_token_count: prompt_token_count.saturating_add(message.usage.output_tokens),
         cache_read_input_token_count: message.usage.cache_read_input_tokens,
         cache_creation_input_token_count: message.usage.cache_creation_input_tokens,
+        // As received, so fields such as `service_tier` and the `cache_creation` breakdown survive.
+        provider_usage: message
+            .usage
+            .raw
+            .as_deref()
+            .cloned()
+            .or_else(|| serde_json::to_value(&message.usage).ok()),
+        builtin_tool_uses: builtin_tool_uses(message),
         ..Default::default()
     });
 
     let finish_reason = message.stop_reason.as_ref().map(|sr| match sr {
-        StopReason::EndTurn => FinishReason::Stop,
-        StopReason::MaxTokens => FinishReason::MaxTokens,
-        StopReason::StopSequence => FinishReason::Stop,
-        StopReason::ToolUse => FinishReason::Stop,
-        _ => FinishReason::Stop,
+        StopReason::EndTurn
+        | StopReason::StopSequence
+        | StopReason::ToolUse
+        | StopReason::PauseTurn
+        | StopReason::PauseRun => FinishReason::Stop,
+        StopReason::MaxTokens | StopReason::ModelContextWindowExceeded => FinishReason::MaxTokens,
+        StopReason::Refusal => FinishReason::Safety,
+        StopReason::Unknown(reason) => {
+            tracing::warn!(
+                anthropic.stop_reason = %reason,
+                "anthropic returned a stop reason this client does not know"
+            );
+            FinishReason::Other
+        }
     });
+    let paused = matches!(message.stop_reason, Some(StopReason::PauseTurn));
     let tool_call_turn = matches!(message.stop_reason, Some(StopReason::ToolUse))
         || content.as_ref().is_some_and(Content::has_function_calls);
 
@@ -335,17 +457,49 @@ pub fn from_anthropic_message(message: &Message) -> (LlmResponse, HashMap<String
             content,
             usage_metadata,
             finish_reason,
-            citation_metadata: None,
+            citation_metadata: super::history::citations(message),
             partial: false,
-            turn_complete: !tool_call_turn,
+            turn_complete: !tool_call_turn && !paused,
             interrupted: false,
             error_code: None,
             error_message: None,
-            provider_metadata: None,
+            provider_metadata: paused.then(|| serde_json::json!({"continue_turn": true})),
             interaction_id: None,
+            model: Some(message.model.to_string()).filter(|model| !model.is_empty()),
+            provider: None,
         },
         cache_meta,
     )
+}
+
+/// Server tool uses the response reports, from `usage.server_tool_use` when present,
+/// otherwise by counting `server_tool_use` blocks.
+fn builtin_tool_uses(message: &Message) -> Vec<BuiltinToolUse> {
+    let counts: Vec<(&str, u32)> = match message.usage.server_tool_use {
+        Some(reported) => vec![
+            ("web_search", u32::try_from(reported.web_search_requests).unwrap_or(0)),
+            ("web_fetch", u32::try_from(reported.web_fetch_requests).unwrap_or(0)),
+            ("code_execution", u32::try_from(reported.code_execution_requests).unwrap_or(0)),
+        ],
+        None => {
+            let mut counts = std::collections::BTreeMap::<&str, u32>::new();
+            for block in &message.content {
+                if let ContentBlock::ServerToolUse(server_tool_use) = block {
+                    let kind = match server_tool_use.name.as_str() {
+                        "bash_code_execution" | "text_editor_code_execution" => "code_execution",
+                        name => name,
+                    };
+                    *counts.entry(kind).or_default() += 1;
+                }
+            }
+            counts.into_iter().collect()
+        }
+    };
+    counts
+        .into_iter()
+        .filter(|(_, count)| *count > 0)
+        .map(|(kind, count)| BuiltinToolUse::new(kind, count))
+        .collect()
 }
 
 /// Convert streaming text delta to ADK LlmResponse.
@@ -365,6 +519,8 @@ pub fn from_text_delta(text: &str) -> LlmResponse {
         error_message: None,
         provider_metadata: None,
         interaction_id: None,
+        model: None,
+        provider: None,
     }
 }
 
@@ -382,6 +538,8 @@ pub fn from_thinking_delta(thinking_text: &str) -> LlmResponse {
 }
 
 /// Create an LlmResponse representing a streaming error event.
+///
+/// The message is cut to [`adk_core::UPSTREAM_EXCERPT_BYTES`], since it can echo the request.
 pub fn from_stream_error(error_type: &str, message: &str) -> LlmResponse {
     LlmResponse {
         content: None,
@@ -392,9 +550,11 @@ pub fn from_stream_error(error_type: &str, message: &str) -> LlmResponse {
         turn_complete: true,
         interrupted: false,
         error_code: Some(error_type.to_string()),
-        error_message: Some(message.to_string()),
+        error_message: Some(adk_core::upstream_excerpt(message).to_string()),
         provider_metadata: None,
         interaction_id: None,
+        model: None,
+        provider: None,
     }
 }
 
@@ -422,6 +582,7 @@ pub fn build_message_params(
     top_p: Option<f32>,
     top_k: Option<i32>,
     prompt_caching: bool,
+    prompt_cache_ttl: Option<&CacheTtl>,
     thinking: Option<&super::config::ThinkingMode>,
     effort: Option<super::config::Effort>,
     fast_mode: bool,
@@ -431,6 +592,11 @@ pub fn build_message_params(
 ) -> MessageCreateParams {
     let mut params =
         MessageCreateParams::new(max_tokens, messages, Model::Custom(model.to_string()));
+    // Both breakpoints share one TTL: the API rejects a longer TTL after a shorter one.
+    let cache_control = || match prompt_cache_ttl {
+        Some(ttl) => CacheControlEphemeral::new().with_ttl(ttl.clone()),
+        None => CacheControlEphemeral::new(),
+    };
 
     if !tools.is_empty() {
         params.tools = Some(tools);
@@ -438,7 +604,7 @@ pub fn build_message_params(
 
     if let Some(sys) = system_prompt {
         if prompt_caching {
-            let block = TextBlock::new(sys).with_cache_control(CacheControlEphemeral::new());
+            let block = TextBlock::new(sys).with_cache_control(cache_control());
             params.system = Some(SystemPrompt::from_blocks(vec![block]));
         } else {
             params.system = Some(SystemPrompt::from_string(sys));
@@ -497,7 +663,7 @@ pub fn build_message_params(
 
     // Automatic prompt caching (top-level cache_control)
     if prompt_caching {
-        params.cache_control = Some(CacheControlEphemeral::new());
+        params.cache_control = Some(cache_control());
     }
 
     // Context management (beta)
@@ -511,6 +677,79 @@ pub fn build_message_params(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn code_execution_results_become_server_tool_responses() {
+        let message: Message = serde_json::from_value(serde_json::json!({
+            "id": "msg_01",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-5-5",
+            "content": [
+                {"type": "server_tool_use", "id": "srvtoolu_01", "name": "code_execution", "input": {"code": "print(2+2)"}},
+                {"type": "code_execution_tool_result", "tool_use_id": "srvtoolu_01",
+                 "content": {"type": "code_execution_result", "stdout": "4\n", "stderr": "", "return_code": 0, "content": []}},
+                {"type": "text", "text": "4"}
+            ],
+            "stop_reason": "end_turn",
+            "stop_sequence": null,
+            "usage": {"input_tokens": 10, "output_tokens": 5}
+        }))
+        .unwrap();
+
+        let (response, _) = from_anthropic_message(&message);
+        let parts = response.content.unwrap().parts;
+        let result = parts
+            .iter()
+            .find_map(|part| match part {
+                Part::ServerToolResponse { server_tool_response }
+                    if server_tool_response["type"] == "code_execution_tool_result" =>
+                {
+                    Some(server_tool_response)
+                }
+                _ => None,
+            })
+            .expect("code execution result part");
+        assert_eq!(result["tool_use_id"], "srvtoolu_01");
+        assert_eq!(result["content"]["stdout"], "4\n");
+    }
+
+    #[test]
+    fn tool_result_carries_the_images_a_tool_returned() {
+        let content = Content {
+            role: "function".to_string(),
+            parts: vec![Part::FunctionResponse {
+                function_response: adk_core::FunctionResponseData::with_multimodal(
+                    "render",
+                    serde_json::json!({"status": "rendered"}),
+                    vec![adk_core::InlineDataPart {
+                        mime_type: "image/png".to_string(),
+                        data: vec![1, 2, 3],
+                        uri: None,
+                        annotations: None,
+                    }],
+                    vec![adk_core::FileDataPart {
+                        mime_type: "image/jpeg".to_string(),
+                        file_uri: "https://example.com/badge.jpg".to_string(),
+                        annotations: None,
+                    }],
+                ),
+                id: Some("toolu_1".to_string()),
+                annotations: None,
+            }],
+        };
+
+        let message = serde_json::to_value(content_to_message(&content, false).unwrap()).unwrap();
+
+        assert_eq!(
+            message["content"][0]["content"],
+            serde_json::json!([
+                {"type": "text", "text": "{\"status\":\"rendered\"}"},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AQID"}},
+                {"type": "image", "source": {"type": "url", "url": "https://example.com/badge.jpg"}}
+            ])
+        );
+    }
 
     #[test]
     fn test_content_to_message_user() {
@@ -706,6 +945,34 @@ mod tests {
     }
 
     #[test]
+    fn convert_tools_order_is_stable_across_maps() {
+        use super::super::schema_adapter::AnthropicSchemaAdapter;
+        let names: Vec<String> = (0..12).map(|i| format!("tool_{i:02}")).collect();
+        let declaration = |name: &str| {
+            serde_json::json!({
+                "description": format!("{name} description"),
+                "parameters": {"type": "object", "properties": {}}
+            })
+        };
+        let forward: HashMap<String, Value> =
+            names.iter().map(|name| (name.clone(), declaration(name))).collect();
+        let reverse: HashMap<String, Value> =
+            names.iter().rev().map(|name| (name.clone(), declaration(name))).collect();
+
+        let adapter = AnthropicSchemaAdapter;
+        let cache = SchemaCache::for_adapter(std::sync::Arc::new(AnthropicSchemaAdapter));
+        let from_forward = convert_tools(&forward, &adapter, &cache).unwrap();
+        let from_reverse = convert_tools(&reverse, &adapter, &cache).unwrap();
+
+        assert_eq!(from_forward, from_reverse);
+        let converted_names: Vec<String> = from_forward
+            .iter()
+            .map(|tool| serde_json::to_value(tool).unwrap()["name"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(converted_names, names);
+    }
+
+    #[test]
     fn test_convert_tools_supports_native_anthropic_tool_declarations() {
         use super::super::schema_adapter::AnthropicSchemaAdapter;
         let mut tools = HashMap::new();
@@ -727,6 +994,109 @@ mod tests {
         let value = serde_json::to_value(&claude_tools[0]).expect("tool should serialize");
         assert_eq!(value["type"], "bash_20250124");
         assert_eq!(value["name"], "bash");
+    }
+
+    #[test]
+    fn test_convert_tools_supports_dynamic_filtering_web_search() {
+        use super::super::schema_adapter::AnthropicSchemaAdapter;
+        let mut tools = HashMap::new();
+        tools.insert(
+            "web_search".to_string(),
+            serde_json::json!({
+                "name": "web_search",
+                "x-adk-anthropic-tool": {
+                    "type": "web_search_20260209",
+                    "name": "web_search",
+                    "allowed_domains": null,
+                    "blocked_domains": ["spam.example"],
+                    "max_uses": 2,
+                    "user_location": null
+                }
+            }),
+        );
+
+        let adapter = AnthropicSchemaAdapter;
+        let cache = SchemaCache::for_adapter(std::sync::Arc::new(AnthropicSchemaAdapter));
+        let claude_tools =
+            convert_tools(&tools, &adapter, &cache).expect("tool conversion should succeed");
+
+        assert_eq!(
+            claude_tools,
+            vec![ToolUnionParam::WebSearch20260209(
+                adk_anthropic::WebSearchTool20260209::new()
+                    .with_blocked_domains(vec!["spam.example".to_string()])
+                    .with_max_uses(2)
+            )]
+        );
+    }
+
+    #[test]
+    fn test_convert_tools_sends_direct_allowed_callers() {
+        use super::super::schema_adapter::AnthropicSchemaAdapter;
+        let mut tools = HashMap::new();
+        tools.insert(
+            "web_search".to_string(),
+            serde_json::json!({
+                "name": "web_search",
+                "x-adk-anthropic-tool": {
+                    "type": "web_search_20260209",
+                    "name": "web_search",
+                    "allowed_callers": ["direct"]
+                }
+            }),
+        );
+
+        let adapter = AnthropicSchemaAdapter;
+        let cache = SchemaCache::for_adapter(std::sync::Arc::new(AnthropicSchemaAdapter));
+        let claude_tools =
+            convert_tools(&tools, &adapter, &cache).expect("tool conversion should succeed");
+
+        assert_eq!(
+            serde_json::to_value(&claude_tools).unwrap(),
+            serde_json::json!([{
+                "type": "web_search_20260209",
+                "name": "web_search",
+                "allowed_callers": ["direct"]
+            }])
+        );
+    }
+
+    /// A tool result is flagged `is_error` only when the agent wrote it for a call that was
+    /// refused, not run, or failed; the tool's own `{"error": ..}` payload is not read.
+    #[test]
+    fn only_a_refused_unrun_or_failed_answer_is_flagged_an_error() {
+        use adk_core::ToolResultStatus;
+        let block = |status: Option<ToolResultStatus>| {
+            let mut part = Part::FunctionResponse {
+                function_response: adk_core::FunctionResponseData::new(
+                    "pay",
+                    serde_json::json!({ "error": "declined" }),
+                ),
+                id: Some("toolu_1".to_string()),
+                annotations: None,
+            };
+            if let Some(status) = status {
+                part.set_tool_result_status(status, None);
+            }
+            let content = Content { role: "function".to_string(), parts: vec![part] };
+            let message = content_to_message(&content, false).expect("content should convert");
+            serde_json::to_value(message).expect("message should serialize")["content"][0].clone()
+        };
+        let flagged = |status| block(Some(status)).get("is_error").cloned();
+        for status in
+            [ToolResultStatus::Refused, ToolResultStatus::NotRun, ToolResultStatus::Failed]
+        {
+            assert_eq!(flagged(status), Some(Value::Bool(true)), "{status:?}");
+        }
+        for status in [
+            ToolResultStatus::Held,
+            ToolResultStatus::OutcomeUnknown,
+            ToolResultStatus::Withheld,
+            ToolResultStatus::Succeeded,
+        ] {
+            assert_eq!(flagged(status), None, "{status:?}");
+        }
+        assert_eq!(block(None).get("is_error"), None, "a tool's own payload is not read");
     }
 
     #[test]
@@ -776,6 +1146,7 @@ mod tests {
                 cache_read_input_tokens: None,
                 cache_creation_input_tokens_1h: None,
                 server_tool_use: None,
+                raw: None,
             },
         };
 
@@ -796,7 +1167,7 @@ mod tests {
     }
 
     #[test]
-    fn test_from_anthropic_message_empty_thinking_block_skipped() {
+    fn test_from_anthropic_message_unsigned_empty_thinking_block_skipped() {
         use adk_anthropic::{ThinkingBlock, Usage};
 
         let message = Message {
@@ -805,7 +1176,7 @@ mod tests {
             role: MessageRole::Assistant,
             container: None,
             content: vec![
-                ContentBlock::Thinking(ThinkingBlock::new("", "sig_empty")),
+                ContentBlock::Thinking(ThinkingBlock::new("", "")),
                 ContentBlock::Text(TextBlock::new("Just text.")),
             ],
             stop_reason: Some(StopReason::EndTurn),
@@ -818,6 +1189,7 @@ mod tests {
                 cache_read_input_tokens: None,
                 cache_creation_input_tokens_1h: None,
                 server_tool_use: None,
+                raw: None,
             },
         };
 
@@ -852,6 +1224,7 @@ mod tests {
                 cache_read_input_tokens: None,
                 cache_creation_input_tokens_1h: None,
                 server_tool_use: None,
+                raw: None,
             },
         };
 

@@ -133,27 +133,42 @@ impl Launcher {
                 intra_compaction_summarizer: None,
                 #[cfg(feature = "context-compaction")]
                 context_compaction: None,
+                tool_policy: None,
+                egress_policy: None,
+                governance: None,
+                action_ledger: None,
+                approval_store: None,
+                spend_ledger: None,
+                durable_runs: None,
+                audit: None,
+                identity_source: None,
+                subject_delegation: None,
             })?;
 
             let mut stream = runner
                 .run(UserId::new("user")?, SessionId::new(&session_id)?, user_content)
                 .await?;
 
+            let mut text_deltas = adk_core::EventTextDeltas::default();
             while let Some(event) = stream.next().await {
                 match event {
                     Ok(evt) => {
+                        let evt = text_deltas.push(&evt);
+                        // A streamed function call arrives in a partial chunk and again in
+                        // the complete event, so only the complete one is printed.
+                        let partial = evt.llm_response.partial;
                         if let Some(content) = evt.content() {
                             for part in &content.parts {
                                 match part {
-                                    Part::Text { text } => {
+                                    Part::Text { text } if !text.is_empty() => {
                                         print!("{text}");
                                         io::stdout().flush().ok();
                                     }
-                                    Part::Thinking { thinking, .. } => {
+                                    Part::Thinking { thinking, .. } if !thinking.is_empty() => {
                                         print!("\n[thinking] {thinking}");
                                         io::stdout().flush().ok();
                                     }
-                                    Part::FunctionCall { name, args, .. } => {
+                                    Part::FunctionCall { name, args, .. } if !partial => {
                                         print!("\n[tool] {name}({args})");
                                         io::stdout().flush().ok();
                                     }

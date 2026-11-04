@@ -6,11 +6,15 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 description = "Command-line launcher for Rust Agent Development Kit (ADK-Rust) agents"
-repository = "https://github.com/zavora-ai/adk-rust"
+homepage.workspace = true
+repository.workspace = true
 documentation = "https://docs.rs/adk-cli"
 keywords = ["ai", "agent", "adk", "cli", "launcher"]
 categories = ["command-line-utilities", "development-tools"]
 readme = "README.md"
+
+[package.metadata.docs.rs]
+all-features = true
 
 [lib]
 name = "adk_cli"
@@ -22,11 +26,13 @@ path = "src/main.rs"
 
 [dependencies]
 adk-core.workspace = true
+adk-auth = { workspace = true, features = ["signed-audit"], optional = true }
 adk-agent = { workspace = true, features = ["coding"] }
 adk-devtools.workspace = true
 adk-model.workspace = true
 adk-runner = { workspace = true, features = ["artifacts", "plugins"] }
-adk-server.workspace = true
+# Serve mode mounts the approval inbox and background runs (spec 3.1 §8.2)
+adk-server = { workspace = true, features = ["approvals", "background"] }
 adk-session.workspace = true
 adk-artifact.workspace = true
 adk-tool.workspace = true
@@ -34,18 +40,53 @@ adk-telemetry.workspace = true
 adk-skill.workspace = true
 adk-deploy.workspace = true
 adk-graph = { workspace = true, features = ["time-travel"] }
+# The harness REPL, `code`, `goal`, `ultracode` and `serve` (spec 3.1 §8.1)
+adk-harness = { workspace = true, optional = true }
+# `adk-rust up`, `attach`, `ps`, `top`, `kill`, `suspend`, `resume`, `freeze`, `unfreeze` and
+# `events`: the agent kernel and its control plane (spec 3.2 §8.1)
+adk-kernel = { workspace = true, optional = true }
+adk-browser = { workspace = true, optional = true }
+# `--provider mistralrs`: local inference in process (spec 3.1 §8.1); a heavy build
+adk-mistralrs = { workspace = true, optional = true }
+# The web home on `adk-rust serve` and `adk-rust up` (spec 3.3 §5.1, §10 S1)
+adk-surface = { workspace = true, optional = true, features = ["web"] }
+# `adk-rust --voice`: the harness voice surface (spec 3.1 §7.17); the realtime providers and
+# the WAV codec for `--voice-input`/`--voice-output`
+adk-realtime = { workspace = true, optional = true }
+adk-audio = { workspace = true, optional = true }
+# `adk-rust approvals --server` talks to a served harness's approval inbox
+reqwest = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+# `adk-rust site …` and `adk-rust awp …` (spec 3.5 §7.1, §8.1): the site pipeline, migration
+# and freeze, the AWP 2.0 verifier, conformance kit and keys
+adk-site = { workspace = true, optional = true, features = ["migrate"] }
+adk-awp = { workspace = true, optional = true, features = ["verify"] }
+awp-types = { workspace = true, optional = true }
+# `adk-rust website …` (spec 3.5 §8.1, D-14): the product, served beside the web home
+adk-website = { workspace = true, optional = true }
+# Private JWK key files for `awp keys` (spec 3.5 §7.2, A-I5)
+base64 = { version = "0.22", optional = true }
+zeroize = { version = "1.8.2", optional = true }
+url = { version = "2.5", optional = true }
+# `adk-rust store status|rotate-key` reads harness.db's tables directly
+sqlx = { workspace = true, optional = true, features = ["runtime-tokio", "sqlite"] }
+uuid = { workspace = true, optional = true }
+chrono = { workspace = true, optional = true }
 clap = { version = "4.6", features = ["derive"] }
-rustyline = "18.0"
+rustyline = "19.0"
 tokio = { workspace = true, features = ["full"] }
 anyhow.workspace = true
+async-trait.workspace = true
 futures.workspace = true
 axum = "0.8"
 tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
 serde_json.workspace = true
 serde.workspace = true
 tokio-util = { version = "0.7", features = ["rt"] }
-dirs = "6"
+dirs = "7"
 toml.workspace = true
+thiserror.workspace = true
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 keyring = { version = "3.6.3", default-features = false, features = ["apple-native"] }
@@ -53,29 +94,170 @@ keyring = { version = "3.6.3", default-features = false, features = ["apple-nati
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "3.6.3", default-features = false, features = ["windows-native"] }
 
+# Owner-only DACLs on the session store, the audit signing key, exported memory and the
+# kernel's home files, where Unix uses mode 0600 (spec 3.2 §10 W4); the console without echo
+# for the Windows service's password (§10 W3).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_SystemServices", "Win32_System_Threading"] }
+
 [target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))'.dependencies]
 keyring = { version = "3.6.3", default-features = false, features = ["sync-secret-service", "crypto-rust"] }
 
 [features]
-default = ["gemini"]
+default = ["gemini", "openai", "anthropic", "ollama", "audit", "persist", "harness", "encrypted", "memory-local", "surface", "channels", "tui", "slack", "discord", "matrix"]
 gemini = ["adk-model/gemini"]
 openai = ["adk-model/openai"]
 anthropic = ["adk-model/anthropic"]
 deepseek = ["adk-model/deepseek"]
 groq = ["adk-model/groq"]
 ollama = ["adk-model/ollama"]
-all-providers = ["gemini", "openai", "anthropic", "deepseek", "groq", "ollama"]
+muse = ["adk-model/muse"]
+openrouter = ["adk-model/openrouter"]
+# `--provider opencode` (Zen) and `--provider opencode-go` (Go)
+opencode = ["adk-model/opencode"]
+# `--provider bedrock`: a Bedrock API key, else the AWS credential chain
+bedrock = ["adk-model/bedrock"]
+# `--provider azure-ai`: the deployment at AZURE_AI_ENDPOINT
+azure-ai = ["adk-model/azure-ai"]
+# `--provider mistralrs --model <hf id or .gguf path>`: mistral.rs in process (spec 3.1
+# §8.1). Opt-in: mistral.rs 0.8 with its model loaders is a heavy build; GPU through
+# adk-mistralrs's `cuda` or `metal`.
+mistralrs = ["dep:adk-mistralrs"]
+all-providers = ["gemini", "openai", "anthropic", "deepseek", "groq", "ollama", "muse", "openrouter", "opencode", "bedrock", "azure-ai"]
 # `adk-rust deploy agent-engine`: deploy a BYOC container as a Gemini
 # Enterprise Agent Platform engine (host-side tooling)
 gcp-deploy = ["adk-deploy/gcp"]
+# `adk-rust registry ...`: register self-hosted agents, external MCP servers,
+# and bare endpoints in the Google Agent Registry (host-side tooling)
+vertex-agent-registry = ["adk-tool/vertex-agent-registry"]
 telemetry-otlp = ["adk-telemetry/otlp"]
 # Prompt optimization CLI command (adk optimize)
 optimize = []
+# `adk-rust skills search` / `skills pull`: read-only Vertex AI Skill
+# Registry commands (lifecycle stays with platform tooling)
+vertex-skill-registry = ["adk-skill/vertex-skill-registry"]
 # SQLite checkpointer for graph time-travel commands
 graph-sqlite = ["adk-graph/sqlite"]
+# `adk-rust audit verify` and `audit keygen` for signed audit logs (links aws-lc-rs)
+audit = ["dep:adk-auth"]
+# `adk-rust audit export`: read signed audit logs from SQLite or PostgreSQL
+audit-sql = ["audit", "adk-session/sqlite", "adk-session/postgres"]
+# Sessions, approvals, durable runs, modes and standing rules in SQLite at
+# <config dir>/adk-rust/harness.db
+persist = ["adk-session/sqlite", "adk-harness?/sqlite", "dep:sqlx"]
+# `adk-rust serve --store postgres://…`: sessions, approvals, durable runs, modes, standing
+# rules and plan checkpoints in one PostgreSQL database every replica shares, and
+# `--checkpointer postgres://…` (spec 3.1 §8.2, §7.11, §13 Q2, Q5)
+postgres = ["adk-harness?/postgres", "adk-kernel?/postgres", "adk-session/postgres", "adk-graph/postgres", "dep:sqlx", "sqlx/postgres"]
+# `adk-rust serve --store redis://…`: the same stores on one Redis server, and
+# `--checkpointer redis://…`
+redis = ["adk-harness?/redis", "adk-kernel?/redis", "adk-session/redis"]
+# `--checkpointer mongodb://…`, `neo4j://…` or `firestore://…` (spec 3.1 §7.11, §13 Q5)
+mongodb = ["adk-harness?/mongodb"]
+neo4j = ["adk-harness?/neo4j"]
+firestore = ["adk-harness?/firestore"]
+# `adk-rust` with no subcommand is the harness REPL; `code`, `goal`, `ultracode` and
+# `serve` run on the harness; `sessions`, `rules` and `approvals` manage it (spec 3.1 §8.1);
+# `up` runs it as the agent kernel, with its daily baselines and observations, and `attach`,
+# `ps`, `top`, `kill`, `suspend`, `resume`, `freeze`, `unfreeze`, `events` and `proc` reach
+# the running kernel (spec 3.2 §7.10, §8.1, §13 Q4, Q6)
+harness = ["dep:adk-harness", "dep:adk-kernel", "adk-kernel/proc-baselines", "adk-kernel/webhooks", "adk-harness?/kernel", "adk-harness?/memory-embeddings", "adk-harness?/web", "adk-harness?/mcp", "adk-harness?/hooks", "dep:reqwest", "dep:sha2", "dep:uuid", "dep:chrono"]
+# `--store-key`, `[store] key`, `adk-rust store status|rotate-key`: harness.db sealed under
+# one keyring from the OS keychain, a secret provider or the environment (spec 3.1 §7.12)
+encrypted = ["adk-harness?/encrypted", "adk-session/encrypted-session", "dep:sqlx"]
+# `--pack browser` and `--pack computer-use` (spec 3.1 §7.24): the browser pack over the
+# WebDriver at ADK_WEBDRIVER_URL (default http://localhost:4444); the computer-use pack is
+# library-only, so its feature compiles the classes for a harness built in code.
+browser = ["harness", "adk-harness/browser", "dep:adk-browser"]
+computer-use = ["harness", "adk-harness/computer-use"]
+# The in-process ONNX embedder for long-term memory, the default of a local provider
+# (spec 3.1 §7.15.2, H10); `ort` downloads the onnxruntime binary at build time
+memory-local = ["adk-harness?/memory-embeddings-local"]
+# `--store-key secret:<provider>/<name>` through adk-auth's secret providers
+secrets-gcp = ["dep:adk-auth", "adk-auth/gcp-secrets"]
+secrets-aws = ["dep:adk-auth", "adk-auth/aws-secrets"]
+# Hidden `--model-script` and `--approval-fixture` flags for binary end-to-end tests:
+# a scripted model and a tool that needs approval, no provider key required; with `voice`,
+# `--voice-script` plays a scripted realtime provider
+scripted-model = ["adk-realtime?/scripted"]
+# `adk-rust --voice`: the harness voice surface over Gemini Live or the OpenAI Realtime API
+# (spec 3.1 §7.17, H5); `--voice-input <wav>` and `--voice-output <wav>` need no audio hardware.
+# With `surface`, `serve` and `up` give a harness marked `--pack voice` the home's voice view,
+# and with `tui` (and `voice-desktop`) `--voice` opens the terminal's voice mode (spec 3.3 §5.6)
+voice = ["harness", "adk-harness?/voice", "adk-surface?/voice", "dep:adk-realtime", "adk-realtime/integration", "adk-realtime/gemini", "adk-realtime/openai", "dep:adk-audio"]
+# The web home (spec 3.3 §5.1, §10 S1): `serve` and `up` mount it at `/ui/` with its API under
+# `/api/surface`, over the harness (with `harness`)
+surface = ["dep:adk-surface"]
+# The microphone and the speaker for `--voice` (cpal: audio hardware, ALSA headers on Linux)
+voice-desktop = ["voice", "adk-audio/desktop-audio"]
+# `adk-rust` with no subcommand as the terminal surface of spec 3.3 §5.2, in place of the
+# REPL: full screen on a capable terminal, `--ui inline` in the scrollback, `--output json` for
+# CI; on the running kernel (`--home`, or `--server` with a token) or the harness in process,
+# every decision through the approvals inbox
+tui = ["harness", "surface", "adk-surface/tui", "dep:libc"]
+# Chat (spec 3.3 §5.3): `adk-rust up` starts the Telegram adapter when TELEGRAM_BOT_TOKEN is
+# set, and pairs its accounts beside the kernel's devices. No dependency beyond `surface`.
+channels = ["harness", "surface", "adk-surface/channels", "adk-kernel?/channels"]
+# Slack, Discord and Matrix (spec 3.5 §10 X12): `adk-rust up` starts each when its variables are
+# set (SLACK_APP_TOKEN and SLACK_BOT_TOKEN; DISCORD_BOT_TOKEN; MATRIX_HOMESERVER and
+# MATRIX_ACCESS_TOKEN). None needs an inbound port; WhatsApp's webhook does, so `up` has none.
+slack = ["channels", "adk-surface/slack"]
+# A served site's WhatsApp webhook, on its public edge (`adk-rust website`; spec 3.5 §10 X12).
+whatsapp = ["channels", "adk-surface/whatsapp"]
+discord = ["channels", "adk-surface/discord"]
+matrix = ["channels", "adk-surface/matrix"]
+# The phone (spec 3.3 §5.4): `adk-rust up --home-url https://… --auth-token …` serves the
+# home as an installable app with Web Push from the kernel and "Confirm it's you". Opt-in:
+# its passkey checks link the system's OpenSSL (webauthn-rs).
+mobile = ["surface", "harness", "adk-surface/mobile"]
+# Agent-drawn UI (spec 3.3 §6.1 `genui`, §7.4 rule 5): `serve` and `up` give every harness they
+# host the render tools, so agents draw forms and tables in the person's threads; a form's
+# Send asks the person first. Opt-in, no umbrella feature.
+genui = ["harness", "surface", "adk-surface/genui"]
+# Apps from MCP servers in a thread (spec 3.3 §6.1 `genui-apps`, wave 4 decisions 15–17):
+# `serve` and `up` frame an MCP server's `_meta.ui` app sandboxed on a second loopback
+# listener (or `--apps-origin`), whose tool calls a person decides. Opt-in, no umbrella feature.
+genui-apps = ["genui", "adk-surface/genui-apps"]
+# AWP 2.0 websites (spec 3.5 §7.1, §8.1): `adk-rust site …` drafts, schedules, corrects,
+# withdraws, reverts, builds, publishes, rolls back, migrates and freezes a site on its
+# content repository; `adk-rust awp …` verifies a domain, runs the conformance kit, manages
+# the root and delegated keys, and migrates a 1.x `business.toml`. Opt-in: migration links
+# hickory, image comparison and X.509 parsing.
+website = ["harness", "persist", "surface", "whatsapp", "adk-surface?/website", "dep:adk-website", "dep:adk-site", "dep:adk-awp", "dep:awp-types", "dep:adk-auth", "adk-auth/web-bot-auth", "adk-session/sqlite", "audit", "dep:base64", "dep:zeroize", "dep:url", "dep:uuid", "dep:chrono"]
+# Screen actions people and agents share (spec 3.3 §2 item 7; Experimental): `up` gives every
+# agent it hosts the `verb_*` tools, which always ask first, serves `/api/surface/verbs`, and
+# adds `/snooze` to the terminal attached to it. No dependency beyond `surface`.
+verb-ui = ["surface", "adk-surface/verb-ui"]
+
+# Standard error to terminal.log while the full screen is up (spec 3.3 §5.2, S-I9)
+[target.'cfg(unix)'.dependencies]
+libc = { version = "0.2", optional = true }
 
 [dev-dependencies]
-async-trait.workspace = true
+# The scripted realtime provider the `--voice` end-to-end test writes its script with.
+adk-realtime = { path = "../adk-realtime", features = ["scripted"] }
+# The voice socket `adk-rust up --pack voice` serves (tests/voice_up.rs)
+tokio-tungstenite = "0.29"
+# Paused time for the router timeout test
+tokio = { workspace = true, features = ["full", "test-util"] }
 tower = { version = "0.5", features = ["util"] }
 axum = "0.8"
 google-cloud-auth = { version = "1.8", default-features = false, features = ["default-rustls-provider"] }
+tempfile = "3"
+zip = { workspace = true }
+base64 = "0.22"
+sha2 = "0.10"
+# The software passkey "Speak, glance, stop" confirms with in the web home (spec 3.3 §12 phase 5).
+p256 = { version = "0.13.2", default-features = false, features = ["ecdsa", "std"] }
+base64ct = { version = "1.8", features = ["alloc"] }
+getrandom = "0.3"
+
+[target.'cfg(unix)'.dev-dependencies]
+# openpty for the console end-to-end tests, which drive the binary in a pseudo-terminal
+libc = "0.2"
+# Reads the terminal surface's screen as a terminal would (spec 3.3 §5.2)
+vt100 = "0.16"
+
+# Reads a file's DACL back in the owner-only session store test.
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Security_Authorization"] }

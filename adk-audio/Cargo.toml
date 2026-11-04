@@ -8,9 +8,14 @@ authors.workspace = true
 repository.workspace = true
 documentation = "https://docs.rs/adk-audio"
 readme = "README.md"
+homepage.workspace = true
 description = "Audio intelligence and pipeline orchestration for ADK-Rust agents"
 keywords = ["adk", "audio", "tts", "stt", "speech"]
 categories = ["multimedia::audio", "asynchronous"]
+
+[package.metadata.docs.rs]
+# kokoro needs a system espeak-ng and desktop-audio needs ALSA headers, so both are left out.
+features = ["tts", "stt", "muse", "music", "fx", "mlx", "onnx", "chatterbox", "whisper-onnx", "distil-whisper", "moonshine", "qwen3-tts", "livekit"]
 
 [dependencies]
 # Core (always included)
@@ -30,9 +35,10 @@ pin-project-lite = "0.2"
 
 # Cloud providers (optional)
 reqwest = { workspace = true, features = ["multipart"], optional = true }
+# Meta Muse speech-to-text (`MuseStt`, feature `muse`) over the Muse clients.
+adk-model = { workspace = true, optional = true }
 base64 = { version = "0.22", optional = true }
 adk-gemini = { workspace = true, features = ["interactions"], optional = true }
-adk-model = { workspace = true, optional = true }
 url = "2"
 
 
@@ -54,7 +60,10 @@ url = "2"
 # a C VAD into the dependency graph.
 
 # Local inference (optional)
-ort = { version = "2.0.0-rc.13", optional = true }
+# Pinned exactly: pre-release EPs move between RCs (rc.13 relocated CUDA/CoreML
+# out of `ort::execution_providers` into `ort::ep`), so a floating pre-release
+# breaks every ONNX feature. Code uses the `ort::ep` paths.
+ort = { version = "=2.0.0-rc.13", optional = true }
 tokenizers = { version = "0.22", optional = true }
 hf-hub = { version = "0.5", optional = true }
 
@@ -89,6 +98,8 @@ wiremock = "0.6"
 default = ["tts", "stt"]
 tts = ["dep:reqwest", "dep:base64", "dep:adk-gemini", "dep:adk-model"]
 stt = ["dep:reqwest", "dep:tokio-tungstenite"]
+# `MuseStt`: Meta Muse file and realtime transcription.
+muse = ["stt", "dep:adk-model", "adk-model/muse-realtime"]
 music = ["dep:reqwest"]
 # Built-in DSP processors use no external dependencies.
 fx = []
@@ -127,4 +138,4 @@ all-onnx = ["onnx", "kokoro", "chatterbox", "whisper-onnx", "distil-whisper", "m
 livekit = ["dep:livekit-api", "dep:adk-realtime", "dep:base64"]
 
 # All portable features — safe for `--all-features` and CI on any platform.
-all = ["tts", "stt", "music", "fx", "vad", "streaming", "mlx", "all-onnx", "livekit"]
+all = ["tts", "stt", "muse", "music", "fx", "vad", "streaming", "mlx", "all-onnx", "livekit"]

@@ -19,8 +19,34 @@ use adk_sandbox::{ProcessBackend, SandboxBackend, SandboxError};
 /// Generates arbitrary environment variable names (alphanumeric + underscore).
 #[cfg(not(windows))]
 fn arb_env_key() -> impl Strategy<Value = String> {
-    "[A-Z][A-Z0-9_]{1,15}".prop_filter("avoid PATH and system vars", |k| {
-        !matches!(k.as_str(), "PATH" | "HOME" | "USER" | "SHELL" | "TERM" | "LANG" | "PWD")
+    // Variables a POSIX shell sets or resets at startup, so a wrapper shell may
+    // overwrite the value passed in (e.g. `IFS` becomes " \t\n").
+    "[A-Z][A-Z0-9_]{1,15}".prop_filter("avoid PATH, system and shell-managed vars", |k| {
+        !matches!(
+            k.as_str(),
+            "PATH"
+                | "HOME"
+                | "USER"
+                | "SHELL"
+                | "TERM"
+                | "LANG"
+                | "PWD"
+                | "OLDPWD"
+                | "IFS"
+                | "PS1"
+                | "PS2"
+                | "PS4"
+                | "PPID"
+                | "OPTIND"
+                | "OPTARG"
+                | "LINENO"
+                | "ENV"
+                | "CDPATH"
+                | "SHLVL"
+                | "BASH_ENV"
+                | "HOSTNAME"
+                | "MAILCHECK"
+        )
     })
 }
 
@@ -64,6 +90,8 @@ proptest! {
         let result: Result<(), TestCaseError> = rt.block_on(async {
             let backend = ProcessBackend::default();
             let timeout = Duration::from_millis(timeout_ms);
+            // The sandbox clears the environment; sleep still needs an explicit PATH.
+            let path = std::env::var("PATH").expect("the test environment must provide PATH");
 
             let request = ExecRequest {
                 language: Language::Command,
@@ -71,7 +99,7 @@ proptest! {
                 stdin: None,
                 timeout,
                 memory_limit_mb: None,
-                env: HashMap::new(),
+                env: HashMap::from([("PATH".to_string(), path)]),
             };
 
             let start = std::time::Instant::now();

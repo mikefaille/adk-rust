@@ -17,14 +17,40 @@ ADK-Rust supports eight callback types that intercept different stages of agent 
 | `after_tool_full` | After tool execution (V2 rich) | Inspect/modify tool args and response directly |
 | `on_tool_error` | After tool failure (retries exhausted) | Fallback results, error recovery |
 
+Run-wide hooks (`InvocationHooks`, which a runner's `PluginManager` installs) run the plugins'
+agent, model and tool callbacks ahead of each agent's own, for every agent the run reaches; a
+plugin callback that returns a value skips the agent's callbacks of that kind. They add
+`on_model_error`: it runs when a model call or its response stream fails, and a response it
+returns answers the turn in the failed call's place. See [Plugins](../core/plugins.md).
+
+A [history processor](#history-processors) is not a callback of one request: it rewrites the
+agent's own history before each model call, and the rest of the turn continues from its result.
+
+### When `after_agent` Runs
+
+| How the agent's turn ends | `after_agent` |
+|---------------------------|---------------|
+| The model answers | Runs |
+| A `before_agent` callback answers for the agent | Runs |
+| The agent transfers to another agent | Runs, before the target agent starts |
+| A tool result ends the turn (`skip_summarization`, `escalate`) | Runs |
+| The run is cancelled, the client disconnects, or a `ParallelAgent` sibling escalates | Runs on the Tokio runtime; content it returns is discarded, since nothing reads the stream |
+| A durable worker drops the attempt after losing its lease | Waits for the worker that resumes the run |
+| A tool call is held for confirmation | Waits for the run that resumes the call |
+| The agent fails with an error | Does not run |
+
 ## Callback Types
 
 ### Agent Callbacks
 
 Agent callbacks wrap the entire agent execution cycle.
 
+These aliases are defined in `adk_core` and re-exported by `adk_rust`:
+
 ```rust
-use adk_rust::prelude::*;
+use adk_rust::{CallbackContext, Content, Result};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 // BeforeAgentCallback type signature
@@ -47,7 +73,9 @@ type AfterAgentCallback = Box<
 Model callbacks intercept LLM requests and responses.
 
 ```rust
-use adk_rust::prelude::*;
+use adk_rust::{CallbackContext, LlmRequest, LlmResponse, Result};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 // BeforeModelResult - controls what happens after the callback
@@ -76,17 +104,21 @@ type AfterModelCallback = Box<
 Tool callbacks intercept tool execution.
 
 ```rust
-use adk_rust::prelude::*;
+use adk_rust::{CallbackContext, Content, Result, Tool};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
-// BeforeToolCallback - can skip tool by returning Some(Content)
+// BeforeToolCallback - can skip tool by returning Some(Content); LlmAgent sends
+// text-only content as the call's {"error": "<text>"} function response
 type BeforeToolCallback = Box<
     dyn Fn(Arc<dyn CallbackContext>) 
         -> Pin<Box<dyn Future<Output = Result<Option<Content>>> + Send>> 
     + Send + Sync
 >;
 
-// AfterToolCallback - can modify tool result
+// AfterToolCallback - can modify tool result; LlmAgent sends text-only content
+// as the call's {"result": "<text>"} function response
 type AfterToolCallback = Box<
     dyn Fn(Arc<dyn CallbackContext>) 
         -> Pin<Box<dyn Future<Output = Result<Option<Content>>> + Send>> 
@@ -117,7 +149,17 @@ Callbacks use different return values to control execution flow:
 |-------------|--------|
 | `Ok(None)` | Continue normal execution |
 | `Ok(Some(content))` | Override/skip with provided content |
-| `Err(e)` | Abort execution with error |
+| `Err(e)` | Agent callbacks: abort execution with error. Tool callbacks: answer the call with an error and continue (see below) |
+
+A tool callback's error never ends the run. `LlmAgent` answers the call, by default naming the
+error's component, category, and code but not its message, except for a rejection
+(`ErrorCategory::is_rejection`), whose message is sent cut at 500 characters
+(see [What the model is told](../agents/llm-agent.md#what-the-model-is-told)):
+
+| Callback | Function response on `Err(e)` |
+|----------|-------------------------------|
+| `before_tool` (and runner plugin `before_tool`, enhanced `before_tool_call`) | The tool is not run: `{"error": "tool 'x' was not run: a before-tool callback failed with ..."}` |
+| `after_tool`, `after_tool_full` (and runner plugin `after_tool`, enhanced `after_tool_call`) | The tool already ran, so its result is withheld and the model is told not to call it again: `{"status": "result_withheld", "error": "tool 'x' ran, but its after-tool pipeline failed with ..."}`. The remaining after-tool stages do not run |
 
 ### Model Callbacks
 
@@ -128,6 +170,11 @@ Callbacks use different return values to control execution flow:
 | `Ok(BeforeModelResult::Continue(request))` | Continue with the (possibly modified) request |
 | `Ok(BeforeModelResult::Skip(response))` | Skip model call, use this response instead |
 | `Err(e)` | Abort execution with error |
+
+A modified request changes that model call only: the agent builds the next request of the turn
+from its own history again. A callback that compacts the history repeats the work on every
+request, and its result never carries over. Compaction belongs in a
+[history processor](#history-processors).
 
 **AfterModelCallback** uses `Option<LlmResponse>`:
 
@@ -142,6 +189,72 @@ Callbacks use different return values to control execution flow:
 - **Before agent/tool callbacks**: Return `None` to continue, `Some(content)` to skip
 - **Before model callback**: Return `Continue(request)` to proceed, `Skip(response)` to bypass the model
 - **After callbacks**: Return `None` to keep original, `Some(...)` to replace
+
+## History Processors
+
+A history processor rewrites an `LlmAgent`'s conversation history before each model request of
+a turn, the first included. Its output replaces the history the turn continues from: later
+steps append to it, so a compaction runs once and carries over. The session keeps every event,
+and the next turn builds its history from the session again.
+
+```rust
+use adk_rust::{CallbackContext, Content, Result};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+
+// HistoryProcessor - receives the agent's history and returns its replacement
+type HistoryProcessor = Box<
+    dyn Fn(Arc<dyn CallbackContext>, Vec<Content>)
+        -> Pin<Box<dyn Future<Output = Result<Vec<Content>>> + Send>>
+    + Send + Sync
+>;
+```
+
+| | History processor | `before_model` callback |
+|--|-------------------|-------------------------|
+| Receives | The agent's own history: instructions as `system` contents, the conversation, and the turn's calls and responses, with the call IDs the agent generated for a provider that sent none | The request as built, with what toolsets, enhanced plugins, run hooks and earlier callbacks added |
+| Its result | Replaces the history; later steps of the turn append to it | Is sent once; the next request is built from the history again |
+| Runs | Before each model request, ahead of toolsets, plugins, run hooks and callbacks | Before each model request, after toolsets, enhanced plugins and run hooks |
+| Use it for | Compaction, windows over long tool loops | Per-request material: memories, reminders, caching |
+| `Err(e)` | Ends the turn with the error | Ends the turn with the error |
+
+Processors run in the order added, each receiving the previous one's output. What toolsets,
+plugins, run hooks and `before_model` callbacks add to a request never enters the history, so
+it reaches each request once however the history is compacted.
+
+A provider rejects a function response whose call is not in the request.
+`adk_rust::history::balanced_content_cut` moves a cut back to the nearest point that keeps
+every response with its call:
+
+```rust
+use adk_rust::history::balanced_content_cut;
+use adk_rust::prelude::*;
+use std::sync::Arc;
+
+fn long_running_agent(model: Arc<dyn Llm>) -> Result<LlmAgent> {
+    LlmAgentBuilder::new("long_running_agent")
+        .model(model)
+        .instruction("You reconcile ledgers page by page.")
+        // Past 40 turns, replaces all but about the last 20 with a note.
+        .history_processor(Box::new(|_ctx, history: Vec<Content>| {
+            Box::pin(async move {
+                let (system, turns): (Vec<_>, Vec<_>) =
+                    history.into_iter().partition(|content| content.role == "system");
+                if turns.len() <= 40 {
+                    return Ok(system.into_iter().chain(turns).collect());
+                }
+                let cut = balanced_content_cut(&turns, turns.len() - 20);
+                let note = Content::new("user")
+                    .with_text(format!("({cut} earlier turns were removed.)"));
+                Ok(system.into_iter().chain([note]).chain(turns.into_iter().skip(cut)).collect())
+            })
+        }))
+        .build()
+}
+```
+
+`CodeActAgent` has no history processor.
 
 ## Adding Callbacks to Agents
 
@@ -181,12 +294,13 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
 ## CallbackContext Interface
 
-The `CallbackContext` trait provides access to execution context:
+The `CallbackContext` trait provides access to execution context. These are its methods and
+those of `ReadonlyContext`, which it extends (abridged from `adk_core`):
 
 ```rust
-use adk_rust::prelude::*;
+use adk_rust::{ActingContext, Artifacts, Content, SharedState, State, ToolOutcome};
+use std::sync::Arc;
 
-#[async_trait]
 pub trait CallbackContext: ReadonlyContext {
     /// Access artifact storage (if configured)
     fn artifacts(&self) -> Option<Arc<dyn Artifacts>>;
@@ -196,51 +310,67 @@ pub trait CallbackContext: ReadonlyContext {
     fn tool_outcome(&self) -> Option<ToolOutcome> { None }
 
     /// Name of the tool being executed.
-    /// Available in before-tool and after-tool callbacks via `ToolCallbackContext`.
+    /// Available in before-tool and after-tool callbacks.
     fn tool_name(&self) -> Option<&str> { None }
 
     /// Input arguments for the tool being executed.
-    /// Available in before-tool and after-tool callbacks via `ToolCallbackContext`.
+    /// Available in before-tool and after-tool callbacks.
     fn tool_input(&self) -> Option<&serde_json::Value> { None }
+
+    /// Shared state of a `ParallelAgent` built with `with_shared_state()`.
+    fn shared_state(&self) -> Option<Arc<SharedState>> { None }
 }
 
-// CallbackContext extends ReadonlyContext
-#[async_trait]
 pub trait ReadonlyContext: Send + Sync {
     /// Current invocation ID
     fn invocation_id(&self) -> &str;
-    
+
     /// Name of the current agent
     fn agent_name(&self) -> &str;
-    
+
     /// User ID from session
     fn user_id(&self) -> &str;
-    
+
     /// Application name
     fn app_name(&self) -> &str;
-    
+
     /// Session ID
     fn session_id(&self) -> &str;
-    
+
     /// Current branch (for multi-agent)
     fn branch(&self) -> &str;
-    
+
     /// The user's input content
     fn user_content(&self) -> &Content;
+
+    /// The acting agent and the subject it acts for (see Agent Identity)
+    fn acting_context(&self) -> ActingContext;
+
+    /// Session state, where the runtime exposes it
+    fn state(&self) -> Option<&dyn State> { None }
 }
 ```
 
+`ReadonlyContext` also has `try_app_name`, `try_user_id`, `try_session_id`,
+`try_invocation_id` and `try_identity`, which return the typed identifiers. A context wrapper
+that implements `ReadonlyContext` must forward `acting_context()`, or it reports the derived
+identity. See [Agent Identity](../security/agent-identity.md).
+
 ### ToolOutcome
 
-`ToolOutcome` carries structured metadata about a completed tool execution. It is available via `ctx.tool_outcome()` in after-tool callbacks:
+`ToolOutcome` carries structured metadata about a completed tool execution. It is available via `ctx.tool_outcome()` in after-tool and `on_tool_error` callbacks, and in an enhanced plugin's `after_tool_call`:
 
 ```rust
+use adk_rust::AdkError;
+use std::sync::Arc;
+
 pub struct ToolOutcome {
     pub tool_name: String,
     pub tool_args: serde_json::Value,
     pub success: bool,
     pub duration: std::time::Duration,
-    pub error_message: Option<String>,
+    pub error_message: Option<String>,  // full message, which the model does not see by default
+    pub error: Option<Arc<AdkError>>,   // structured error: `tool.timeout`, `tool.panicked`, or the tool's own
     pub attempt: u32,  // 0-based retry attempt number
 }
 ```
@@ -331,7 +461,7 @@ let agent = LlmAgentBuilder::new("cached_agent")
             // Create cache key from request contents
             let key = format!("{:?}", request.contents);
 
-            // Check cache
+            // Check the cache, which your application fills with responses it has seen
             if let Some(cached) = cache.lock().unwrap().get(&key) {
                 println!("[CACHE] Hit for request");
                 return Ok(BeforeModelResult::Skip(cached.clone()));
@@ -349,43 +479,45 @@ let agent = LlmAgentBuilder::new("cached_agent")
 Inject images or other binary content into LLM requests for multimodal analysis:
 
 ```rust
-use adk_rust::prelude::*;
 use adk_rust::artifact::{ArtifactService, LoadRequest};
+use adk_rust::prelude::*;
 use std::sync::Arc;
 
-// Artifact service with pre-loaded image
-let artifact_service: Arc<dyn ArtifactService> = /* ... */;
-let callback_service = artifact_service.clone();
-
-let agent = LlmAgentBuilder::new("image_analyst")
-    .model(model)
-    .instruction("Describe the image provided by the user.")
-    .before_model_callback(Box::new(move |_ctx, mut request| {
-        let service = callback_service.clone();
-        Box::pin(async move {
-            // Load image from artifact storage
-            if let Ok(response) = service.load(LoadRequest {
-                app_name: "my_app".to_string(),
-                user_id: "user".to_string(),
-                session_id: "session".to_string(),
-                file_name: "user:photo.png".to_string(),
-                version: None,
-            }).await {
-                // Inject image into the user's message
-                if let Some(last_content) = request.contents.last_mut() {
-                    if last_content.role == "user" {
+// `artifact_service` holds an image saved earlier as "user:photo.png"
+fn image_analyst(model: Arc<dyn Llm>, artifact_service: Arc<dyn ArtifactService>) -> Result<LlmAgent> {
+    LlmAgentBuilder::new("image_analyst")
+        .model(model)
+        .instruction("Describe the image provided by the user.")
+        .before_model_callback(Box::new(move |_ctx, mut request| {
+            let service = artifact_service.clone();
+            Box::pin(async move {
+                // Load image from artifact storage
+                if let Ok(response) = service
+                    .load(LoadRequest {
+                        app_name: "my_app".to_string(),
+                        user_id: "user".to_string(),
+                        session_id: "session".to_string(),
+                        file_name: "user:photo.png".to_string(),
+                        version: None,
+                    })
+                    .await
+                {
+                    // Inject image into the user's message
+                    if let Some(last_content) = request.contents.last_mut()
+                        && last_content.role == "user"
+                    {
                         last_content.parts.push(response.part);
                     }
                 }
-            }
 
-            Ok(BeforeModelResult::Continue(request))
-        })
-    }))
-    .build()?;
+                Ok(BeforeModelResult::Continue(request))
+            })
+        }))
+        .build()
+}
 ```
 
-This pattern is essential for multimodal AI because tool responses are JSON text - the model can't "see" images returned by tools. By injecting the image directly into the request, the model receives actual image data.
+This pattern puts image data in the request itself, so the model receives the image rather than a description of it.
 
 ### Response Modification (After Model)
 
@@ -416,7 +548,9 @@ let agent = LlmAgentBuilder::new("filtered_agent")
 
 ### Tool Permission Check (Before Tool)
 
-Validate tool execution permissions:
+Validate tool execution permissions. Tool callbacks run for the tools the agent executes; a
+provider-native tool such as `GoogleSearchTool` runs on the provider's side, so these examples
+use a function tool, `my_tool`:
 
 ```rust
 use adk_rust::prelude::*;
@@ -424,7 +558,7 @@ use std::sync::Arc;
 
 let agent = LlmAgentBuilder::new("permission_agent")
     .model(model)
-    .tool(Arc::new(GoogleSearchTool::new()))
+    .tool(Arc::new(my_tool))
     .before_tool_callback(Box::new(|ctx| {
         Box::pin(async move {
             // Access tool name and input via ToolCallbackContext
@@ -464,7 +598,7 @@ use std::sync::Arc;
 
 let agent = LlmAgentBuilder::new("tool_logged_agent")
     .model(model)
-    .tool(Arc::new(GoogleSearchTool::new()))
+    .tool(Arc::new(my_tool))
     .after_tool_callback(Box::new(|ctx| {
         Box::pin(async move {
             println!("[TOOL LOG] Tool executed for agent: {}", ctx.agent_name());
@@ -509,7 +643,7 @@ let agent = LlmAgentBuilder::new("fallback_agent")
     .build()?;
 ```
 
-The `on_tool_error` callback is invoked after retries are exhausted (if a retry budget is configured). Return `Some(value)` to substitute a fallback, or `None` to let the original error reach the LLM.
+The `on_tool_error` callback is invoked after retries are exhausted (if a retry budget is configured). It receives the error's full message, and `ctx.tool_outcome()` carries the structured `AdkError` in `ToolOutcome::error`. Return `Some(value)` to substitute a fallback, or `None` to send the default error response, which names the error's component, category, and code but not its message unless the agent sets `expose_tool_error_messages(true)`.
 
 ### Rich After-Tool Inspection (V2)
 

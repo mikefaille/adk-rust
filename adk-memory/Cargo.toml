@@ -6,11 +6,15 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 description = "Semantic memory and search for Rust Agent Development Kit (ADK-Rust) agents"
-repository = "https://github.com/zavora-ai/adk-rust"
+homepage.workspace = true
+repository.workspace = true
 documentation = "https://docs.rs/adk-memory"
 keywords = ["ai", "agent", "adk", "memory", "semantic"]
 categories = ["api-bindings", "asynchronous"]
 readme = "README.md"
+
+[package.metadata.docs.rs]
+all-features = true
 
 [dependencies]
 adk-core.workspace = true
@@ -20,17 +24,18 @@ chrono.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 tracing.workspace = true
-sqlx = { version = "0.8", features = ["runtime-tokio", "chrono", "json"], optional = true }
-# 0.4.2 moved its SQLx integration to 0.9, while the workspace uses SQLx 0.8.
-pgvector = { version = "=0.4.1", features = ["sqlx"], optional = true }
+sqlx = { workspace = true, features = ["runtime-tokio", "chrono", "json"], optional = true }
+pgvector = { workspace = true, features = ["sqlx"], optional = true }
 mongodb = { version = "3", optional = true }
 neo4rs = { version = "0.8", optional = true }
+uuid = { workspace = true, optional = true }
 fred = { version = "10", optional = true }
 reqwest = { workspace = true, optional = true }
 google-cloud-auth = { version = "1.8", optional = true, default-features = false, features = ["default-rustls-provider"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt", "macros"] }
+adk-core = { path = "../adk-core", features = ["conformance"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
 proptest = "1.5"
 serde_json.workspace = true
 chrono.workspace = true
@@ -41,13 +46,13 @@ uuid = { version = "1.23", features = ["v4"] }
 default = []
 # Exposes only the EmbeddingProvider trait without heavy DB dependencies
 embedding-trait = []
-sqlite-memory = ["sqlx/sqlite"]
+sqlite-memory = ["dep:sqlx", "sqlx/sqlite"]
 # Knowledge-graph (bi-temporal) memory backend, SQLite-backed.
 # Reuses the SQLite migration runner from the sqlite-memory backend.
 graph-memory = ["sqlite-memory"]
-database-memory = ["sqlx/postgres", "pgvector"]
+database-memory = ["dep:sqlx", "sqlx/postgres", "sqlx/tls-rustls-aws-lc-rs", "dep:pgvector"]
 redis-memory = ["fred"]
 mongodb-memory = ["dep:mongodb"]
-neo4j-memory = ["dep:neo4rs"]
+neo4j-memory = ["dep:neo4rs", "dep:uuid"]
 # Vertex AI Agent Engine Memory Bank backend (memories:generate / memories:retrieve)
 vertex-memory = ["adk-gcp", "google-cloud-auth", "reqwest"]

@@ -1,8 +1,8 @@
 //! Declarative agent definition type.
 //!
 //! `ManagedAgentDef` is the top-level struct that describes an agent declaratively.
-//! It serializes to the CANON §3.1 wire shape and is the input to
-//! `ManagedAgentRuntime::create()`.
+//! It serializes to the agent definition a managed agent service accepts and is the input
+//! to `ManagedAgentRuntime::create()`.
 
 use std::collections::BTreeMap;
 
@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{McpServerConfig, ModelRef, PermissionPolicy, SkillRef, ToolConfig};
 
-/// Declarative agent definition. Serializes to CANON §3.1/§3.6–§3.9.
+/// Declarative agent definition: model, system prompt, tools, MCP servers, skills, and
+/// permission policy, in the service's snake_case wire shape.
 ///
 /// This struct fully describes an agent's configuration: which model to use,
 /// system prompt, available tools, MCP servers, skills, and permission policies.
@@ -24,7 +25,7 @@ use super::{McpServerConfig, ModelRef, PermissionPolicy, SkillRef, ToolConfig};
 /// // Deserialize from JSON (recommended for external callers)
 /// let json = serde_json::json!({
 ///     "name": "my-assistant",
-///     "model": "gemini-2.5-flash",
+///     "model": "gemini-3.7-flash",
 ///     "system": "You are a helpful assistant."
 /// });
 /// let def: ManagedAgentDef = serde_json::from_value(json).unwrap();
@@ -74,7 +75,7 @@ impl ManagedAgentDef {
     /// ```rust
     /// use adk_managed::types::{ManagedAgentDef, ModelRef};
     ///
-    /// let def = ManagedAgentDef::new("my-agent", ModelRef::Shorthand("gemini-2.5-flash".to_string()))
+    /// let def = ManagedAgentDef::new("my-agent", ModelRef::Shorthand("gemini-3.7-flash".to_string()))
     ///     .with_system("You are a helpful assistant.");
     /// ```
     pub fn new(name: impl Into<String>, model: ModelRef) -> Self {
@@ -142,7 +143,7 @@ mod tests {
     use crate::types::{ModelConfig, PermissionMode, Provider};
 
     #[test]
-    fn test_serialize_full_def_matches_canon() {
+    fn test_serialize_full_def_matches_wire_shape() {
         let def = ManagedAgentDef {
             name: "research-agent".to_string(),
             model: ModelRef::Structured {

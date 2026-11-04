@@ -1,6 +1,4 @@
 //! # adk-agent
-#![allow(clippy::result_large_err)]
-#![deny(missing_docs)]
 //!
 //! Agent implementations for ADK (LLM, Custom, Workflow agents).
 //!
@@ -12,64 +10,78 @@
 //! - [`CustomAgent`] - Define custom logic without LLM
 //! - [`SequentialAgent`] - Execute agents in sequence
 //! - [`ParallelAgent`] - Execute agents concurrently, with optional [`SharedState`](adk_core::SharedState) coordination
-//! - [`LoopAgent`] - Iterate until exit condition
+//! - [`LoopAgent`] - Iterate until a sub-agent escalates or the iteration limit is reached
 //! - [`ConditionalAgent`] - Branch based on conditions
+//! - [`LlmConditionalAgent`] - Route to a sub-agent by a model classification
 //! - [`TeamSpec`] - Validate and compile a portable team from existing agents
 //!
-//! ## What's New in 0.6.0
-//!
-//! - **`ParallelAgent::with_shared_state()`**: Opt-in builder method that creates a fresh
-//!   [`SharedState`](adk_core::SharedState) per `run()` invocation, enabling sub-agents to
-//!   exchange data via `set_shared`/`get_shared`/`wait_for_key` through the context chain.
-//! - **`AgentToolContext` delegation**: Tools executed by `LlmAgent` now have access to
-//!   `shared_state()` via the context chain, enabling tool-level coordination in parallel workflows.
-//! - **Tool confirmation**: `LlmAgentBuilder::require_tool_confirmation()` and
-//!   `require_tool_confirmation_for_all()` for human-in-the-loop tool authorization.
+//! `CodeActAgent` (feature `codeact`), `CodingAgent` (feature `coding`), and `AmbientAgent`
+//! (feature `ambient`) are feature-gated.
 //!
 //! ## Quick Start
 //!
 //! ```rust,no_run
-//! use adk_agent::LlmAgentBuilder;
 //! use std::sync::Arc;
 //!
-//! // LLM Agent requires a model (from adk-model)
-//! // let agent = LlmAgentBuilder::new("assistant")
-//! //     .description("Helpful AI assistant")
-//! //     .model(Arc::new(model))
-//! //     .build()?;
+//! use adk_agent::LlmAgentBuilder;
+//! use adk_model::GeminiModel;
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let api_key = std::env::var("GOOGLE_API_KEY")?;
+//! let model = Arc::new(GeminiModel::new(&api_key, "gemini-3.7-flash")?);
+//!
+//! let agent = LlmAgentBuilder::new("assistant")
+//!     .description("Helpful AI assistant")
+//!     .instruction("Be helpful and concise.")
+//!     .model(model)
+//!     .build()?;
+//! # let _ = agent;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ## Workflow Agents
 //!
 //! Combine agents for complex workflows:
 //!
-//! ```rust,ignore
-//! // Sequential: A -> B -> C
-//! let seq = SequentialAgent::new("pipeline", vec![a, b, c]);
+//! ```rust
+//! use std::sync::Arc;
 //!
-//! // Parallel: A, B, C simultaneously
-//! let par = ParallelAgent::new("team", vec![a, b, c]);
+//! use adk_agent::{LoopAgent, ParallelAgent, SequentialAgent};
+//! use adk_core::Agent;
 //!
-//! // Loop: repeat until exit
-//! let loop_agent = LoopAgent::new("iterator", vec![worker]).with_max_iterations(10);
+//! fn workflows(a: Arc<dyn Agent>, b: Arc<dyn Agent>, c: Arc<dyn Agent>) {
+//!     // Sequential: A -> B -> C
+//!     let _seq = SequentialAgent::new("pipeline", vec![a.clone(), b.clone(), c.clone()]);
+//!
+//!     // Parallel: A, B, C simultaneously
+//!     let _par = ParallelAgent::new("team", vec![a, b, c.clone()]);
+//!
+//!     // Loop: repeat until a sub-agent escalates
+//!     let _loop_agent = LoopAgent::new("iterator", vec![c]).with_max_iterations(10);
+//! }
 //! ```
 //!
 //! ## Guardrails (optional)
 //!
-//! Enable the `guardrails` feature for input/output validation:
+//! Enable the `guardrails` feature for input, output, and tool guardrails:
 //!
 //! ```rust,ignore
-//! use adk_agent::{LlmAgentBuilder, guardrails::{GuardrailSet, ContentFilter, PiiRedactor}};
+//! use adk_agent::{LlmAgentBuilder, guardrails::{ContentFilter, GuardrailSet, PiiRedactor}};
 //!
 //! let input_guardrails = GuardrailSet::new()
 //!     .with(ContentFilter::harmful_content())
 //!     .with(PiiRedactor::new());
 //!
 //! let agent = LlmAgentBuilder::new("assistant")
+//!     .model(model)
 //!     .input_guardrails(input_guardrails)
 //!     .build()?;
 //! ```
+#![allow(clippy::result_large_err)]
+#![deny(missing_docs)]
 
+mod acting_agent_context;
 #[cfg(feature = "ambient")]
 pub mod ambient;
 
@@ -81,11 +93,15 @@ pub mod codeact;
 
 pub mod compaction;
 mod custom_agent;
+mod grounding;
 pub mod guardrails;
+mod invocation_hooks;
 mod llm_agent;
+mod requested_call;
 mod skill_shim;
 pub mod team;
 pub mod tool_call_markup;
+mod tool_ledger;
 mod workflow;
 
 pub use adk_core::AfterToolCallbackFull;
@@ -112,6 +128,7 @@ pub use team::{
     WorkflowArchitectureTemplate, analyze_team_execution, validate_team_replay,
 };
 pub use tool_call_markup::{normalize_content, normalize_option_content};
+pub use tool_ledger::held_call_ledger_key;
 pub use workflow::{
     ConditionalAgent, DEFAULT_LOOP_MAX_ITERATIONS, LlmConditionalAgent, LlmConditionalAgentBuilder,
     LoopAgent, ParallelAgent, SequentialAgent,

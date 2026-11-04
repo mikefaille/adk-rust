@@ -249,4 +249,240 @@ mod tests {
             .unwrap();
         assert_eq!(recreated.events().len(), 0);
     }
+
+    /// Collects formatted tracing output so tests can assert on emitted warnings.
+    #[derive(Clone, Default)]
+    struct CapturedLogs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLogs {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+        type Writer = CapturedLogs;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_get_warns_and_skips_undecodable_event() {
+        let logs = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(logs.clone())
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let service = SqliteSessionService::new(":memory:").await.unwrap();
+        service.migrate().await.unwrap();
+        service
+            .create(CreateRequest {
+                app_name: "test_app".to_string(),
+                user_id: "user1".to_string(),
+                session_id: Some("session1".to_string()),
+                state: HashMap::new(),
+            })
+            .await
+            .unwrap();
+
+        let mut kept = Event::new("inv-kept");
+        kept.id = "event-kept".to_string();
+        kept.timestamp = Utc::now();
+        let mut corrupt = Event::new("inv-corrupt");
+        corrupt.id = "event-corrupt".to_string();
+        corrupt.timestamp = kept.timestamp + Duration::seconds(1);
+        service.append_event("session1", kept).await.unwrap();
+        service.append_event("session1", corrupt).await.unwrap();
+
+        sqlx::query("UPDATE events SET actions = 'not json' WHERE id = 'event-corrupt'")
+            .execute(service.pool())
+            .await
+            .unwrap();
+
+        let session = service
+            .get(GetRequest {
+                app_name: "test_app".to_string(),
+                user_id: "user1".to_string(),
+                session_id: "session1".to_string(),
+                num_recent_events: None,
+                after: None,
+            })
+            .await
+            .unwrap();
+
+        let event_ids: Vec<String> = session.events().all().into_iter().map(|e| e.id).collect();
+        assert_eq!(event_ids, vec!["event-kept".to_string()]);
+
+        let output = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+        assert!(output.contains("skipping stored event that failed to deserialize"), "{output}");
+        assert!(output.contains("event.id=event-corrupt"), "{output}");
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_get_ignores_tier_copies_in_session_row() {
+        let service = SqliteSessionService::new(":memory:").await.unwrap();
+        service.migrate().await.unwrap();
+        service
+            .create(CreateRequest {
+                app_name: "test_app".to_string(),
+                user_id: "user1".to_string(),
+                session_id: Some("session1".to_string()),
+                state: HashMap::from([
+                    ("app:theme".to_string(), json!("dark")),
+                    ("topic".to_string(), json!("rust")),
+                ]),
+            })
+            .await
+            .unwrap();
+
+        // Session rows written by earlier releases hold the tiers as of their last write.
+        sqlx::query("UPDATE sessions SET state = ? WHERE session_id = 'session1'")
+            .bind(r#"{"app:theme":"light","app:retired":true,"user:name":"old","topic":"rust"}"#)
+            .execute(service.pool())
+            .await
+            .unwrap();
+
+        let session = service
+            .get(GetRequest {
+                app_name: "test_app".to_string(),
+                user_id: "user1".to_string(),
+                session_id: "session1".to_string(),
+                num_recent_events: None,
+                after: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            session.state().all(),
+            HashMap::from([
+                ("app:theme".to_string(), json!("dark")),
+                ("topic".to_string(), json!("rust")),
+            ])
+        );
+    }
+
+    fn identity(app: &str, user: &str, session: &str) -> adk_core::AdkIdentity {
+        adk_core::AdkIdentity::new(
+            app.try_into().unwrap(),
+            user.try_into().unwrap(),
+            session.try_into().unwrap(),
+        )
+    }
+
+    fn delta_event(key: &str, value: serde_json::Value) -> Event {
+        let mut event = Event::new("inv");
+        event.actions.state_delta.insert(key.to_string(), value);
+        event
+    }
+
+    /// Sessions created before `initial_state` was recorded rewind to their keys that no event
+    /// has written.
+    #[tokio::test]
+    async fn test_sqlite_rewind_of_a_session_without_recorded_initial_state() {
+        let service = SqliteSessionService::new(":memory:").await.unwrap();
+        service.migrate().await.unwrap();
+        assert_eq!(service.schema_version().await.unwrap(), 2);
+        service
+            .create(CreateRequest {
+                app_name: "app".to_string(),
+                user_id: "u1".to_string(),
+                session_id: Some("legacy".to_string()),
+                state: HashMap::from([
+                    ("tier".to_string(), json!("gold")),
+                    ("mode".to_string(), json!("initial")),
+                ]),
+            })
+            .await
+            .unwrap();
+        sqlx::query("UPDATE sessions SET initial_state = NULL WHERE session_id = 'legacy'")
+            .execute(service.pool())
+            .await
+            .unwrap();
+        let id = identity("app", "u1", "legacy");
+        for event in [delta_event("mode", json!("changed")), delta_event("step", json!(1))] {
+            service
+                .append_event_for_identity(AppendEventRequest { identity: id.clone(), event })
+                .await
+                .unwrap();
+        }
+
+        let rewound = service.rewind_steps(&id, 2).await.unwrap();
+        assert_eq!(
+            [rewound.state().get("tier"), rewound.state().get("mode"), rewound.state().get("step")],
+            [Some(json!("gold")), None, None]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_append_by_id_errors_are_typed() {
+        let service = SqliteSessionService::new(":memory:").await.unwrap();
+        service.migrate().await.unwrap();
+
+        let missing = service.append_event("missing", Event::new("inv")).await.unwrap_err();
+        assert_eq!(
+            (missing.category, missing.code),
+            (adk_core::ErrorCategory::NotFound, "session.not_found")
+        );
+
+        for user in ["alice", "bob"] {
+            service
+                .create(CreateRequest {
+                    app_name: "app".to_string(),
+                    user_id: user.to_string(),
+                    session_id: Some("shared".to_string()),
+                    state: HashMap::new(),
+                })
+                .await
+                .unwrap();
+        }
+        let ambiguous = service.append_event("shared", Event::new("inv")).await.unwrap_err();
+        assert_eq!(
+            (ambiguous.category, ambiguous.code),
+            (adk_core::ErrorCategory::InvalidInput, "session.ambiguous_id")
+        );
+    }
+
+    /// Rewinding to an event keeps earlier events that share its timestamp.
+    #[tokio::test]
+    async fn test_sqlite_rewind_keeps_earlier_events_with_the_target_timestamp() {
+        let service = SqliteSessionService::new(":memory:").await.unwrap();
+        service.migrate().await.unwrap();
+        service
+            .create(CreateRequest {
+                app_name: "app".to_string(),
+                user_id: "u1".to_string(),
+                session_id: Some("tied".to_string()),
+                state: HashMap::new(),
+            })
+            .await
+            .unwrap();
+        let id = identity("app", "u1", "tied");
+        let at = Utc::now();
+        let mut ids = Vec::new();
+        for n in 0..4 {
+            let mut event = delta_event("n", json!(n));
+            event.timestamp = at;
+            ids.push(event.id.clone());
+            service
+                .append_event_for_identity(AppendEventRequest { identity: id.clone(), event })
+                .await
+                .unwrap();
+        }
+
+        let rewound = service.rewind(&id, &ids[2]).await.unwrap();
+        let kept: Vec<String> = rewound.events().all().into_iter().map(|e| e.id).collect();
+        assert_eq!(kept, ids[..3]);
+        assert_eq!(rewound.state().get("n"), Some(json!(2)));
+    }
 }

@@ -11,6 +11,8 @@ use crate::guardrail::redact_tool_output;
 use crate::kernel::commands::TransactionLookup;
 use crate::kernel::service::TransactionStore;
 
+use super::caller_identity;
+
 /// JSON parameters accepted by `payments_status_lookup`.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -42,11 +44,19 @@ impl Tool for StatusLookupTool {
         "Look up the current status of a payment transaction by its identifier. Returns a masked summary."
     }
 
+    fn parameters_schema(&self) -> Option<Value> {
+        Some(serde_json::json!({
+            "type": "object",
+            "properties": { "transactionId": { "type": "string" } },
+            "required": ["transactionId"]
+        }))
+    }
+
     fn required_scopes(&self) -> &[&str] {
         CHECKOUT_CREATE_SCOPES
     }
 
-    async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
+    async fn execute(&self, ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
         let params: StatusParams = serde_json::from_value(args).map_err(|err| {
             AdkError::new(
                 ErrorComponent::Tool,
@@ -57,7 +67,7 @@ impl Tool for StatusLookupTool {
         })?;
         let lookup = TransactionLookup {
             transaction_id: TransactionId::from(params.transaction_id),
-            session_identity: None,
+            session_identity: caller_identity(ctx.as_ref()),
         };
         let record = self.transaction_store.get(lookup).await?;
         let response = StatusResponse {

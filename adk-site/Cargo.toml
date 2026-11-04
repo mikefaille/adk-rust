@@ -1,0 +1,120 @@
+[package]
+name = "adk-site"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Site pipeline for ADK-Rust: content model, static generator, launch gate, signed releases, site log and hosts for AWP 2.0 websites"
+homepage.workspace = true
+repository.workspace = true
+documentation = "https://docs.rs/adk-site"
+readme = "README.md"
+keywords = ["adk", "awp", "static-site", "release", "agent"]
+categories = ["web-programming", "asynchronous"]
+include = ["src/**/*", "tests/**/*", "Cargo.toml", "README.md"]
+
+# Spec 3.5 §7.1: the default build carries the content model, the built-in generator, the
+# launch gate, releases, the site log and `DirectoryHost`. External generators and host
+# adapters arrive later as their own features.
+[features]
+default = []
+# Spec 3.5 §7.8 migration: sources, domain claim, sanitiser, feature mapping, freeze, parity,
+# probes and the encrypted legacy archive.
+migrate = [
+    "adk-auth/web-bot-auth",
+    "adk-core/egress-client",
+    "dep:adk-artifact",
+    "dep:adk-guardrail",
+    "dep:aws-lc-rs",
+    "dep:ego-tree",
+    "dep:hickory-resolver",
+    "dep:image-compare",
+    "dep:quick-xml",
+    "dep:reqwest",
+    "dep:similar",
+    "dep:tempfile",
+    "dep:x509-parser",
+    "tokio/io-util",
+    "tokio/net",
+    "tokio/process",
+]
+# Spec 3.5 §7.8 "Hosts": host adapters, each under the host conformance suite. The object
+# store hosts share `ObjectStoreHost` (prefix-and-pointer or in-place layouts).
+host-s3 = ["dep:futures", "dep:hmac", "dep:reqwest"]
+host-gcs = ["dep:futures", "dep:reqwest"]
+host-azure = ["dep:futures", "dep:hmac", "dep:reqwest"]
+host-cloudflare = ["host-s3"]
+host-netlify = ["dep:futures", "dep:reqwest", "dep:sha1"]
+host-github-pages = ["dep:sha1", "tokio/io-util", "tokio/process"]
+host-rsync = ["tokio/io-util", "tokio/process"]
+# Spec 3.5 §7.8 "Generator": external generators run as processes in adk-sandbox with no
+# network, from a project the content model exports to each generator's layout.
+gen-zola = ["dep:adk-sandbox", "minijinja/json", "tokio/process"]
+gen-hugo = ["dep:adk-sandbox", "minijinja/json", "tokio/process"]
+gen-astro = ["dep:adk-sandbox", "minijinja/json", "tokio/process"]
+gen-build-awesome = ["dep:adk-sandbox", "minijinja/json", "tokio/process"]
+# Spec 3.5 §7.8.1 "Machine views": the launch gate runs `awp verify` against the preview
+# (`gate::PreviewVerification`).
+verify = ["adk-awp/verify", "dep:http"]
+
+[dependencies]
+adk-core.workspace = true
+# Release signatures and the site log are adk-auth signed notes over a Merkle log (D-11).
+adk-auth = { workspace = true, features = ["signed-audit"] }
+# The site log's C2SP tiles are written by adk-awp's `signing::log`, one implementation for
+# both crates; the release-delegation gate check verifies key sets with its `signing::keys`.
+adk-awp = { workspace = true, features = ["signing"] }
+awp-types.workspace = true
+async-trait.workspace = true
+base64 = "0.22"
+bytes = "1"
+chrono.workspace = true
+hex.workspace = true
+# The media pipeline: decoding and re-encoding drops every metadata block, location
+# included (spec 3.5 §7.8.2 "Media").
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+minijinja = "2"
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+# CSS references in the third-party resource check.
+regex.workspace = true
+# The launch gate parses generated HTML with an HTML5 parser, not patterns.
+scraper = "0.25"
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml = "0.9"
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs", "sync", "rt", "time"] }
+toml.workspace = true
+tracing.workspace = true
+url = "2.5"
+# Migration (feature `migrate`).
+adk-artifact = { workspace = true, optional = true }
+adk-guardrail = { workspace = true, optional = true }
+aws-lc-rs = { version = "1.18", optional = true }
+ego-tree = { version = "0.10", optional = true }
+hickory-resolver = { version = "0.26", optional = true }
+image-compare = { version = "0.5", optional = true }
+quick-xml = { version = "0.41", optional = true }
+reqwest = { workspace = true, optional = true }
+similar = { version = "3", optional = true }
+tempfile = { version = "3", optional = true }
+x509-parser = { version = "0.18", optional = true }
+# External generators (features `gen-*`): Seatbelt on macOS, bubblewrap on Linux, the
+# restricted token on Windows.
+adk-sandbox = { workspace = true, optional = true, features = ["sandbox-macos", "sandbox-linux", "sandbox-windows"] }
+# Host adapters (features `host-*`).
+futures = { workspace = true, optional = true }
+hmac = { version = "0.12", optional = true }
+sha1 = { version = "0.10", optional = true }
+# `awp verify` against the preview (feature `verify`).
+http = { version = "1", optional = true }
+
+[dev-dependencies]
+axum = "0.8"
+proptest = "1.5"
+tempfile = "3"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+# The `site.release` span test reads spans through a layer (spec 3.5 §7.24).
+tracing-subscriber.workspace = true

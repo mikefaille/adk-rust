@@ -1,107 +1,453 @@
 # adk-model
 
-LLM model integrations for Rust Agent Development Kit (ADK-Rust) with Gemini, OpenAI, OpenRouter, xAI, Anthropic, DeepSeek, Groq, Ollama, Fireworks AI, Together AI, Mistral AI, Perplexity, Cerebras, SambaNova, Amazon Bedrock, and Azure AI Inference.
+LLM provider clients for the Rust Agent Development Kit ([ADK-Rust](https://github.com/zavora-ai/adk-rust)).
+Every client implements the `adk_core::Llm` trait, so agents and runners accept any of them.
 
 [![Crates.io](https://img.shields.io/crates/v/adk-model.svg)](https://crates.io/crates/adk-model)
 [![Documentation](https://docs.rs/adk-model/badge.svg)](https://docs.rs/adk-model)
-[![License](https://img.shields.io/crates/l/adk-model.svg)](LICENSE)
+[![License](https://img.shields.io/crates/l/adk-model.svg)](../LICENSE)
 
-## Overview
+## Providers
 
-`adk-model` provides LLM integrations for the Rust Agent Development Kit ([ADK-Rust](https://github.com/zavora-ai/adk-rust)). Supports all major providers:
+| Provider | Client | Feature | Catalog default model |
+|----------|--------|---------|-----------------------|
+| Google Gemini (AI Studio, Vertex AI) | `GeminiModel` | `gemini` (default) | `gemini-3.7-flash` |
+| OpenAI Chat Completions | `openai::OpenAIClient` | `openai` | `gpt-5.6-terra` |
+| OpenAI Responses API | `openai::OpenAIResponsesClient` | `openai` | `gpt-5.6-terra` |
+| Azure OpenAI | `openai::AzureOpenAIClient` | `openai` | deployment-specific |
+| OpenAI-compatible endpoints | `OpenAICompatible` | `openai` | per preset, see [OpenAI-compatible providers](#openai-compatible-providers) |
+| Anthropic Claude | `anthropic::AnthropicClient` | `anthropic` | `claude-sonnet-5` |
+| DeepSeek | `deepseek::DeepSeekClient` | `deepseek` | `deepseek-flash` |
+| Groq | `groq::GroqClient` | `groq` | `openai/gpt-oss-120b` |
+| Meta Muse | `muse::MuseClient` | `muse` | `muse-spark-1.3` |
+| Ollama (local) | `ollama::OllamaModel` | `ollama` | `qwen3.5` |
+| OpenRouter | `openrouter::OpenRouterClient` | `openrouter` | `qwen/qwen3.7-max` |
+| OpenCode Go and Zen | `opencode::OpenCodeClient` | `opencode` | `deepseek-v4.1-flash` |
+| Amazon Bedrock | `bedrock::BedrockClient` | `bedrock` | account- and region-specific |
+| Azure AI Inference | `azure_ai::AzureAIClient` | `azure-ai` | endpoint-specific |
+| Test doubles | `ScriptedLlm`, `MockLlm` | always available | none |
 
-- **Gemini** - Google's Gemini models (3 Pro, 3 Flash, 2.5 Pro, 2.5 Flash, etc.)
-- **OpenAI** - GPT-5.1, GPT-5, GPT-5 Mini, GPT-4o (legacy)
-- **OpenRouter** - Native chat, responses, routing, discovery, and credits APIs
-- **xAI** - Grok models through the OpenAI-compatible API
-- **Anthropic** - Claude Opus 4.8, Claude Opus 4.7, Claude Sonnet 4.6, Claude Haiku 4.5
-- **DeepSeek** - DeepSeek R1, DeepSeek V3.1, DeepSeek-Chat with thinking mode
-- **Groq** - Ultra-fast inference (LLaMA 3.3, Mixtral, Gemma)
-- **Ollama** - Local LLMs (LLaMA, Mistral, Qwen, Gemma, etc.)
-- **Fireworks AI** - Fast open-model inference (Llama, Mixtral, etc.)
-- **Together AI** - Hosted open models (Llama, CodeLlama, etc.)
-- **Mistral AI** - Mistral cloud models (Mistral Small, Large, etc.)
-- **Perplexity** - Search-augmented LLM (Sonar, etc.)
-- **Cerebras** - Ultra-fast inference (Llama 3.3, etc.)
-- **SambaNova** - Fast inference (Llama 3.3, etc.)
-- **Amazon Bedrock** - AWS-hosted models via IAM auth (Claude, Llama, Mistral, etc.)
-- **Azure AI Inference** - Azure-hosted models (Cohere, Llama, Mistral, etc.)
-- **Streaming** - Real-time response streaming for all providers
-- **Multimodal** - Text, images, audio, video, and PDF input
+The catalog default is what `adk_model::catalog::recommended_model(provider)` returns. The
+catalog also records lifecycle: `catalog::validate_model_selection` rejects model IDs known to
+be retired, such as `gemini-2.0-flash` or `deepseek-chat`, and accepts unknown IDs so new,
+private, and fine-tuned models stay usable.
 
-The crate implements the `Llm` trait from `adk-core`, allowing models to be used interchangeably.
+### Provider identifiers
+
+`ModelProvider` is the canonical list of these providers: one variant for each provider with
+its own client, with the identifier CLIs and configs use, the feature that compiles its client,
+its key variable, and its default model. `adk-rust --provider` takes the same identifiers.
+
+| Identifier | Variant | Feature | Key variable | `default_model()` |
+|------------|---------|---------|--------------|-------------------|
+| `gemini` | `Gemini` | `gemini` | `GOOGLE_API_KEY` or `GEMINI_API_KEY` | `gemini-3.7-flash` |
+| `openai` | `Openai` | `openai` | `OPENAI_API_KEY` | `gpt-5.6-terra` |
+| `anthropic` | `Anthropic` | `anthropic` | `ANTHROPIC_API_KEY` | `claude-sonnet-5` |
+| `deepseek` | `Deepseek` | `deepseek` | `DEEPSEEK_API_KEY` | `deepseek-flash` |
+| `groq` | `Groq` | `groq` | `GROQ_API_KEY` | `openai/gpt-oss-120b` |
+| `ollama` | `Ollama` | `ollama` | none | `qwen3.5` |
+| `muse` | `Muse` | `muse` | `META_API_KEY` or `MODEL_API_KEY` | `muse-spark-1.3` |
+| `openrouter` | `Openrouter` | `openrouter` | `OPENROUTER_API_KEY` | `qwen/qwen3.7-max` |
+| `opencode` | `Opencode` (Zen) | `opencode` | `OPENCODE_API_KEY` | `deepseek-v4.1-flash` |
+| `opencode-go` | `OpencodeGo` (Go) | `opencode` | `OPENCODE_API_KEY` | `deepseek-v4.1-flash` |
+| `bedrock` | `Bedrock` | `bedrock` | `AWS_BEARER_TOKEN_BEDROCK`, optional; else the AWS credential chain | `None` |
+| `azure-ai` | `AzureAi` | `azure-ai` | `AZURE_AI_API_KEY` | `None` |
+
+The OpenAI-compatible presets (`xai`, `fireworks`, `together`, ...) run on `OpenAICompatible`
+and are not variants. `ModelProvider::ALL` covers every feature in `all-providers`, which a
+unit test checks against `Cargo.toml`.
+
+```rust
+use adk_model::ModelProvider;
+
+fn main() -> Result<(), String> {
+    let provider: ModelProvider = "opencode-go".parse()?;
+    assert_eq!(provider.feature(), "opencode");
+    assert_eq!(provider.env_var(), "OPENCODE_API_KEY");
+    assert_eq!(ModelProvider::AzureAi.default_model(), None);
+    Ok(())
+}
+```
 
 ## Installation
 
 ```toml
 [dependencies]
-adk-model = "2.1.0"
+adk-model = "3.0.0"
 ```
 
-Enable provider-specific features as needed:
+The default build includes only Gemini. Enable other providers with features:
 
 ```toml
 [dependencies]
-adk-model = { version = "2.1.0", features = ["openrouter"] }
+adk-model = { version = "3.0.0", features = ["openai", "anthropic"] }
 ```
 
-Or use the meta-crate:
+Or use the umbrella crate:
 
 ```toml
 [dependencies]
-adk-rust = { version = "2.1.0", features = ["models"] }
+adk-rust = { version = "3.0.0", features = ["models"] }
 ```
 
 ## Quick Start
 
-### Gemini (Google)
+The program sends one request to Gemini and prints the answer.
 
 ```rust
+use adk_core::{Content, Llm, LlmRequest};
 use adk_model::GeminiModel;
-use adk_agent::LlmAgentBuilder;
-use std::sync::Arc;
+use futures::StreamExt;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_key = std::env::var("GOOGLE_API_KEY")?;
-    let model = GeminiModel::new(&api_key, "gemini-3.1-pro-preview")?;
+    let model = GeminiModel::new(api_key, "gemini-3.7-flash")?;
 
-    let agent = LlmAgentBuilder::new("assistant")
-        .model(Arc::new(model))
-        .build()?;
-
+    let request = LlmRequest::new(
+        "gemini-3.7-flash",
+        vec![Content::new("user").with_text("Name one planet in a short sentence.")],
+    );
+    let mut responses = model.generate_content(request, false).await?;
+    while let Some(response) = responses.next().await {
+        if let Some(content) = response?.content {
+            for part in &content.parts {
+                if let Some(text) = part.text() {
+                    print!("{text}");
+                }
+            }
+        }
+    }
+    println!();
     Ok(())
 }
 ```
 
-`GeminiModel::from_env(model)` builds the client from the environment: a truthy
-`GOOGLE_GENAI_USE_ENTERPRISE` or `GOOGLE_GENAI_USE_VERTEXAI` (`1` or a
-case-insensitive `true`) selects Vertex AI via Application Default Credentials
-using `GOOGLE_CLOUD_PROJECT` and `GOOGLE_CLOUD_LOCATION` (requires the
-`gemini-vertex` feature); otherwise the Gemini API via `GOOGLE_API_KEY` or
-`GEMINI_API_KEY`.
+Pass `true` as the second argument of `generate_content` to stream partial responses. To use a
+model in an agent, hand it to `adk_agent::LlmAgentBuilder`:
+
+```rust
+use adk_agent::LlmAgentBuilder;
+use adk_model::GeminiModel;
+use std::sync::Arc;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let model = GeminiModel::new(std::env::var("GOOGLE_API_KEY")?, "gemini-3.7-flash")?;
+    let agent = LlmAgentBuilder::new("assistant")
+        .instruction("Answer in one sentence.")
+        .model(Arc::new(model))
+        .build()?;
+    println!("built agent {}", adk_core::Agent::name(&agent));
+    Ok(())
+}
+```
+
+## Provider setup
+
+Each section below builds a client and sends the same request as the Quick Start.
+
+### Gemini
+
+`GeminiModel::new` uses the Gemini API (AI Studio). `GeminiModel::from_env(model)` reads the
+environment instead: when `GOOGLE_GENAI_USE_ENTERPRISE` (or, if that is unset, the deprecated
+`GOOGLE_GENAI_USE_VERTEXAI`) is `1` or a case-insensitive `true`, it builds a Vertex AI client
+from Application Default Credentials with `GOOGLE_CLOUD_PROJECT` and `GOOGLE_CLOUD_LOCATION`,
+which needs the `gemini-vertex` feature; otherwise it uses `GOOGLE_API_KEY` or `GEMINI_API_KEY`.
+
+| Feature | Adds |
+|---------|------|
+| `gemini-vertex` | Vertex AI constructors: `new_google_cloud`, `new_google_cloud_adc`, `new_google_cloud_service_account`, `new_google_cloud_wif`, `new_google_cloud_endpoint` |
+| `gemini-interactions` | `GeminiModel::use_interactions_api(true)`, which drives the same `Llm` calls through the Interactions API (Beta); see [Gemini Interactions](../docs/official_docs/models/gemini-interactions.md) |
+
+A Gemini error object inside a successful response fails the call, a stream that ends without a
+`finishReason` fails with `model.gemini.unfinished_stream`, and a blocked prompt ends the turn
+with `FinishReason::Safety`, instead of reading as an empty answer.
 
 ### OpenAI
 
 ```rust
+use adk_core::{Content, Llm, LlmRequest};
 use adk_model::openai::{OpenAIClient, OpenAIConfig};
-use adk_agent::LlmAgentBuilder;
-use std::sync::Arc;
+use futures::StreamExt;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_key = std::env::var("OPENAI_API_KEY")?;
     let model = OpenAIClient::new(OpenAIConfig::new(api_key, "gpt-5.6-terra"))?;
 
-    let agent = LlmAgentBuilder::new("assistant")
-        .model(Arc::new(model))
-        .build()?;
-
+    let request = LlmRequest::new(
+        "gpt-5.6-terra",
+        vec![Content::new("user").with_text("Name one planet in a short sentence.")],
+    );
+    let mut responses = model.generate_content(request, false).await?;
+    while let Some(response) = responses.next().await {
+        if let Some(content) = response?.content {
+            for part in &content.parts {
+                if let Some(text) = part.text() {
+                    print!("{text}");
+                }
+            }
+        }
+    }
+    println!();
     Ok(())
 }
 ```
 
+Chat Completions rejects function tools on GPT-5.6 and later models while reasoning is on, so
+`OpenAIClient` sends requests that declare tools for those models through the Responses API,
+with `store: false`. Other requests stay on Chat Completions.
+
+`AzureOpenAIClient::new(AzureConfig::new(api_key, api_base, api_version, deployment_id))`
+targets an Azure OpenAI deployment through the same Chat Completions path.
+
+### OpenAI Responses API
+
+`OpenAIResponsesClient` calls `/v1/responses`, which carries reasoning summaries, built-in tools,
+background mode, and conversation state.
+
+```rust
+use adk_core::{Content, Llm, LlmRequest};
+use adk_model::openai::{
+    OpenAIReasoningEffort, OpenAIResponsesClient, OpenAIResponsesConfig, ReasoningSummary,
+};
+use futures::StreamExt;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let api_key = std::env::var("OPENAI_API_KEY")?;
+    let config = OpenAIResponsesConfig::new(api_key, "gpt-5.6-terra")
+        .with_reasoning_summary(ReasoningSummary::Auto);
+    let model = OpenAIResponsesClient::new_with_reasoning_effort(config, OpenAIReasoningEffort::Low)?;
+
+    let request = LlmRequest::new(
+        "gpt-5.6-terra",
+        vec![Content::new("user").with_text("Name one planet in a short sentence.")],
+    );
+    let mut responses = model.generate_content(request, false).await?;
+    while let Some(response) = responses.next().await {
+        if let Some(content) = response?.content {
+            for part in &content.parts {
+                if let Some(text) = part.text() {
+                    print!("{text}");
+                }
+            }
+        }
+    }
+    println!();
+    Ok(())
+}
+```
+
+`OpenAIReasoningEffort` has the values `None`, `Minimal`, `Low`, `Medium`, `High`, `XHigh`, and
+`Max`. GPT-5.6 accepts every value except `Minimal` through the Responses API; Chat Completions
+accepts up to `XHigh`. `OpenAIResponsesConfig::with_reasoning_effort` takes the original
+three-value `ReasoningEffort` (`Low`, `Medium`, `High`).
+
+`OpenAIResponsesClient` uses HTTP unless `with_websocket` (feature `openai-ws`) gives it a
+pooled `openai::WsTransport` for streamed generations; `with_websocket_fallback(true)` sends over
+HTTP only when the WebSocket failed before writing the request. `ResponsesTransport` and
+`OpenAIResponsesConfig::with_transport` were removed in 3.0: the option was never read.
+
+#### Background mode
+
+`extensions["openai"]["background"] = true` submits the response in the background.
+`poll_response` and `cancel_response` take the response ID from
+`provider_metadata["openai"]["response_id"]`.
+
+```rust
+use adk_core::{Content, GenerateContentConfig, Llm, LlmRequest};
+use adk_model::openai::{OpenAIResponsesClient, OpenAIResponsesConfig};
+use futures::StreamExt;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let api_key = std::env::var("OPENAI_API_KEY")?;
+    let client = OpenAIResponsesClient::new(OpenAIResponsesConfig::new(api_key, "gpt-5.6-luna"))?;
+
+    let mut config = GenerateContentConfig::default();
+    config.extensions.insert("openai".into(), serde_json::json!({ "background": true }));
+    let request = LlmRequest::new(
+        "gpt-5.6-luna",
+        vec![Content::new("user").with_text("Summarize the history of Rust in one paragraph.")],
+    )
+    .with_config(config);
+
+    let submitted = client.generate_content(request, false).await?.next().await.ok_or("no response")??;
+    let response_id = submitted
+        .provider_metadata
+        .as_ref()
+        .and_then(|metadata| metadata["openai"]["response_id"].as_str())
+        .ok_or("no response_id")?
+        .to_string();
+
+    let polled = client.poll_response(&response_id).await?;
+    let status = polled.provider_metadata.as_ref().and_then(|metadata| metadata["openai"]["status"].as_str());
+    println!("{response_id}: {status:?}");
+
+    if status != Some("completed") {
+        client.cancel_response(&response_id).await?;
+    }
+    Ok(())
+}
+```
+
+#### Responses API examples
+
+| Example | Shows |
+|---------|-------|
+| [`examples/openai_responses/`](../examples/openai_responses/) | `OpenAIResponsesClient` through `Runner` and `LlmAgent`, with multi-turn sessions |
+| [`examples/openai_ws_minimal/`](../examples/openai_ws_minimal/) | WebSocket transport (`openai-ws`) |
+| [`examples/gemini_ws_outcomes/`](../examples/gemini_ws_outcomes/) | Gemini and Responses WebSocket stream outcomes: abandoned, incomplete, closed, and failed responses, handshake retry |
+| [`examples/openai_background/`](../examples/openai_background/) | Background mode, submit and poll |
+| [`examples/openai_conversations/`](../examples/openai_conversations/) | Conversations API lifecycle (`openai-conversations`) |
+| [`examples/openai_builtin_tools/`](../examples/openai_builtin_tools/) | Built-in tools such as image generation and web search |
+| [`examples/openai_deep_research/`](../examples/openai_deep_research/) | Deep research models |
+| [`examples/openai_open_responses/`](../examples/openai_open_responses/) | Open Responses mode for other Responses-compatible servers |
+
+See the [Responses API guide](../docs/official_docs/models/openai-responses.md).
+`OpenAIResponsesClient::with_provider_name` attributes, prices and labels errors for another
+provider's Open Responses endpoint; `MuseClient` in `MuseApi::Responses` mode uses it.
+
+### Anthropic
+
+```rust
+use adk_core::{Content, Llm, LlmRequest};
+use adk_model::anthropic::{AnthropicClient, AnthropicConfig};
+use futures::StreamExt;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let api_key = std::env::var("ANTHROPIC_API_KEY")?;
+    let model = AnthropicClient::new(AnthropicConfig::new(api_key, "claude-sonnet-5"))?;
+
+    let request = LlmRequest::new(
+        "claude-sonnet-5",
+        vec![Content::new("user").with_text("Name one planet in a short sentence.")],
+    );
+    let mut responses = model.generate_content(request, false).await?;
+    while let Some(response) = responses.next().await {
+        if let Some(content) = response?.content {
+            for part in &content.parts {
+                if let Some(text) = part.text() {
+                    print!("{text}");
+                }
+            }
+        }
+    }
+    println!();
+    Ok(())
+}
+```
+
+`AnthropicConfig` options:
+
+| Option | Effect |
+|--------|--------|
+| `with_max_tokens(n)` | Output-token cap. Without it the client requests 32,000 tokens from Claude 4 and later models and 4,096 from older or unrecognized ones (`catalog::anthropic_default_max_tokens`) |
+| `with_prompt_caching(bool)` | Automatic cache breakpoints on the system prompt and the conversation tail; on by default |
+| `with_prompt_cache_ttl(CacheTtl::one_hour())` | Lifetime of both breakpoints, for prefixes reused more than five minutes apart |
+| `with_thinking_mode(ThinkingMode::Adaptive)` | Adaptive thinking, the thinking mode of Claude 4.6 and later models |
+| `with_thinking_display(ThinkingDisplay::Summarized)` | Returns summarized thinking text; current models omit it by default |
+| `with_effort(Effort)`, `with_fast_mode(bool)`, `with_citations(bool)` | Effort level, fast mode, and citations |
+| `with_request_timeout(Duration)` | Bound on a request, 10 minutes by default |
+| `with_base_url(url)` | Another Messages-compatible endpoint, such as DeepSeek's `https://api.deepseek.com/anthropic` |
+
+`AnthropicClient` also has `count_tokens(&request)`, `list_models()`, `get_model(id)`, and
+`latest_rate_limit_info()`. An unknown content block or stop reason from a newer API version no
+longer fails the turn: the block is skipped with a `warn` log and replayed unchanged on the next
+request, and an unknown stop reason maps to `FinishReason::Other`.
+
+### DeepSeek
+
+```rust
+use adk_core::{Content, Llm, LlmRequest};
+use adk_model::deepseek::DeepSeekClient;
+use futures::StreamExt;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let api_key = std::env::var("DEEPSEEK_API_KEY")?;
+    // `deepseek-flash`; `DeepSeekClient::v4_pro` selects `deepseek-v4-pro` with thinking on.
+    let model = DeepSeekClient::v4_flash(api_key)?;
+
+    let request = LlmRequest::new(
+        "deepseek-flash",
+        vec![Content::new("user").with_text("Name one planet in a short sentence.")],
+    );
+    let mut responses = model.generate_content(request, false).await?;
+    while let Some(response) = responses.next().await {
+        if let Some(content) = response?.content {
+            for part in &content.parts {
+                if let Some(text) = part.text() {
+                    print!("{text}");
+                }
+            }
+        }
+    }
+    println!();
+    Ok(())
+}
+```
+
+Thinking output arrives as `Part::Thinking` from DeepSeek's `reasoning_content`.
+`DeepSeekConfig` sets the thinking mode, `ReasoningEffort::High` or `Max`, and strict tool mode
+(`with_strict_tools`, beta). `DeepSeekClient::chat` and `reasoner` now select `deepseek-flash`
+and `deepseek-v4-pro`: DeepSeek retired `deepseek-chat` and `deepseek-reasoner` on 2026-07-24.
+
+### Groq
+
+```rust
+use adk_core::{Content, Llm, LlmRequest};
+use adk_model::groq::{GroqClient, GroqConfig};
+use futures::StreamExt;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let api_key = std::env::var("GROQ_API_KEY")?;
+    let model = GroqClient::new(GroqConfig::gpt_oss_120b(api_key))?;
+
+    let request = LlmRequest::new(
+        "openai/gpt-oss-120b",
+        vec![Content::new("user").with_text("Name one planet in a short sentence.")],
+    );
+    let mut responses = model.generate_content(request, false).await?;
+    while let Some(response) = responses.next().await {
+        if let Some(content) = response?.content {
+            for part in &content.parts {
+                if let Some(text) = part.text() {
+                    print!("{text}");
+                }
+            }
+        }
+    }
+    println!();
+    Ok(())
+}
+```
+
+`GroqConfig::new(api_key, model)` selects any other Groq model, such as `openai/gpt-oss-20b`.
+
+### Ollama
+
+```rust
+use adk_model::ollama::{OllamaConfig, OllamaModel};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Requires `ollama serve` and `ollama pull qwen3.5`.
+    let model = OllamaModel::new(OllamaConfig::new("qwen3.5"))?;
+    let _ = model;
+    Ok(())
+}
+```
+
+`OllamaConfig::new` targets `http://localhost:11434`; `OllamaConfig::with_host(host, model)`
+targets another server. Streaming works with tool calls. Ollama runs locally, so its responses
+cost zero.
+
 ### OpenRouter
+
+`OpenRouterClient` implements `Llm` for agents and also exposes OpenRouter's native APIs.
 
 ```rust
 use adk_core::{Content, Llm, LlmRequest};
@@ -119,626 +465,278 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let request = LlmRequest::new(
         "qwen/qwen3.7-max",
-        vec![Content::new("user").with_text("Reply in one short sentence.")],
+        vec![Content::new("user").with_text("Name one planet in a short sentence.")],
     );
-    let mut stream = client.generate_content(request, true).await?;
-
-    while let Some(item) = stream.next().await {
-        let _response = item?;
+    let mut responses = client.generate_content(request, false).await?;
+    while let Some(response) = responses.next().await {
+        if let Some(content) = response?.content {
+            for part in &content.parts {
+                if let Some(text) = part.text() {
+                    print!("{text}");
+                }
+            }
+        }
     }
-
-    Ok(())
-}
-```
-
-For native OpenRouter discovery and provider features, call `OpenRouterClient` directly:
-
-```rust
-use adk_model::openrouter::{OpenRouterClient, OpenRouterConfig};
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let api_key = std::env::var("OPENROUTER_API_KEY")?;
-    let client = OpenRouterClient::new(
-        OpenRouterConfig::new(api_key, "qwen/qwen3.7-max")
-            .with_http_referer("https://github.com/zavora-ai/adk-rust")
-            .with_title("ADK-Rust"),
-    )?;
+    println!();
 
     let models = client.list_models().await?;
     let credits = client.get_credits().await?;
-
-    println!("models: {}", models.data.len());
-    println!("credits remaining: {}", credits.data.total_credits - credits.data.total_usage);
+    println!("models: {}", models.len());
+    println!("credits remaining: {}", credits.total_credits - credits.total_usage);
     Ok(())
 }
 ```
 
-### OpenRouter Scope Boundary
+Use the native `OpenRouterClient` methods for model discovery and credits, exact chat or
+responses payloads, routing, fallback, provider preferences, plugins, and built-in tools such as
+web search. The `Llm` adapter supports streaming, tool calling, reasoning parts, and multimodal
+requests, takes OpenRouter-specific tuning through `OpenRouterRequestOptions`, and maps responses
+into the generic `LlmResponse` shape. The [`examples/openrouter/`](../examples/openrouter/) crate
+and the `adk-model` examples `openrouter_chat`, `openrouter_responses`, `openrouter_adapter`, and
+`openrouter_discovery` call the live API.
 
-Use the native `OpenRouterClient` APIs when you need:
+### OpenCode
 
-- model discovery or credits
-- exact chat or responses payloads
-- OpenRouter routing, fallback, provider preferences, or plugins
-- built-in tools such as web search
-- raw provider metadata and annotations
-
-Use the generic `Llm` adapter when you need OpenRouter inside ADK agents and runners. The adapter
-supports streaming, tool calling, reasoning parts, multimodal requests, and OpenRouter-specific
-request tuning through `OpenRouterRequestOptions`, but it intentionally maps provider-native
-responses into the generic `LlmRequest` and `LlmResponse` shape.
-
-For live end-to-end validation and agentic examples, see:
-
-- `examples/openrouter`
-- `adk-model/examples/openrouter_chat.rs`
-- `adk-model/examples/openrouter_responses.rs`
-- `adk-model/examples/openrouter_adapter.rs`
-- `adk-model/examples/openrouter_discovery.rs`
-
-### OpenAI Responses API
-
-The [Responses API](https://platform.openai.com/docs/api-reference/responses) (`/v1/responses`) is OpenAI's recommended endpoint for their latest models, including reasoning models with summaries and built-in tools.
+The `opencode` feature adds `OpenCodeClient`, which picks Chat Completions, Responses, Anthropic
+Messages, or Gemini `generateContent` from the model ID and sends the application's
+`User-Agent` and `x-opencode-session` headers with every request.
 
 ```rust
-use adk_model::openai::{OpenAIResponsesClient, OpenAIResponsesConfig};
-use adk_agent::LlmAgentBuilder;
-use std::sync::Arc;
+use adk_model::opencode::{OpenCodeClient, OpenCodeConfig, OpenCodeService};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let api_key = std::env::var("OPENCODE_API_KEY")?;
+    let model = OpenCodeClient::new(
+        OpenCodeConfig::new(OpenCodeService::Go, api_key, "deepseek-v4.1-flash")
+            .with_user_agent("my-coding-agent/1.0")
+            .with_session_id("conversation-42"),
+    )?;
+    println!("{:?}", model.api());
+    Ok(())
+}
+```
+
+See the [OpenCode guide](../docs/official_docs/models/opencode.md) for the routing table.
+
+### OpenAI-compatible providers
+
+`OpenAICompatible` serves any OpenAI-compatible Chat Completions endpoint. Presets on
+`OpenAICompatibleConfig` set the base URL and provider name; all of them need only the `openai`
+feature.
+
+| Provider | Preset | Catalog default model |
+|----------|--------|-----------------------|
+| xAI | `OpenAICompatibleConfig::xai` | `grok-4.6` |
+| Fireworks AI | `OpenAICompatibleConfig::fireworks` | `accounts/fireworks/models/kimi-k2p6` |
+| Together AI | `OpenAICompatibleConfig::together` | `MiniMaxAI/MiniMax-M2.7` |
+| Mistral AI | `OpenAICompatibleConfig::mistral` | `mistral-medium-latest` |
+| Perplexity | `OpenAICompatibleConfig::perplexity` | `sonar-pro` |
+| Cerebras | `OpenAICompatibleConfig::cerebras` | `gpt-oss-120b` |
+| SambaNova | `OpenAICompatibleConfig::sambanova` | `gpt-oss-120b` |
+| OrcaRouter | `OpenAICompatibleConfig::orcarouter` | none; model IDs carry a vendor prefix such as `openai/gpt-5.6-terra` |
+| Cheaper Inference | `OpenAICompatibleConfig::cheaper_inference` | none; model IDs are bare, such as `gpt-5.4-mini` |
+| API Route | `OpenAICompatibleConfig::api_route` | none; `GET /v1/models` lists the IDs a key can use |
+| MiniMax | `OpenAICompatibleConfig::minimax` | `MiniMax-M2.7` |
+| Zhipu AI | `OpenAICompatibleConfig::zhipu` | `glm-5.2` |
+| Baidu ERNIE (Qianfan) | `OpenAICompatibleConfig::baidu` | `ernie-5.1` |
+| Cohere | `OpenAICompatibleConfig::cohere` | `command-a-plus-05-2026` |
+| ByteDance Doubao (Volcano Engine Ark) | `OpenAICompatibleConfig::bytedance` | none; deployment-specific |
+| Gemini (OpenAI-compatible endpoint) | `OpenAICompatibleConfig::gemini` | `gemini-3.7-flash` |
+
+```rust
+use adk_core::{Content, Llm, LlmRequest};
+use adk_model::{OpenAICompatible, OpenAICompatibleConfig};
+use futures::StreamExt;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let api_key = std::env::var("OPENAI_API_KEY")?;
-    let config = OpenAIResponsesConfig::new(api_key, "gpt-5.6-terra");
-    let model = OpenAIResponsesClient::new(config)?;
+    let api_key = std::env::var("XAI_API_KEY")?;
+    let model = OpenAICompatible::new(OpenAICompatibleConfig::xai(api_key, "grok-4.6"))?;
 
-    let agent = LlmAgentBuilder::new("assistant")
-        .model(Arc::new(model))
-        .build()?;
-
+    let request = LlmRequest::new(
+        "grok-4.6",
+        vec![Content::new("user").with_text("Name one planet in a short sentence.")],
+    );
+    let mut responses = model.generate_content(request, false).await?;
+    while let Some(response) = responses.next().await {
+        if let Some(content) = response?.content {
+            for part in &content.parts {
+                if let Some(text) = part.text() {
+                    print!("{text}");
+                }
+            }
+        }
+    }
+    println!();
     Ok(())
 }
 ```
 
-For reasoning models with summaries:
-
-```rust
-use adk_model::openai::{
-    OpenAIResponsesClient, OpenAIResponsesConfig,
-    ReasoningEffort, ReasoningSummary,
-};
-
-let config = OpenAIResponsesConfig::new(api_key, "o4-mini")
-    .with_reasoning_effort(ReasoningEffort::Medium)
-    .with_reasoning_summary(ReasoningSummary::Detailed);
-let model = OpenAIResponsesClient::new(config)?;
-```
-
-See the [full Responses API documentation](../docs/official_docs/models/openai-responses.md) and the `examples/openai_responses/` example for a complete 7-scenario demo.
-
-#### Background Mode & Cancellation
-
-For long-running requests (deep research, complex reasoning), use background mode and polling:
-
-```rust
-// Submit with background: true
-let mut gen_config = GenerateContentConfig::default();
-gen_config.extensions.insert("openai".into(), serde_json::json!({ "background": true }));
-
-// Poll for completion
-let response = client.poll_response("resp_abc123").await?;
-
-// Cancel a running background response
-let cancelled = client.cancel_response("resp_abc123").await?;
-```
-
-#### Additional Responses API Examples
-
-Six standalone example crates demonstrate specific features:
-
-| Example | Feature |
-|---------|---------|
-| `examples/openai_ws_minimal/` | WebSocket transport (low-latency) |
-| `examples/openai_background/` | Background mode (submit & poll) |
-| `examples/openai_conversations/` | Conversations API lifecycle |
-| `examples/openai_builtin_tools/` | Built-in tools (image gen, web search) |
-| `examples/openai_deep_research/` | Deep research models (auto-background) |
-| `examples/openai_open_responses/` | Open Responses (provider-agnostic) |
-
-#### OpenAI Reasoning Effort
-
-For current reasoning models, use the complete OpenAI reasoning vocabulary:
-
-```rust
-use adk_model::openai::{
-    OpenAIReasoningEffort, OpenAIResponsesClient, OpenAIResponsesConfig,
-};
-
-let config = OpenAIResponsesConfig::new(api_key, "gpt-5.6-terra");
-let model = OpenAIResponsesClient::new_with_reasoning_effort(
-    config,
-    OpenAIReasoningEffort::Max,
-)?;
-```
-
-Available values are `None`, `Minimal`, `Low`, `Medium`, `High`, `XHigh`, and
-`Max`. Model and API support varies: GPT-5.6 supports every value except
-`Minimal` through the Responses API, while Chat Completions supports up to
-`XHigh`.
-The original `ReasoningEffort::{Low, Medium, High}` configuration remains
-available for backward compatibility.
-
-### Anthropic (Claude)
-
-```rust
-use adk_model::anthropic::{AnthropicClient, AnthropicConfig};
-use adk_agent::LlmAgentBuilder;
-use std::sync::Arc;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let api_key = std::env::var("ANTHROPIC_API_KEY")?;
-    let model = AnthropicClient::new(AnthropicConfig::new(api_key, "claude-sonnet-5"))?;
-
-    let agent = LlmAgentBuilder::new("assistant")
-        .model(Arc::new(model))
-        .build()?;
-
-    Ok(())
-}
-```
-
-#### Anthropic Advanced Features
-
-```rust
-use adk_model::anthropic::{AnthropicClient, AnthropicConfig, ThinkingMode};
-
-// Current Claude models use adaptive thinking rather than token budgets.
-let config = AnthropicConfig::new(api_key, "claude-sonnet-5")
-    .with_thinking_mode(ThinkingMode::Adaptive)
-    .with_prompt_caching(true)
-    .with_beta_feature("prompt-caching-2024-07-31");
-let client = AnthropicClient::new(config)?;
-
-// Token counting
-let count = client.count_tokens(&request).await?;
-
-// Model discovery
-let models = client.list_models().await?;
-let info = client.get_model("claude-sonnet-5").await?;
-
-// Rate limit inspection
-let rate_info = client.latest_rate_limit_info().await;
-```
-
-### DeepSeek
-
-```rust
-use adk_model::deepseek::{DeepSeekClient, DeepSeekConfig};
-use adk_agent::LlmAgentBuilder;
-use std::sync::Arc;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let api_key = std::env::var("DEEPSEEK_API_KEY")?;
-
-    // Standard chat model
-    let model = DeepSeekClient::chat(api_key)?;
-
-    // Or use the reasoner model with chain-of-thought
-    // let model = DeepSeekClient::reasoner(api_key)?;
-
-    let agent = LlmAgentBuilder::new("assistant")
-        .model(Arc::new(model))
-        .build()?;
-
-    Ok(())
-}
-```
-
-### Groq (Ultra-Fast)
-
-```rust
-use adk_model::groq::{GroqClient, GroqConfig};
-use adk_agent::LlmAgentBuilder;
-use std::sync::Arc;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let api_key = std::env::var("GROQ_API_KEY")?;
-    let model = GroqClient::new(GroqConfig::gpt_oss_120b(api_key))?;
-
-    let agent = LlmAgentBuilder::new("assistant")
-        .model(Arc::new(model))
-        .build()?;
-
-    Ok(())
-}
-```
-
-### Ollama (Local)
-
-```rust
-use adk_model::ollama::{OllamaModel, OllamaConfig};
-use adk_agent::LlmAgentBuilder;
-use std::sync::Arc;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Requires: ollama serve && ollama pull llama3.2
-    let model = OllamaModel::new(OllamaConfig::new("llama3.2"))?;
-
-    let agent = LlmAgentBuilder::new("assistant")
-        .model(Arc::new(model))
-        .build()?;
-
-    Ok(())
-}
-```
-
-### Fireworks AI
-
-```rust
-use adk_model::fireworks::{FireworksClient, FireworksConfig};
-use adk_agent::LlmAgentBuilder;
-use std::sync::Arc;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let api_key = std::env::var("FIREWORKS_API_KEY")?;
-    let model = FireworksClient::new(FireworksConfig::new(
-        api_key, "accounts/fireworks/models/llama-v3p1-8b-instruct",
-    ))?;
-
-    let agent = LlmAgentBuilder::new("assistant")
-        .model(Arc::new(model))
-        .build()?;
-
-    Ok(())
-}
-```
-
-### Together AI
-
-```rust
-use adk_model::together::{TogetherClient, TogetherConfig};
-use adk_agent::LlmAgentBuilder;
-use std::sync::Arc;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let api_key = std::env::var("TOGETHER_API_KEY")?;
-    let model = TogetherClient::new(TogetherConfig::new(
-        api_key, "meta-llama/Llama-3.3-70B-Instruct-Turbo",
-    ))?;
-
-    let agent = LlmAgentBuilder::new("assistant")
-        .model(Arc::new(model))
-        .build()?;
-
-    Ok(())
-}
-```
-
-### Mistral AI
-
-```rust
-use adk_model::mistral::{MistralClient, MistralConfig};
-use adk_agent::LlmAgentBuilder;
-use std::sync::Arc;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let api_key = std::env::var("MISTRAL_API_KEY")?;
-    let model = MistralClient::new(MistralConfig::new(api_key, "mistral-small-latest"))?;
-
-    let agent = LlmAgentBuilder::new("assistant")
-        .model(Arc::new(model))
-        .build()?;
-
-    Ok(())
-}
-```
-
-### Perplexity
-
-```rust
-use adk_model::perplexity::{PerplexityClient, PerplexityConfig};
-use adk_agent::LlmAgentBuilder;
-use std::sync::Arc;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let api_key = std::env::var("PERPLEXITY_API_KEY")?;
-    let model = PerplexityClient::new(PerplexityConfig::new(api_key, "sonar-pro"))?;
-
-    let agent = LlmAgentBuilder::new("assistant")
-        .model(Arc::new(model))
-        .build()?;
-
-    Ok(())
-}
-```
-
-### Cerebras
-
-```rust
-use adk_model::cerebras::{CerebrasClient, CerebrasConfig};
-use adk_agent::LlmAgentBuilder;
-use std::sync::Arc;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let api_key = std::env::var("CEREBRAS_API_KEY")?;
-    let model = CerebrasClient::new(CerebrasConfig::new(api_key, "gpt-oss-120b"))?;
-
-    let agent = LlmAgentBuilder::new("assistant")
-        .model(Arc::new(model))
-        .build()?;
-
-    Ok(())
-}
-```
-
-### SambaNova
-
-```rust
-use adk_model::sambanova::{SambaNovaClient, SambaNovaConfig};
-use adk_agent::LlmAgentBuilder;
-use std::sync::Arc;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let api_key = std::env::var("SAMBANOVA_API_KEY")?;
-    let model = SambaNovaClient::new(SambaNovaConfig::new(api_key, "gpt-oss-120b"))?;
-
-    let agent = LlmAgentBuilder::new("assistant")
-        .model(Arc::new(model))
-        .build()?;
-
-    Ok(())
-}
-```
+`OpenAICompatibleConfig::new(api_key, model).with_base_url(url).with_provider_name(name)` targets
+any other endpoint, such as vLLM. Reasoning history is not replayed by default:
+`with_reasoning_replay(true)` replays `Part::Thinking` through `reasoning_content`, and
+`with_reasoning_replay_field(ReasoningReplayField::Reasoning)` uses the `reasoning` field that
+newer vLLM deployments read. Thinking stays separate from the visible message text either way.
 
 ### Amazon Bedrock
 
 ```rust
 use adk_model::bedrock::{BedrockClient, BedrockConfig};
-use adk_agent::LlmAgentBuilder;
-use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Uses AWS IAM credentials. Model IDs are account- and region-specific.
+    // Credentials come from the AWS credential chain. Model IDs are account- and region-specific.
     let model_id = std::env::var("BEDROCK_MODEL")?;
-    let config = BedrockConfig::new("us-east-1", model_id);
-    let model = BedrockClient::new(config).await?;
-
-    let agent = LlmAgentBuilder::new("assistant")
-        .model(Arc::new(model))
-        .build()?;
-
+    let model = BedrockClient::new(BedrockConfig::new("us-east-1", model_id)).await?;
+    let _ = model;
     Ok(())
 }
 ```
+
+`BedrockClient::new_with_api_key` uses a Bedrock bearer key instead of the credential chain, and
+`BedrockClient::from_client` wraps an `aws_sdk_bedrockruntime::Client` the application built.
 
 ### Azure AI Inference
 
 ```rust
 use adk_model::azure_ai::{AzureAIClient, AzureAIConfig};
-use adk_agent::LlmAgentBuilder;
-use std::sync::Arc;
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_key = std::env::var("AZURE_AI_API_KEY")?;
-    let config = AzureAIConfig::new(
+    let model = AzureAIClient::new(AzureAIConfig::new(
         "https://my-endpoint.eastus.inference.ai.azure.com",
         api_key,
         "meta-llama-3.1-8b-instruct",
-    );
-    let model = AzureAIClient::new(config)?;
-
-    let agent = LlmAgentBuilder::new("assistant")
-        .model(Arc::new(model))
-        .build()?;
-
+    ))?;
+    let _ = model;
     Ok(())
 }
 ```
 
-## Supported Models
+## Usage attribution and cost
 
-### Google Gemini
+Every provider sets `LlmResponse::provider` and `LlmResponse::model`, and fills
+`UsageMetadata::cost` (USD) from `pricing::PricingCatalog` when the provider reports no cost.
+Cached prompt tokens are billed once, Anthropic cache writes by TTL, and long-context tiers apply
+where the vendor publishes them. The catalog carries Gemini, OpenAI, Anthropic, DeepSeek, Groq,
+xAI, and Mistral list prices, verified on `pricing::PRICING_EFFECTIVE_DATE`; local Ollama models
+cost zero, and unpriced models keep `cost: None`. Built-in tool uses the provider reports (web
+search, file search, Google Search grounding) land in `UsageMetadata::builtin_tool_uses`, and their
+published per-use fees are added to `cost`.
 
-| Model | Description |
-|-------|-------------|
-| `gemini-3.7-flash` | Current balanced default (1M context) |
-| `gemini-3.6-flash` | Previous balanced generation (1M context) |
-| `gemini-3.5-flash-lite` | Cost-efficient high-volume model (1M context) |
-| `gemini-3.1-pro-preview` | Preview reasoning model (2M context) |
+A token count a provider reports as `null` or leaves out reads as zero (`None` for the
+breakdowns), and a missing total is the sum of the reported counts. `UsageMetadata::provider_usage`
+holds the provider's usage object as received.
 
-See [Gemini models documentation](https://ai.google.dev/gemini-api/docs/models/gemini) for the full list.
+```rust
+use adk_core::UsageMetadata;
+use adk_model::PricingCatalog;
 
-### OpenAI
-
-| Model | Description |
-|-------|-------------|
-| `gpt-5.6-terra` | Balanced default for agents |
-| `gpt-5.6-sol` | Flagship reasoning and coding |
-| `gpt-5.6-luna` | Cost-efficient high-volume model |
-
-See [OpenAI models documentation](https://platform.openai.com/docs/models) for the full list.
-
-### Anthropic Claude
-
-| Model | Description |
-|-------|-------------|
-| `claude-sonnet-5` | Balanced production default (1M context) |
-| `claude-opus-5` | Flagship autonomous-agent capability (1M context) |
-| `claude-fable-5` | Premium creative and long-form work (1M context) |
-| `claude-haiku-4-5` | Cost-efficient previous generation |
-
-See [Anthropic models documentation](https://docs.anthropic.com/claude/docs/models-overview) for the full list.
-
-### DeepSeek
-
-| Model | Description |
-|-------|-------------|
-| `deepseek-v4-flash` | Fast balanced default |
-| `deepseek-v4-pro` | Advanced reasoning |
-
-**Features:**
-- **Thinking Mode** - Chain-of-thought reasoning with `<thinking>` tags
-- **Context Caching** - Automatic KV cache for repeated prefixes (10x cost reduction)
-- **Tool Calling** - Full function calling support
-
-See [DeepSeek API documentation](https://api-docs.deepseek.com/) for the full list.
-
-### Groq
-
-| Model | Description |
-|-------|-------------|
-| `openai/gpt-oss-120b` | Production default via Groq LPU |
-| `openai/gpt-oss-20b` | Lower-latency economy model |
-
-**Features:**
-- **Ultra-Fast** - LPU-based inference (fastest in the industry)
-- **Tool Calling** - Full function calling support
-- **Large Context** - Up to 128K tokens
-
-See [Groq documentation](https://console.groq.com/docs/models) for the full list.
-
-### Ollama (Local)
-
-| Model | Description |
-|-------|-------------|
-| `llama3.3:70b` | Llama 3.3 70B - Latest for local deployment (128K context) |
-| `llama3.2:3b` | Efficient small model |
-| `llama3.1:8b` | Popular balanced model |
-| `deepseek-r1:14b` | Distilled reasoning model |
-| `deepseek-r1:32b` | Larger distilled reasoning model |
-| `qwen3:14b` | Strong multilingual and coding |
-| `qwen2.5:7b` | Efficient multilingual model (recommended for tool calling) |
-| `mistral:7b` | Fast and capable |
-| `mistral-nemo:12b` | Enhanced Mistral variant (128K context) |
-| `gemma3:9b` | Google's efficient open model |
-| `devstral:24b` | Optimized for coding tasks |
-| `codellama:13b` | Code-focused Llama variant |
-
-**Features:**
-- **Local Inference** - No API key required
-- **Privacy** - Data stays on your machine
-- **Tool Calling** - Full function calling support (uses non-streaming for reliability)
-- **MCP Integration** - Connect to MCP servers for external tools
-
-See [Ollama library](https://ollama.com/library) for all available models.
-
-### New Providers
-
-| Provider | Feature Flag | Default Model | API Key Env Var |
-|----------|-------------|---------------|-----------------|
-| Fireworks AI | `openai` preset | `accounts/fireworks/models/kimi-k2p6` | `FIREWORKS_API_KEY` |
-| Together AI | `openai` preset | `MiniMaxAI/MiniMax-M2.7` | `TOGETHER_API_KEY` |
-| Mistral AI | `openai` preset | `mistral-medium-latest` | `MISTRAL_API_KEY` |
-| Perplexity | `openai` preset | `sonar-pro` | `PERPLEXITY_API_KEY` |
-| Cerebras | `openai` preset | `gpt-oss-120b` | `CEREBRAS_API_KEY` |
-| SambaNova | `openai` preset | `gpt-oss-120b` | `SAMBANOVA_API_KEY` |
-| Amazon Bedrock | `bedrock` | account/region-specific | AWS IAM credentials |
-| Azure AI Inference | `azure-ai` | (endpoint-specific) | `AZURE_AI_API_KEY` |
-
-## Features
-
-- **Streaming** - Real-time response streaming for all providers
-- **Tool Calling** - Function calling support across all providers
-- **Async** - Full async/await support with backpressure
-- **Retry** - Automatic retry with exponential backoff
-- **Generation Config** - Temperature, top_p, top_k, max_tokens
-- **Token Usage Telemetry** - Automatic `gen_ai.usage.*` span recording for all providers via `adk-telemetry`
-
-## Environment Variables
-
-```bash
-# Google Gemini
-GOOGLE_API_KEY=your-google-api-key
-
-# OpenAI
-OPENAI_API_KEY=your-openai-api-key
-
-# xAI
-XAI_API_KEY=your-xai-api-key
-
-# Anthropic
-ANTHROPIC_API_KEY=your-anthropic-api-key
-
-# DeepSeek
-DEEPSEEK_API_KEY=your-deepseek-api-key
-
-# Groq
-GROQ_API_KEY=your-groq-api-key
-
-# Fireworks AI
-FIREWORKS_API_KEY=your-fireworks-api-key
-
-# Together AI
-TOGETHER_API_KEY=your-together-api-key
-
-# Mistral AI
-MISTRAL_API_KEY=your-mistral-api-key
-
-# Perplexity
-PERPLEXITY_API_KEY=your-perplexity-api-key
-
-# Cerebras
-CEREBRAS_API_KEY=your-cerebras-api-key
-
-# SambaNova
-SAMBANOVA_API_KEY=your-sambanova-api-key
-
-# Azure AI Inference
-AZURE_AI_API_KEY=your-azure-ai-api-key
-
-# Amazon Bedrock (uses AWS IAM credentials)
-AWS_ACCESS_KEY_ID=your-access-key
-AWS_SECRET_ACCESS_KEY=your-secret-key
-AWS_REGION=us-east-1
-
-# Ollama (no key needed, just start the server)
-# ollama serve
+fn main() {
+    let usage = UsageMetadata { prompt_token_count: 1_000_000, ..Default::default() };
+    let cost = PricingCatalog::standard().cost_usd(Some("openai"), "gpt-4.1-2025-04-14", &usage);
+    assert_eq!(cost, Some(2.0));
+}
 ```
 
-## Feature Flags
+`Llm::max_cost_micro_usd` gives an upper bound on a request's cost from the same catalog; a run
+with a spend cap refuses a model call that has no bound.
 
-Enable specific providers with feature flags:
+## Behaviour shared by all clients
 
-```toml
-[dependencies]
-# All providers (default)
-adk-model = { version = "2.1.0", features = ["all-providers"] }
+| Area | Behaviour |
+|------|-----------|
+| Streaming | A stream that ends before its terminal event, ends mid tool call, or carries an error frame fails with an `AdkError` instead of returning a truncated answer. See "Stream Termination" in [providers.md](../docs/official_docs/models/providers.md#stream-termination) |
+| Tool calls | Text-encoded tool calls (Qwen/Hermes, Llama, Mistral Nemo, DeepSeek, DeepSeek-V3 native tokens, Gemma 4, action tags) are recognized only for tools the request declares. Arguments that are not a JSON object are marked with `adk_core::invalid_tool_arguments` instead of becoming `{}`, so the agent answers the call with an error and the model can retry. Chat Completions clients send one `tool` message per function response, and images a tool returns reach every provider |
+| Generation config | Temperature, `top_p`, `top_k`, max tokens, stop sequences, seed, penalties, and log probabilities reach the provider where it supports them. The Responses, Anthropic, Bedrock, Groq, Azure AI Inference, and DeepSeek clients fail with `model.unsupported_config`, naming the field, when a request sets one they cannot honour; the OpenAI-compatible Chat Completions clients send all of them |
+| Reasoning effort | `GenerateContentConfig::effort` (`Low`, `Medium`, `High`) sets one call's effort over the client's: Anthropic `output_config.effort` with adaptive thinking, OpenAI `reasoning_effort` and Responses `reasoning.effort`, Gemini `thinking_level`, OpenRouter `reasoning.effort`, DeepSeek `reasoning_effort`, Groq GPT-OSS `reasoning_effort`. A model without the control, Ollama, Bedrock, and Azure AI Inference ignore it with a debug log. See "Per-Call Reasoning Effort" in [providers.md](../docs/official_docs/models/providers.md#per-call-reasoning-effort) |
+| Timeouts | `HttpTimeouts` bounds connecting (30 seconds) and every wait for data (10 minutes) on the OpenAI, OpenAI-compatible, Azure OpenAI, Responses, Azure AI Inference, Groq, DeepSeek, OpenRouter, Ollama, and Bedrock clients; `with_timeouts` changes both. Anthropic requests are bounded at 10 minutes (`AnthropicConfig::with_request_timeout`) |
+| Retry | Exponential backoff for 408, 429, 500, 502, 503, 504, and 529 (`RetryConfig`); a `Retry-After` delay, or on Gemini a `google.rpc.RetryInfo` `retryDelay`, is honoured up to `RetryConfig::max_server_delay` |
+| Credentials | Provider configs redact the API key in `Debug` output and omit it when serialized |
+| Error privacy | An error message quotes at most 512 bytes of an upstream error body, and clients log a failure's code, category, and status, never its message or a response body. See [Errors in spans and logs](../docs/official_docs/observability/telemetry.md#errors-in-spans-and-logs) |
+| Telemetry | Token usage is recorded on `gen_ai.usage.*` span fields through `adk-telemetry` |
+| Request adapters | `with_request_adapter` on the OpenAI-compatible, Responses, and Anthropic clients edits the JSON body and headers of each attempt, retries included |
+| Response headers | `OpenAIResponsesClient::with_response_observer` receives the raw headers of each generation attempt, failed attempts and retries included, before the body is read; it does not run for background polling |
 
-# Individual providers
-adk-model = { version = "2.1.0", features = ["gemini"] }
-adk-model = { version = "2.1.0", features = ["openai"] }
-adk-model = { version = "2.1.0", features = ["xai"] }
-adk-model = { version = "2.1.0", features = ["anthropic"] }
-adk-model = { version = "2.1.0", features = ["deepseek"] }
-adk-model = { version = "2.1.0", features = ["groq"] }
-adk-model = { version = "2.1.0", features = ["ollama"] }
-adk-model = { version = "2.1.0", features = ["fireworks"] }
-adk-model = { version = "2.1.0", features = ["together"] }
-adk-model = { version = "2.1.0", features = ["mistral"] }
-adk-model = { version = "2.1.0", features = ["perplexity"] }
-adk-model = { version = "2.1.0", features = ["cerebras"] }
-adk-model = { version = "2.1.0", features = ["sambanova"] }
-adk-model = { version = "2.1.0", features = ["bedrock"] }
-adk-model = { version = "2.1.0", features = ["azure-ai"] }
+Provider adapters keep native search and reasoning history, citations, usage, and multimodal tool
+results. A streaming snapshot with `provider_metadata.content_complete` set to `true` replaces the
+deltas before it.
+
+## Test doubles
+
+`ScriptedLlm` answers each call with the next `ScriptedResponse` (text, function calls, streamed
+chunks, a stream error, a failed call, usage) and records every request; a call past the script
+fails with `SCRIPT_EXHAUSTED_CODE`. `MockLlm` replays the same responses on every call.
+
+```rust
+use adk_core::{Content, Llm, LlmRequest};
+use adk_model::{ScriptedLlm, ScriptedResponse};
+use futures::StreamExt;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let model = ScriptedLlm::new("scripted", vec![ScriptedResponse::text("Mars.")]);
+    let request = LlmRequest::new("scripted", vec![Content::new("user").with_text("Name a planet.")]);
+    let response = model.generate_content(request, false).await?.next().await.ok_or("no response")??;
+    assert_eq!(response.content.and_then(|c| c.parts[0].text().map(str::to_string)).as_deref(), Some("Mars."));
+    assert_eq!(model.requests().len(), 1);
+    Ok(())
+}
 ```
 
-## Related Crates
+## Feature flags
 
-- [adk-rust](https://crates.io/crates/adk-rust) - Meta-crate with all components
-- [adk-core](https://crates.io/crates/adk-core) - Core `Llm` trait
-- [adk-agent](https://crates.io/crates/adk-agent) - Agent implementations
+| Feature | Enables |
+|---------|---------|
+| `gemini` (default) | `GeminiModel` over `adk-gemini` |
+| `gemini-vertex` | Gemini on Vertex AI |
+| `gemini-interactions` | Gemini Interactions API transport (Beta) |
+| `openai` | `OpenAIClient`, `OpenAIResponsesClient`, `AzureOpenAIClient`, `OpenAICompatible` |
+| `openai-ws` | Responses API WebSocket transport (`WsTransport`) |
+| `openai-conversations` | Conversations API client (`ConversationsClient`) |
+| `openai-responses-full` | `openai-ws` and `openai-conversations` |
+| `anthropic` | `AnthropicClient` over `adk-anthropic` |
+| `deepseek` | `DeepSeekClient` |
+| `muse` | `MuseClient` and the Muse media, files and Responses clients |
+| `muse-responses` | `MuseApi::Responses` through the Open Responses engine (implies `muse`, `openai`) |
+| `muse-realtime` | `MuseRealtimeAsrClient`, live transcription over Meta's realtime WebSocket (implies `muse`) |
+| `groq` | `GroqClient` |
+| `ollama` | `OllamaModel` |
+| `openrouter` | `OpenRouterClient` |
+| `opencode` | `OpenCodeClient` (implies `openai`, `anthropic`, `gemini`) |
+| `bedrock` | `BedrockClient` |
+| `azure-ai` | `AzureAIClient` |
+| `all-providers` | `gemini`, `openai`, `anthropic`, `deepseek`, `ollama`, `groq`, `muse`, `openrouter`, `opencode`, `bedrock`, `azure-ai` |
+| `xai`, `fireworks`, `together`, `mistral`, `perplexity`, `cerebras`, `sambanova` | Aliases for `openai`, kept for compatibility; use the `OpenAICompatibleConfig` presets |
+
+The `openai` feature turns on `async-openai`'s `byot` feature. An application that also calls
+`async-openai` directly must set `stream` on its own streaming requests.
+
+## Environment variables
+
+The snippets above read their keys from these variables. Only `GeminiModel::from_env` reads the
+environment itself; `BedrockClient::new` uses the AWS credential chain.
+
+| Provider | Variable |
+|----------|----------|
+| Gemini | `GOOGLE_API_KEY` or `GEMINI_API_KEY` |
+| OpenAI | `OPENAI_API_KEY` |
+| Anthropic | `ANTHROPIC_API_KEY` |
+| DeepSeek | `DEEPSEEK_API_KEY` |
+| Groq | `GROQ_API_KEY` |
+| OpenRouter | `OPENROUTER_API_KEY` |
+| OpenCode | `OPENCODE_API_KEY` |
+| xAI | `XAI_API_KEY` |
+| Azure AI Inference | `AZURE_AI_API_KEY` |
+| Amazon Bedrock | AWS credential chain, for example `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` |
+
+## Related crates
+
+- [adk-rust](https://crates.io/crates/adk-rust) — umbrella crate
+- [adk-core](https://crates.io/crates/adk-core) — the `Llm` trait
+- [adk-agent](https://crates.io/crates/adk-agent) — `LlmAgent` and other agents
+- [adk-gemini](https://crates.io/crates/adk-gemini) — the Gemini client behind `GeminiModel`
+- [adk-anthropic](https://crates.io/crates/adk-anthropic) — the Anthropic client behind `AnthropicClient`
 
 ## License
 

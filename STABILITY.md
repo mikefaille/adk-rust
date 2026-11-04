@@ -53,14 +53,21 @@ The table below assigns one stability tier to every public `adk-*` crate in the 
 | `adk-audio` | **Stable** | Audio processing and STT/TTS providers |
 | `adk-mistralrs` | **Stable** | Native local LLM inference via mistral.rs |
 | `adk-acp` | **Beta** | Agent Client Protocol client and server (tracks the upstream ACP spec) |
-| `adk-awp` | **Beta** | Agentic Web Protocol implementation (tracks the upstream AWP spec) |
-| `awp-types` | **Beta** | AWP protocol types, zero `adk-*` dependencies |
-| `adk-devtools` | **Beta** | Coding-agent dev tools scoped to a `Workspace` (new in 3.0.0) |
-| `adk-computer-use` | **Beta** | Governed orchestration for the `computer-use-mcp` server (new in 3.0.0) |
+| `adk-awp` | **Beta** | Agentic Web Protocol implementation: the AWP 2.0 routes, signing, verifier and conformance kit (spec 3.5); the AWP 1.x routes behind `awp-v1` for one release line |
+| `awp-types` | **Beta** | AWP 1.x and 2.0 protocol types and the 2.0 JSON Schemas, zero `adk-*` dependencies |
+| `adk-devtools` | **Beta** | Coding-agent dev tools scoped to a `Workspace` (new in 2.0.0) |
+| `adk-computer-use` | **Beta** | Governed orchestration for the `computer-use-mcp` server (new in 2.0.0) |
 | `adk-schema` | **Beta** | Canonical JSON Schema documents, bounded ingestion, and role-typed identity |
+| `adk-gcp` | **Beta** | Shared Google Cloud REST plumbing for Vertex AI backends (new in 2.1.0) |
+| `adk-harness` | **Beta** | Governed harness agent: modes, standing approvals, shell, todos, instructions, skills (new in 3.0.0) |
+| `adk-kernel` | **Beta** | Agent kernel: supervisor, process model, wake sources, event bus, control plane (spec 3.2) |
+| `adk-surface` | **Beta** | Agent surfaces: the engine every surface runs on, and the web home with its HTTP API (spec 3.3) |
 | `adk-enterprise` | **Experimental** | Enterprise client SDK for ADK-Rust Managed Agent Service |
 | `adk-managed` | **Experimental** | Managed agent runtime engine |
 | `adk-codeact-monty` | **Experimental** | Python CodeRuntime for the CodeActAgent via the Monty interpreter |
+| `adk-site` | **Experimental** | Site pipeline for AWP 2.0 websites: content, generator, launch gate, signed releases, site log, hosts (spec 3.5) |
+| `adk-drivers` | **Experimental** | Service drivers: DNS and registrar, email, analytics and search console, social and advertising, as kernel driver manifests with conformance suites (spec 3.5 §7.13) |
+| `adk-website` | **Experimental** | The prebuilt AWP 2.0 website: site kinds, the team of eight agents, onboarding, themes, capability packs, playbooks, incidents, alarms and the weekly review (spec 3.5 Part C) |
 
 ### Beta Crate Rationale
 
@@ -71,11 +78,29 @@ minor release. Every other crate was promoted to Stable in 1.0.0.
 | Crate | Reason for Beta | Path to Stable |
 |-------|----------------|----------------|
 | `adk-acp` | Agent Client Protocol is evolving upstream; capability negotiation follows the SDK | Stabilize once the ACP wire spec settles past v1 |
-| `adk-awp` | Agentic Web Protocol is a young specification | Stabilize when the AWP spec reaches a versioned release |
+| `adk-awp` | Agentic Web Protocol is a young specification; AWP 2.0's normative text is not yet published (spec 3.5 §13 Q1) | Stabilize when the AWP 2.0 text is published at a domain the project controls |
 | `awp-types` | Mirrors the AWP wire format, so it moves with the spec | Stabilize alongside `adk-awp` |
-| `adk-devtools` | New in 3.0.0; the coding-agent tool surface is still being shaped by use | Promote after 1-2 release cycles without breaking changes |
-| `adk-computer-use` | New in 3.0.0; tracks the `computer-use-mcp` wire contracts | Stabilize when the upstream contracts are versioned |
+| `adk-devtools` | New in 2.0.0; the coding-agent tool surface is still being shaped by use | Promote after 1-2 release cycles without breaking changes |
+| `adk-computer-use` | New in 2.0.0; tracks the `computer-use-mcp` wire contracts | Stabilize when the upstream contracts are versioned |
 | `adk-schema` | New in 3.0.0; the introspection surface over canonical documents is still being shaped by use | Promote once the document API absorbs a second consumer without breaking changes |
+| `adk-gcp` | New in 2.1.0; the shared ADC/LRO surface is still absorbing the per-crate GCP clients | Promote once the remaining Vertex backends consume it without API changes |
+| `adk-harness` | New in 3.0.0 (spec 3.1); the team, plan-graph, goal and pack layers are implemented and still taking shape in use | Review for Stable in 3.2.0 (spec 3.1 §12 phase 6) |
+| `adk-kernel` | New with spec 3.2; the agenda and the consolidation tick are in, and drivers, partitions, `/proc` and service installation land in later phases on top of the phase-1 API | Review for Stable once spec 3.2 phases 1–3 ship without breaking changes |
+| `adk-surface` | New with spec 3.3; the engine and the web home (`web`: its page and API) are in, and the terminal, chat, phone, tray and voice surfaces arrive as features in later phases. The desktop tray is the exception: a separate, unpublished, **Experimental** app in `adk-surface/desktop/` with its own workspace, not a feature of the crate. The `verb-ui` feature (screen actions) is **Experimental** inside the Beta crate, and so are the `whatsapp`, `slack`, `discord` and `matrix` chat adapters (spec 3.5 §10 X12) | Review for Stable once spec 3.3 phases 1–2 ship without breaking changes; the desktop app leaves Experimental with signed installers; `verb-ui` is reviewed once its catalogue grows past snooze |
+
+### Alpha Backends
+
+A backend inside a Beta or Stable crate can be **Alpha**: it implements its store's whole
+contract and carries the store's conformance suite, but that suite has not yet passed
+against a live server in CI, so its storage layout may change in a minor release without a
+migration. A backend leaves Alpha when its store's conformance suite passes against a live
+server in CI, and then carries its crate's tier.
+
+No backend is Alpha. Backends that have left Alpha:
+
+| Crate | Features | Backends | Left Alpha | Tier |
+|-------|----------|----------|------------|------|
+| `adk-kernel` | `mongodb`, `firestore`, `neo4j` | `ProcessStore`, `AgendaStore`, `DriverStore`, `LedgerStore`, `PartitionStore` and `CronWatermarkStore` on MongoDB, Firestore and Neo4j (`Mongo*`, `Firestore*`, `Neo4j*`) | 2026-10-25, once each store's conformance suite had passed on the backend in the nightly `durable-stores` job (spec 3.2 §13 Q8) | **Beta** |
 
 ### Excluded from Workspace
 
@@ -83,8 +108,8 @@ The following crates are not part of the main workspace and are not covered by t
 
 | Crate | Reason |
 |-------|--------|
-| `adk-studio` | Extracted to [standalone repo](https://github.com/zavora-ai/adk-studio). |
-| `adk-ui` | Extracted to [standalone repo](https://github.com/zavora-ai/adk-ui). |
+| `adk-studio` | Retired in favour of `adk-surface`'s [workflow observer](docs/official_docs/surfaces/workflow.md); [repository](https://github.com/zavora-ai/adk-studio). |
+| `adk-ui` | Retired; its 2.2.0 release on crates.io serves ADK-Rust 2 only. Agent-drawn UI is `adk-surface`'s `genui` feature. |
 
 ## Deprecation Policy
 
@@ -92,20 +117,21 @@ ADK-Rust follows a predictable deprecation lifecycle so that consumers have time
 
 1. **Announcement.** When a public item is deprecated, the crate annotates it with `#[deprecated(since = "X.Y.Z", note = "Use <replacement> instead. Will be removed in X.(Y+2).0.")]`. The `since` field records the version that introduced the deprecation. The `note` field provides migration instructions.
 
-2. **Grace period.** Deprecated public items remain available and functional for at least **N+2 minor releases** after the release in which the deprecation is announced. For example, an item deprecated in `0.6.0` will not be removed before `0.8.0`.
+2. **Grace period.** Deprecated public items remain available and functional for at least **N+2 minor releases** after the release in which the deprecation is announced. For example, an item deprecated in `3.1.0` will not be removed before `3.3.0`.
 
 3. **Removal.** After the grace period, the item may be removed in the next minor (pre-1.0) or major (post-1.0) release. Removal is documented in the `CHANGELOG.md` with a reference to the original deprecation notice.
 
 ### Example
 
 ```rust
-#[deprecated(
-    since = "0.6.0",
-    note = "Use `SessionService::get_or_create` instead. Will be removed in 0.8.0."
-)]
-pub fn create_session(/* ... */) -> Result<Session> {
-    // ...
+/// Replaced by [`new_function`].
+#[deprecated(since = "3.1.0", note = "Use `new_function` instead. Will be removed in 4.0.0.")]
+pub fn old_function() {
+    new_function()
 }
+
+/// The replacement.
+pub fn new_function() {}
 ```
 
 ## Non-Breaking Field Addition Policy
@@ -121,7 +147,26 @@ Public structs in Stable-tier crates that are constructed by downstream consumer
    - Session service request structs in `adk-session`
    - Any future configuration or request structs added to Stable-tier crates
 
-4. **Struct literal construction.** All public structs support direct struct literal construction with `..Default::default()` for forward compatibility. Builder patterns are provided as a convenience but are not required.
+4. **Struct literal construction.** Public configuration and request structs that downstream code constructs, such as `RunConfig`, `EventActions`, and `LlmResponse`, implement `Default`, so a struct literal that ends with `..Default::default()` keeps compiling when a field is added. A few types are built only through constructors — `ToolApproval` (`approve()` / `deny()`) and `adk_graph::node::ExecutionConfig` (`ExecutionConfig::new`); `RunnerConfig` is best built with `Runner::builder()`.
+
+## Public Dependency Policy
+
+A dependency whose types appear in a public signature is part of the crate's API: callers construct those types with their own copy of the dependency, and two semver-incompatible versions are distinct Rust types.
+
+1. **SQLx is a public dependency** of the crates below, through their SQL backends.
+
+   | Crate | Features | SQLx types in the public API |
+   |-------|----------|------------------------------|
+   | `adk-session` | `sqlite`, `postgres` | `from_pool` on every SQL store and session service, `SqliteSessionService::pool`, the `migration` runners (`run_sql_migrations`, `run_sql_migrations_on_connection`, `sql_schema_version`) |
+   | `adk-memory` | `sqlite-memory`, `graph-memory`, `database-memory` | `from_pool` on `SqliteMemoryService`, `GraphMemoryService`, and `PostgresMemoryService`, the `migration` runners |
+   | `adk-graph` | `sqlite`, `postgres` | `SqliteCheckpointer::from_pool`, `PostgresCheckpointer::from_pool` |
+   | `adk-auth` | `postgres-audit` | `PostgresAuditSink::from_pool`, `PostgresAuditSink::pool` |
+   | `adk-rag` | `pgvector` | `PgVectorStore::from_pool` |
+   | `adk-payments` | `sqlite`, `postgres` | `SqliteWalletStore::new` and `pool`, `PostgresWalletStore::new` and `pool` |
+
+2. **Breaking SQLx upgrades are breaking releases.** Moving these crates to a semver-incompatible SQLx release (0.8 → 0.9, 0.9 → 0.10) is a breaking change and ships only in a major ADK-Rust release, with a migration guide. A semver-compatible SQLx update is not breaking.
+
+3. **CI coverage.** The `semver` gate checks these crates with the features above enabled, in addition to their default features (`SEMVER_EXTRA_FEATURES` in `.github/workflows/semver.yml`).
 
 ## 1.0 Milestone
 
@@ -140,13 +185,13 @@ ADK-Rust 1.0.0 was released on June 7, 2026. All Stable-tier crates commit to lo
 
 ### Post-1.0 Contract
 
-- Breaking changes to Stable-tier crates require a 3.0.0 release
+- Breaking changes to Stable-tier crates require a 2.0.0 release
 - Beta crates may have breaking changes in 1.x minor releases (with migration guides)
 - Experimental crates may change without notice
 
 ## 2.0 Milestone
 
-ADK-Rust 3.0.0 is the second major release. It keeps the Stable-tier commitment and
+ADK-Rust 2.0.0 is the second major release. It keeps the Stable-tier commitment and
 spends the major version on the breakage that had accumulated since 1.0.0.
 
 ### What the major version bought
@@ -167,7 +212,7 @@ The complete breaking-change list, generated with `cargo semver-checks`, is in
 
 | Criterion | Status | Notes |
 |-----------|--------|-------|
-| **Semver compliance** | ✅ Met | `cargo semver-checks check-release` accepts the 1.0.0 → 3.0.0 bump for every published crate. Because a major bump permits any change, the breaking-change inventory is generated separately with `--release-type minor` and recorded in the changelog. |
+| **Semver compliance** | ✅ Met | `cargo semver-checks check-release` accepts the 1.0.0 → 2.0.0 bump for every published crate. Because a major bump permits any change, the breaking-change inventory is generated separately with `--release-type minor` and recorded in the changelog. |
 | **Migration guide** | ✅ Met | [docs/official_docs/migration/1.0-to-2.0.md](docs/official_docs/migration/1.0-to-2.0.md) covers every breakage with before/after code. |
 | **Test coverage** | ✅ Met | 3700+ workspace tests plus 300+ doctests, all gated in CI. |
 | **CI enforcement** | ✅ Met | `fmt`, `clippy --all-targets -D warnings`, `nextest --workspace`, doctests, doc build, template scaffolding, and semver run per PR; supply-chain (`cargo audit` + `cargo deny`) and standalone-example compilation run nightly. |
@@ -178,4 +223,32 @@ The complete breaking-change list, generated with `cargo semver-checks`, is in
 
 - Breaking changes to Stable-tier crates require a 3.0.0 release
 - Beta crates may have breaking changes in 2.x minor releases (with migration guides)
+- Experimental crates may change without notice
+
+## 3.0 Milestone
+
+ADK-Rust 3.0.0 is the third major release. It keeps the Stable-tier commitment and spends
+the major version on the breaking changes listed in the
+[2.x → 3.0 migration guide](docs/official_docs/migration/2.x-to-3.0.md).
+
+### What the major version bought
+
+| Area | Change |
+|---|---|
+| Tool authorization | One governed path (`authorize_tool_call`): kill switch, `ToolPolicy`, tool guardrails, and confirmation, after plugin and callback rewrites; fingerprints name the acting agent and the tool's origin |
+| Agent identity | Every run has an acting agent (`ActingContext`), and a run acts for its session's user unless a subject delegation policy allows another |
+| Retries and side effects | `ToolEffect` governs retries; an `ActionLedger` keeps `NonIdempotent` calls at most once, answering unknown outcomes as `outcome_unknown` |
+| Budgets and spend | `RunBudget`, `SpendLedger`, and `ModelCallScope` meter every model call of a run |
+| Durable runtime | `LeaseStore`, `DurableRunStore`, `ScheduleStore`, `GovernanceStateStore`, approval and audit log stores, with backends for every `adk-session` database |
+| Server exposure | `adk-server` binds `127.0.0.1` through the launchers, refuses unlisted hosts, and allows no cross-origin access by default |
+| Errors | `ErrorCategory` gains `Conflict` and `ResourceExhausted`; guardrail blocks and tool argument errors carry stable codes |
+| Dependencies | SQLx 0.9 for every SQL backend; see the [Public Dependency Policy](#public-dependency-policy) |
+
+`cargo semver-checks` runs in the `semver` gate with `SEMVER_RELEASE_TYPE: major` while the
+3.0.0 release candidate is open.
+
+### Post-3.0 Contract
+
+- Breaking changes to Stable-tier crates require a 4.0.0 release
+- Beta crates may have breaking changes in 3.x minor releases (with migration guides)
 - Experimental crates may change without notice

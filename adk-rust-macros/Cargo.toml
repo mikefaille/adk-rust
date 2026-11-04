@@ -5,11 +5,12 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Proc macros for ADK-Rust — #[tool] attribute for zero-boilerplate tool registration"
-repository = "https://github.com/zavora-ai/adk-rust"
-documentation = "https://docs.rs/adk-macros"
+description = "Procedural macros for ADK-Rust: #[tool] tool definitions and #[entrypoint]/#[task] graph workflows"
+homepage.workspace = true
+repository.workspace = true
+documentation = "https://docs.rs/adk-rust-macros"
 keywords = ["adk", "agent", "macro", "tool", "ai"]
-categories = ["development-tools::procedural-macro-helpers"]
+categories = ["development-tools"]
 readme = "README.md"
 
 [lib]
@@ -24,6 +25,7 @@ syn = { version = "2", features = ["full", "extra-traits"] }
 # Internal dev-deps are path-only (no version) so cargo strips them from the
 # published manifest — they can never block or reorder a crates.io publish.
 adk-core = { path = "../adk-core" }
+adk-tool = { path = "../adk-tool" }
 async-trait.workspace = true
 schemars = "1.0"
 serde = { workspace = true }

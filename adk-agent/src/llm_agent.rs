@@ -1,16 +1,18 @@
+use adk_core::audit_log::{AuditActor, AuditRecordDraft, AuditRecordKind, AuditRecordOutcome};
 use adk_core::{
     AfterAgentCallback, AfterModelCallback, AfterToolCallback, AfterToolCallbackFull, Agent,
     BeforeAgentCallback, BeforeModelCallback, BeforeModelResult, BeforeToolCallback,
     CallbackContext, Content, Event, EventActions, FunctionResponseData, GlobalInstructionProvider,
-    InstructionProvider, InvocationContext, Llm, LlmRequest, LlmResponse, MemoryEntry,
-    OnToolErrorCallback, Part, ReadonlyContext, Result, RetryBudget, Tool, ToolCallbackContext,
-    ToolConfirmationDecision, ToolConfirmationPolicy, ToolConfirmationRequest, ToolContext,
-    ToolExecutionStrategy, ToolOutcome, Toolset,
+    GovernedCall, InstructionProvider, InvocationContext, Llm, LlmRequest, LlmResponse,
+    MemoryEntry, OnToolErrorCallback, Part, ReadonlyContext, Result, RetryBudget, Tool,
+    ToolAuthorization, ToolCallbackContext, ToolConfirmationPolicy, ToolConfirmationRequest,
+    ToolContext, ToolEffect, ToolExecutionStrategy, ToolGate, ToolOutcome, ToolResultStatus,
+    Toolset, authorize_tool_call,
 };
 use async_stream::stream;
 use async_trait::async_trait;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
 };
 use tracing::Instrument;
@@ -23,9 +25,12 @@ use adk_plugin::{
 #[cfg(feature = "skills")]
 use crate::skill_shim::load_skill_index;
 use crate::{
+    grounding::answer_citations,
     guardrails::{
-        GuardrailSet, ToolGuardrailSet, ToolScreening, enforce_guardrails, screen_tool_call,
+        Grounding, GuardrailScreen, GuardrailSet, Phase, Screened, ToolGuardrailSet, Warnings,
+        enforce_guardrails, screen_model_output, screen_tool_result,
     },
+    invocation_hooks::HookCallbacks,
     skill_shim::{SelectionPolicy, SkillIndex, apply_skill_injection},
     tool_call_markup::normalize_option_content,
     workflow::with_user_content_override,
@@ -37,13 +42,25 @@ pub const DEFAULT_MAX_ITERATIONS: u32 = 100;
 /// Default tool execution timeout (5 minutes).
 pub const DEFAULT_TOOL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
+/// Recorded in place of a request, response, or tool payload when
+/// [`RunConfig::record_payloads`](adk_core::RunConfig::record_payloads) is off.
+const PAYLOAD_OMITTED: &str = "[omitted: set RunConfig::record_payloads to record payloads]";
+
+/// Renders a payload for a span field or debug log.
+///
+/// Payloads carry user text and tool data, so nothing of them is recorded unless
+/// `record_payloads` is set: in full with the `record-payloads` feature, otherwise
+/// truncated to `max_bytes`.
 fn trace_json_payload<T: serde::Serialize>(
     value: &T,
     record_payloads: bool,
     max_bytes: usize,
 ) -> String {
+    if !record_payloads {
+        return PAYLOAD_OMITTED.to_string();
+    }
     let json = serde_json::to_string(value).unwrap_or_default();
-    if cfg!(feature = "record-payloads") && record_payloads {
+    if cfg!(feature = "record-payloads") {
         return json;
     }
 
@@ -59,6 +76,27 @@ fn trace_json_payload<T: serde::Serialize>(
     format!("{}...[truncated {} bytes]", &json[..end], json.len() - end)
 }
 
+/// The text logged for an error message or a denial reason: the text when the run records
+/// payloads, else a placeholder.
+///
+/// Provider errors can echo prompts, and tool errors and guardrail reasons can quote
+/// arguments and credentials, so their text follows the same rule as payloads. Log the content-free part
+/// with [`AdkError::diagnostics`](adk_core::AdkError::diagnostics) beside it.
+fn traced_message(run_config: &adk_core::RunConfig, message: &str) -> String {
+    trace_json_payload(&message, run_config.record_payloads, run_config.trace_payload_max_bytes)
+}
+
+/// The audit action of a tool call a hook, callback, or plugin answered before the governed
+/// path saw it (spec 3.1 §10, F1).
+const SHORT_CIRCUIT_ACTION: &str = "tool.short_circuit";
+/// `answeredBy` of an enhanced plugin's `ShortCircuit`.
+#[cfg(feature = "enhanced-plugins")]
+const SHORT_CIRCUIT_BY_ENHANCED_PLUGIN: &str = "enhanced_plugin";
+/// `answeredBy` of a run-wide `InvocationHooks::before_tool` answer.
+const SHORT_CIRCUIT_BY_INVOCATION_HOOK: &str = "invocation_hook";
+/// `answeredBy` of the agent's own `BeforeToolCallback` answer.
+const SHORT_CIRCUIT_BY_BEFORE_TOOL_CALLBACK: &str = "before_tool_callback";
+
 #[derive(Debug, Clone)]
 struct PendingToolCall {
     index: usize,
@@ -66,7 +104,8 @@ struct PendingToolCall {
     args: serde_json::Value,
     id: Option<String>,
     function_call_id: String,
-    guardrail_denial: Option<String>,
+    /// The held request this call resumes, when it is the call that request describes.
+    resumes: Option<ToolConfirmationRequest>,
 }
 
 fn build_generation_config(
@@ -91,6 +130,26 @@ fn build_generation_config(
     }
 }
 
+/// Appends streamed parts, joining a delta onto the part it continues.
+///
+/// Consecutive text deltas form one text part. A thinking delta joins the previous
+/// thinking part until that part is signed, since a signature closes its block.
+fn append_streamed_parts(parts: &mut Vec<Part>, incoming: Vec<Part>) {
+    for part in incoming {
+        match (parts.last_mut(), part) {
+            (Some(Part::Text { text }), Part::Text { text: delta }) => text.push_str(&delta),
+            (
+                Some(Part::Thinking { thinking, signature: signature @ None }),
+                Part::Thinking { thinking: delta, signature: delta_signature },
+            ) => {
+                thinking.push_str(&delta);
+                *signature = delta_signature;
+            }
+            (_, part) => parts.push(part),
+        }
+    }
+}
+
 fn collect_function_calls(content: &Content, invocation_id: &str) -> Vec<PendingToolCall> {
     content
         .parts
@@ -111,33 +170,58 @@ fn collect_function_calls(content: &Content, invocation_id: &str) -> Vec<Pending
             function_call_id: id
                 .clone()
                 .unwrap_or_else(|| format!("{invocation_id}_{name}_{index}")),
-            guardrail_denial: None,
+            resumes: None,
         })
         .collect()
 }
 
+fn collect_long_running_tool_ids(
+    tool_map: &HashMap<String, Arc<dyn Tool>>,
+    content: &Content,
+) -> Vec<String> {
+    content
+        .parts
+        .iter()
+        .filter_map(|part| {
+            if let Part::FunctionCall { name, .. } = part
+                && tool_map.get(name).is_some_and(|tool| tool.is_long_running())
+            {
+                return Some(name.clone());
+            }
+            None
+        })
+        .collect()
+}
+
+/// Builds one streamed model event.
+///
+/// `request_debug` is the bounded request copy from [`trace_json_payload`]: the
+/// full request carries the whole conversation, so embedding it in every
+/// terminal event would make stored history grow quadratically.
 fn build_partial_llm_event(
     event_id: &str,
     invocation_id: &str,
     agent_name: &str,
-    request_json: &str,
+    request_debug: &str,
     chunk: &LlmResponse,
     long_running_tool_ids: Vec<String>,
 ) -> Event {
     let mut event = Event::with_id(event_id, invocation_id);
     event.author = agent_name.to_string();
-    event.llm_request = Some(request_json.to_string());
-    event
-        .provider_metadata
-        .insert("gcp.vertex.agent.llm_request".to_string(), request_json.to_string());
-    event.provider_metadata.insert(
-        "gcp.vertex.agent.llm_response".to_string(),
-        serde_json::to_string(chunk).unwrap_or_default(),
-    );
+    // Payload snapshots go on the terminal chunk only; repeating them on every
+    // incremental chunk turns streaming into O(request_size * chunk_count) work.
+    if !chunk.partial {
+        event.llm_request = Some(request_debug.to_string());
+        event.provider_metadata.insert(
+            "gcp.vertex.agent.llm_response".to_string(),
+            serde_json::to_string(chunk).unwrap_or_default(),
+        );
+    }
     event.llm_response.partial = chunk.partial;
     event.llm_response.turn_complete = chunk.turn_complete;
     event.llm_response.finish_reason = chunk.finish_reason;
     event.llm_response.usage_metadata = chunk.usage_metadata.clone();
+    event.llm_response.citation_metadata = chunk.citation_metadata.clone();
     event.llm_response.content = chunk.content.clone();
     event.llm_response.provider_metadata = chunk.provider_metadata.clone();
     event.llm_response.interaction_id = chunk.interaction_id.clone();
@@ -146,37 +230,42 @@ fn build_partial_llm_event(
     event.llm_response.interrupted = chunk.interrupted;
     event.llm_response.error_code = chunk.error_code.clone();
     event.llm_response.error_message = chunk.error_message.clone();
+    event.llm_response.model = chunk.model.clone();
+    event.llm_response.provider = chunk.provider.clone();
     event.long_running_tool_ids = long_running_tool_ids;
     event
 }
 
+/// Builds the single model event of a non-streaming turn; see
+/// [`build_partial_llm_event`] for `request_debug`.
 fn build_final_llm_event(
     event_id: &str,
     invocation_id: &str,
     agent_name: &str,
-    request_json: &str,
+    request_debug: &str,
     content: Option<&Content>,
     last_chunk: Option<&LlmResponse>,
     long_running_tool_ids: Vec<String>,
 ) -> Event {
     let mut event = Event::with_id(event_id, invocation_id);
     event.author = agent_name.to_string();
-    event.llm_request = Some(request_json.to_string());
-    event
-        .provider_metadata
-        .insert("gcp.vertex.agent.llm_request".to_string(), request_json.to_string());
+    event.llm_request = Some(request_debug.to_string());
     event.llm_response.content = content.cloned();
     event.llm_response.partial = false;
     event.llm_response.turn_complete = true;
 
     if let Some(last_chunk) = last_chunk {
+        event.llm_response.turn_complete = last_chunk.turn_complete;
         event.llm_response.finish_reason = last_chunk.finish_reason;
         event.llm_response.usage_metadata = last_chunk.usage_metadata.clone();
+        event.llm_response.citation_metadata = last_chunk.citation_metadata.clone();
         event.llm_response.provider_metadata = last_chunk.provider_metadata.clone();
         event.llm_response.interaction_id = last_chunk.interaction_id.clone();
         event.llm_response.interrupted = last_chunk.interrupted;
         event.llm_response.error_code = last_chunk.error_code.clone();
         event.llm_response.error_message = last_chunk.error_message.clone();
+        event.llm_response.model = last_chunk.model.clone();
+        event.llm_response.provider = last_chunk.provider.clone();
         event.provider_metadata.insert(
             "gcp.vertex.agent.llm_response".to_string(),
             serde_json::to_string(last_chunk).unwrap_or_default(),
@@ -187,13 +276,31 @@ fn build_final_llm_event(
     event
 }
 
+/// The event that ends a run on a call held for confirmation.
+pub(crate) fn confirmation_event(
+    invocation_id: &str,
+    agent_name: &str,
+    request: ToolConfirmationRequest,
+) -> Event {
+    let mut event = Event::new(invocation_id);
+    event.author = agent_name.to_string();
+    event.llm_response.interrupted = true;
+    event.llm_response.turn_complete = true;
+    event.llm_response.content = Some(Content::new("model").with_text(format!(
+        "Tool confirmation required for '{}'. Provide approve/deny decision to continue.",
+        request.tool_name
+    )));
+    event.actions.tool_confirmation = Some(request);
+    event
+}
+
 /// An LLM-powered agent that orchestrates tool calls and sub-agent delegation.
 ///
 /// `LlmAgent` is the primary agent type in ADK. It sends requests to an LLM,
 /// executes tool calls from the response, and iterates until the model produces
 /// a final text response or the iteration limit is reached.
 ///
-/// Use [`LlmAgentBuilder`] (via `LlmAgent::builder()`) to construct instances.
+/// Use [`LlmAgentBuilder::new`] to construct instances.
 pub struct LlmAgent {
     name: String,
     description: String,
@@ -215,6 +322,8 @@ pub struct LlmAgent {
     include_contents: adk_core::IncludeContents,
     tools: Vec<Arc<dyn Tool>>,
     toolsets: Vec<Arc<dyn Toolset>>,
+    /// Whether a toolset that fails to resolve its tools fails the turn.
+    strict_toolsets: bool,
     sub_agents: Vec<Arc<dyn Agent>>,
     output_key: Option<String>,
     /// Default generation config (temperature, top_p, etc.) applied to every LLM request.
@@ -223,8 +332,11 @@ pub struct LlmAgent {
     max_iterations: u32,
     /// Timeout for individual tool executions
     tool_timeout: std::time::Duration,
+    /// Whether tool and callback error messages reach the model.
+    expose_tool_error_messages: bool,
     before_callbacks: Arc<Vec<BeforeAgentCallback>>,
     after_callbacks: Arc<Vec<AfterAgentCallback>>,
+    history_processors: Arc<Vec<adk_core::HistoryProcessor>>,
     before_model_callbacks: Arc<Vec<BeforeModelCallback>>,
     after_model_callbacks: Arc<Vec<AfterModelCallback>>,
     before_tool_callbacks: Arc<Vec<BeforeToolCallback>>,
@@ -243,6 +355,8 @@ pub struct LlmAgent {
     /// Per-agent tool execution strategy override. When `Some`, overrides the
     /// `RunConfig` strategy for this agent's dispatch loop.
     tool_execution_strategy: Option<ToolExecutionStrategy>,
+    /// Whether consecutive agent-delegation calls may execute concurrently.
+    parallelize_agent_delegations: bool,
     input_guardrails: Arc<GuardrailSet>,
     output_guardrails: Arc<GuardrailSet>,
     tool_guardrails: Arc<ToolGuardrailSet>,
@@ -289,47 +403,50 @@ impl PromptConfig {
         ctx: &Arc<dyn InvocationContext>,
         agent_name: &str,
     ) -> Result<Vec<Content>> {
+        // Instructions travel as `system` contents so providers place them in their
+        // native system prompt instead of guessing from leading user turns.
         let mut preamble = Vec::new();
 
         if let Some(provider) = &self.global_instruction_provider {
             let instruction = provider(ctx.clone() as Arc<dyn ReadonlyContext>).await?;
             if !instruction.is_empty() {
-                preamble.push(Content::new("user").with_text(instruction));
+                preamble.push(Content::new("system").with_text(instruction));
             }
         } else if let Some(template) = &self.global_instruction {
             let instruction = adk_core::inject_session_state(ctx.as_ref(), template).await?;
             if !instruction.is_empty() {
-                preamble.push(Content::new("user").with_text(instruction));
+                preamble.push(Content::new("system").with_text(instruction));
             }
         }
 
         if let Some(provider) = &self.instruction_provider {
             let instruction = provider(ctx.clone() as Arc<dyn ReadonlyContext>).await?;
             if !instruction.is_empty() {
-                preamble.push(Content::new("user").with_text(instruction));
+                preamble.push(Content::new("system").with_text(instruction));
             }
         } else if let Some(template) = &self.instruction {
             let instruction = adk_core::inject_session_state(ctx.as_ref(), template).await?;
             if !instruction.is_empty() {
-                preamble.push(Content::new("user").with_text(instruction));
+                preamble.push(Content::new("system").with_text(instruction));
             }
         }
 
         if let Some(schema) = &self.output_schema {
-            preamble.push(Content::new("user").with_text(format!(
+            preamble.push(Content::new("system").with_text(format!(
                 "You MUST respond with valid JSON conforming to this schema: {schema}. Do not include any text outside the JSON object."
             )));
         }
 
-        let agent_filter = if ctx.authoritative_transfer_targets()
+        // An agent that received control by transfer sees only the user's turns and its own.
+        // Otherwise, as in a workflow, other agents' turns reach it as user-role context, so
+        // it never replays an earlier agent's answer as its own.
+        let mut session_history = if ctx.authoritative_transfer_targets()
             || !ctx.run_config().transfer_targets.is_empty()
         {
-            Some(agent_name)
+            ctx.session().conversation_history_scoped(Some(agent_name), ctx.branch())
         } else {
-            None
+            ctx.session().conversation_history_with_context(agent_name, ctx.branch())
         };
-        let mut session_history =
-            ctx.session().conversation_history_scoped(agent_filter, ctx.branch());
         let mut current_user_content = ctx.user_content().clone();
         if let Some(index) = &self.skills_index {
             apply_skill_injection(
@@ -339,18 +456,98 @@ impl PromptConfig {
                 self.max_skill_chars,
             );
         }
-        if let Some(index) = session_history.iter().rposition(|content| content.role == "user") {
-            session_history[index] = current_user_content.clone();
-        } else {
-            session_history.push(current_user_content.clone());
+        // A run that resumes held calls carries an empty user turn: no parts, or only blank
+        // text. A turn without parts never reaches the projected history, so the last user
+        // turn there is the person's message, which an empty turn must not stand in for.
+        let empty_turn = current_user_content
+            .parts
+            .iter()
+            .all(|part| matches!(part, Part::Text { text } if text.trim().is_empty()));
+        if !empty_turn {
+            // The run's own message, never a steering message a run-mate took after it.
+            let own = session_history.iter().rposition(|content| content == ctx.user_content());
+            match own.or_else(|| {
+                session_history.iter().rposition(|content| {
+                    content.role == "user"
+                        && !adk_core::history::is_other_agent_context(content)
+                        && !adk_core::history::is_system_notice(content)
+                })
+            }) {
+                Some(index) => session_history[index] = current_user_content.clone(),
+                None => session_history.push(current_user_content.clone()),
+            }
+        }
+        // An empty user turn adds nothing to the conversation, and providers such as
+        // Anthropic reject empty text blocks.
+        session_history.retain(|content| {
+            content.role != "user"
+                || content
+                    .parts
+                    .iter()
+                    .any(|part| !matches!(part, Part::Text { text } if text.trim().is_empty()))
+        });
+        // An agent limited to its current turn sees the latest user input and what followed.
+        // A run that resumes held calls begins that turn at the message that led to the
+        // earliest one, so each resumed result answers a call the model can see; an empty
+        // turn that resumes none begins it at the person's last message. Any other run sends
+        // the current user turn alone, also while a call waits for a decision (spec 3.3 §7.3).
+        let turn_start = match self.include_contents {
+            adk_core::IncludeContents::Default => None,
+            adk_core::IncludeContents::None => {
+                // The held calls this run resumes: those with a decision.
+                let gate = ToolGate::for_context(ctx.as_ref());
+                let mut held = Vec::<String>::new();
+                for call in ctx.session().held_tool_calls(agent_name, ctx.branch()) {
+                    if let Some(id) = call.id
+                        && adk_core::confirmation_decision_available(&gate, &call.request).await?
+                    {
+                        held.push(id);
+                    }
+                }
+                let earliest_held = session_history.iter().position(|content| {
+                    content.parts.iter().any(|part| {
+                        matches!(part, Part::FunctionCall { id: Some(id), .. } if held.contains(id))
+                    })
+                });
+                let is_message = |content: &Content| {
+                    content.role == "user"
+                        && content.carries_user_input()
+                        && !adk_core::history::is_other_agent_context(content)
+                        && !adk_core::history::is_system_notice(content)
+                };
+                match earliest_held {
+                    Some(call) => {
+                        Some(session_history[..call].iter().rposition(is_message).unwrap_or(0))
+                    }
+                    None if empty_turn => {
+                        Some(session_history.iter().rposition(is_message).unwrap_or(0))
+                    }
+                    None => None,
+                }
+            }
+        };
+        // A history that ends on the model's answer — a resuming run whose model already
+        // answered after the held call, or a loop running this agent again after its own
+        // answer — would be read as a prefill, which models without prefill support
+        // (Anthropic's newer ones) reject. It gets a user turn to answer.
+        if session_history.last().is_some_and(|last| {
+            last.role == "model"
+                && !last.parts.iter().any(|part| matches!(part, Part::FunctionCall { .. }))
+        }) {
+            let note = if empty_turn { RESUMED_TURN_NOTE } else { CONTINUE_TURN_NOTE };
+            session_history.push(Content::new("user").with_text(note));
         }
 
-        Ok(match self.include_contents {
-            adk_core::IncludeContents::None => {
+        Ok(match (self.include_contents, turn_start) {
+            (adk_core::IncludeContents::None, Some(start)) => {
+                preamble.extend(session_history.drain(start..));
+                preamble
+            }
+            (adk_core::IncludeContents::None, None) => {
                 preamble.push(current_user_content);
                 preamble
             }
-            adk_core::IncludeContents::Default => {
+            (adk_core::IncludeContents::Default, _) => {
                 preamble.extend(session_history);
                 preamble
             }
@@ -358,9 +555,19 @@ impl PromptConfig {
     }
 }
 
+/// The user turn a run without user input sends when the conversation would otherwise
+/// end on a model message.
+const RESUMED_TURN_NOTE: &str =
+    "(No new message from the user. Continue from the tool results above.)";
+
+/// The user turn a run sends when its history ends on this agent's own answer.
+const CONTINUE_TURN_NOTE: &str =
+    "(No new message from the user. Continue from the conversation above.)";
+
 struct ToolSetup {
     tools: Vec<Arc<dyn Tool>>,
     toolsets: Vec<Arc<dyn Toolset>>,
+    strict_toolsets: bool,
     sub_agents: Vec<Arc<dyn Agent>>,
     disallow_transfer_to_parent: bool,
     disallow_transfer_to_peers: bool,
@@ -377,6 +584,7 @@ impl ToolSetup {
         Self {
             tools: agent.tools.clone(),
             toolsets: agent.toolsets.clone(),
+            strict_toolsets: agent.strict_toolsets,
             sub_agents: agent.sub_agents.clone(),
             disallow_transfer_to_parent: agent.disallow_transfer_to_parent,
             disallow_transfer_to_peers: agent.disallow_transfer_to_peers,
@@ -395,7 +603,22 @@ impl ToolSetup {
         );
 
         for toolset in active_toolsets {
-            for tool in toolset.tools(ctx.clone() as Arc<dyn ReadonlyContext>).await? {
+            let provided = match toolset.tools(ctx.clone() as Arc<dyn ReadonlyContext>).await {
+                Ok(provided) => provided,
+                // One unreachable server costs the model that server's tools, not the turn.
+                Err(error) if !self.strict_toolsets => {
+                    tracing::warn!(
+                        agent.name = %ctx.agent_name(),
+                        toolset.name = %toolset.name(),
+                        error = %error.diagnostics(),
+                        error.message = %traced_message(ctx.run_config(), &error.message),
+                        "toolset failed to resolve its tools; continuing without them"
+                    );
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            for tool in provided {
                 let name = tool.name().to_string();
                 if static_tool_names.contains(&name) {
                     return Err(adk_core::AdkError::agent(format!(
@@ -467,6 +690,20 @@ impl ToolSetup {
 
         Ok(ResolvedTools { map, declarations, transfer_targets })
     }
+
+    /// Lets static and invocation-scoped toolsets enrich each LLM request.
+    async fn process_llm_request(
+        &self,
+        ctx: &Arc<dyn InvocationContext>,
+        request: &mut LlmRequest,
+    ) -> Result<()> {
+        for toolset in self.toolsets.iter().map(AsRef::as_ref).chain(
+            ctx.run_config().runtime_toolsets.iter().map(|runtime| runtime.toolset().as_ref()),
+        ) {
+            toolset.process_llm_request(ctx.clone() as Arc<dyn ReadonlyContext>, request).await?;
+        }
+        Ok(())
+    }
 }
 
 impl std::fmt::Debug for LlmAgent {
@@ -480,35 +717,6 @@ impl std::fmt::Debug for LlmAgent {
             .field("sub_agents_count", &self.sub_agents.len())
             .finish()
     }
-}
-
-/// Resolves a static confirmation decision for one exact tool call.
-///
-/// Decisions are keyed by function call ID rather than tool name, so an approval
-/// cannot be replayed onto a different call that happens to use the same tool. When
-/// the run also supplies a fingerprint for that ID, the call's own fingerprint must
-/// match it; a mismatch is treated as no decision, which leaves the call
-/// unconfirmed rather than silently authorising different arguments.
-fn static_confirmation_decision(
-    decisions: &std::collections::HashMap<String, ToolConfirmationDecision>,
-    fingerprints: &std::collections::HashMap<String, String>,
-    function_call_id: &str,
-    tool_name: &str,
-    args: &serde_json::Value,
-) -> Option<ToolConfirmationDecision> {
-    let decision = decisions.get(function_call_id).copied()?;
-    if let Some(expected) = fingerprints.get(function_call_id) {
-        let actual = adk_core::tool_call_fingerprint(tool_name, args);
-        if &actual != expected {
-            tracing::warn!(
-                tool.name = %tool_name,
-                function_call.id = %function_call_id,
-                "confirmation decision does not match this call's arguments, treating as unconfirmed"
-            );
-            return None;
-        }
-    }
-    Some(decision)
 }
 
 impl LlmAgent {
@@ -528,19 +736,14 @@ impl LlmAgent {
         input_guardrails: Arc<GuardrailSet>,
     ) -> Result<Arc<dyn InvocationContext>> {
         let content =
-            enforce_guardrails(input_guardrails.as_ref(), ctx.user_content(), "input").await?;
+            enforce_guardrails(input_guardrails.as_ref(), ctx.user_content(), Phase::Input)
+                .await?
+                .content;
         if content.role != ctx.user_content().role || content.parts != ctx.user_content().parts {
             Ok(with_user_content_override(ctx, content))
         } else {
             Ok(ctx)
         }
-    }
-
-    async fn apply_output_guardrails(
-        output_guardrails: &GuardrailSet,
-        content: Content,
-    ) -> Result<Content> {
-        enforce_guardrails(output_guardrails, &content, "output").await
     }
 
     fn history_parts_from_provider_metadata(
@@ -566,12 +769,25 @@ impl LlmAgent {
             .collect()
     }
 
+    fn continues_turn(metadata: Option<&serde_json::Value>) -> bool {
+        metadata
+            .and_then(|metadata| metadata.get("continue_turn"))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+    }
+
     fn augment_content_for_history(
         content: &Content,
         provider_metadata: Option<&serde_json::Value>,
     ) -> Content {
         let mut augmented = content.clone();
         augmented.parts.extend(Self::history_parts_from_provider_metadata(provider_metadata));
+        // The next request of this loop may go to another provider (a fallback or router
+        // model); the turn's native items stay with the origin that produced them.
+        adk_core::history::mark_origin(
+            &mut augmented,
+            adk_core::history::ProviderOrigin::of_response(provider_metadata).as_ref(),
+        );
         augmented
     }
 }
@@ -584,8 +800,8 @@ fn validate_output_against_schema(
     text: &str,
     schema: &serde_json::Value,
 ) -> std::result::Result<serde_json::Value, String> {
-    let parsed: serde_json::Value =
-        serde_json::from_str(text).map_err(|e| format!("Response is not valid JSON: {e}"))?;
+    let parsed: serde_json::Value = serde_json::from_str(strip_json_code_fence(text))
+        .map_err(|e| format!("Response is not valid JSON: {e}"))?;
 
     let validator =
         jsonschema::validator_for(schema).map_err(|e| format!("Invalid schema: {e}"))?;
@@ -593,6 +809,89 @@ fn validate_output_against_schema(
     let errors: Vec<String> = validator.iter_errors(&parsed).map(|e| e.to_string()).collect();
 
     if errors.is_empty() { Ok(parsed) } else { Err(errors.join("; ")) }
+}
+
+/// The JSON inside one Markdown code fence wrapping all of `text`, or `text` unchanged.
+///
+/// A model asked for structured output sometimes wraps it in a ```` ```json ```` fence,
+/// most often when tools are configured and the schema constraint is best-effort. JSON
+/// never starts with a fence, so valid output is unchanged.
+fn strip_json_code_fence(text: &str) -> &str {
+    let trimmed = text.trim();
+    let Some(rest) = trimmed.strip_prefix("```") else {
+        return text;
+    };
+    let Some(body) = rest.strip_suffix("```") else {
+        return text;
+    };
+    // The info string (`json`, `JSON`, ...) runs to the end of the opening line.
+    let body = match body.find('\n') {
+        Some(newline) if body[..newline].chars().all(|c| c.is_ascii_alphanumeric()) => {
+            &body[newline + 1..]
+        }
+        _ => body.trim_start_matches(|c: char| c.is_ascii_alphanumeric()),
+    };
+    if body.contains("```") {
+        return text;
+    }
+    body.trim()
+}
+
+/// Rebuilds the chunk an after-model callback replaced.
+///
+/// The replacement's content and metadata win. The chunk's place in the stream and what the
+/// call used stay with the original: `partial` and `turn_complete` stay set when the
+/// original had them, and `finish_reason` and `usage_metadata` carry over unless the
+/// replacement sets them. A callback that returns `LlmResponse { content, ..Default::default() }`
+/// for a streamed delta therefore still produces one persisted event per response, with usage.
+fn replace_chunk(original: &LlmResponse, mut replacement: LlmResponse) -> LlmResponse {
+    replacement.partial |= original.partial;
+    replacement.turn_complete |= original.turn_complete;
+    if replacement.finish_reason.is_none() {
+        replacement.finish_reason = original.finish_reason;
+    }
+    if replacement.usage_metadata.is_none() {
+        replacement.usage_metadata = original.usage_metadata.clone();
+    }
+    replacement
+}
+
+/// Whether a final model turn carries an answer: text that is not only whitespace, data, a
+/// file, a resource, or a provider tool part. Thinking alone is not an answer.
+fn has_answer_content(content: &Content) -> bool {
+    content.parts.iter().any(|part| match part {
+        Part::Text { text } => !text.trim().is_empty(),
+        Part::Thinking { .. } => false,
+        Part::InlineData { .. }
+        | Part::FileData { .. }
+        | Part::FunctionCall { .. }
+        | Part::FunctionResponse { .. }
+        | Part::ServerToolCall { .. }
+        | Part::ServerToolResponse { .. }
+        | Part::EmbeddedResource { .. } => true,
+    })
+}
+
+/// The error for a model turn that ended without an answer.
+fn empty_response_error(finish_reason: Option<adk_core::FinishReason>) -> adk_core::AdkError {
+    let mut details = adk_core::ErrorDetails::default();
+    if let Some(reason) = finish_reason {
+        details
+            .metadata
+            .insert("finish_reason".to_string(), serde_json::json!(format!("{reason:?}")));
+    }
+    let reason = finish_reason.map_or_else(|| "none".to_string(), |reason| format!("{reason:?}"));
+    adk_core::AdkError::new(
+        adk_core::ErrorComponent::Model,
+        adk_core::ErrorCategory::Internal,
+        "model.empty_response",
+        format!(
+            "the model ended its turn without an answer: no text, data or tool call, only \
+             thinking or whitespace (finish reason: {reason}); retry the run, or check the \
+             model's output limit and safety settings"
+        ),
+    )
+    .with_details(details)
 }
 
 /// Extract the text content from a series of events.
@@ -623,7 +922,8 @@ fn extract_text_from_events(events: &[Event]) -> Option<String> {
 ///
 /// Scans events for the last text content and deserializes it into `T`.
 /// This is useful after running an agent with `output_schema` set to
-/// extract the structured result.
+/// extract the structured result. One Markdown code fence wrapping the whole
+/// text is removed first.
 ///
 /// # Example
 ///
@@ -645,7 +945,7 @@ pub fn extract_typed<T: serde::de::DeserializeOwned>(events: &[Event]) -> Result
         adk_core::AdkError::agent("no text content found in events for typed extraction")
     })?;
 
-    serde_json::from_str(&text)
+    serde_json::from_str(strip_json_code_fence(&text))
         .map_err(|e| adk_core::AdkError::agent(format!("output deserialization failed: {e}")))
 }
 
@@ -669,13 +969,16 @@ pub struct LlmAgentBuilder {
     include_contents: adk_core::IncludeContents,
     tools: Vec<Arc<dyn Tool>>,
     toolsets: Vec<Arc<dyn Toolset>>,
+    strict_toolsets: bool,
     sub_agents: Vec<Arc<dyn Agent>>,
     output_key: Option<String>,
     generate_content_config: Option<adk_core::GenerateContentConfig>,
     max_iterations: u32,
     tool_timeout: std::time::Duration,
+    expose_tool_error_messages: bool,
     before_callbacks: Vec<BeforeAgentCallback>,
     after_callbacks: Vec<AfterAgentCallback>,
+    history_processors: Vec<adk_core::HistoryProcessor>,
     before_model_callbacks: Vec<BeforeModelCallback>,
     after_model_callbacks: Vec<AfterModelCallback>,
     before_tool_callbacks: Vec<BeforeToolCallback>,
@@ -687,6 +990,7 @@ pub struct LlmAgentBuilder {
     circuit_breaker_threshold: Option<u32>,
     tool_confirmation_policy: ToolConfirmationPolicy,
     tool_execution_strategy: Option<ToolExecutionStrategy>,
+    parallelize_agent_delegations: bool,
     input_guardrails: GuardrailSet,
     output_guardrails: GuardrailSet,
     tool_guardrails: ToolGuardrailSet,
@@ -720,13 +1024,16 @@ impl LlmAgentBuilder {
             include_contents: adk_core::IncludeContents::Default,
             tools: Vec::new(),
             toolsets: Vec::new(),
+            strict_toolsets: false,
             sub_agents: Vec::new(),
             output_key: None,
             generate_content_config: None,
             max_iterations: DEFAULT_MAX_ITERATIONS,
             tool_timeout: DEFAULT_TOOL_TIMEOUT,
+            expose_tool_error_messages: false,
             before_callbacks: Vec::new(),
             after_callbacks: Vec::new(),
+            history_processors: Vec::new(),
             before_model_callbacks: Vec::new(),
             after_model_callbacks: Vec::new(),
             before_tool_callbacks: Vec::new(),
@@ -738,6 +1045,7 @@ impl LlmAgentBuilder {
             circuit_breaker_threshold: None,
             tool_confirmation_policy: ToolConfirmationPolicy::Never,
             tool_execution_strategy: None,
+            parallelize_agent_delegations: false,
             input_guardrails: GuardrailSet::new(),
             output_guardrails: GuardrailSet::new(),
             tool_guardrails: ToolGuardrailSet::new(),
@@ -873,12 +1181,18 @@ impl LlmAgentBuilder {
     }
 
     /// Prevent this agent from transferring control back to its parent.
+    ///
+    /// The model is not offered the parent as a target, and the runner refuses a transfer to
+    /// the parent that a tool of this agent requests.
     pub fn disallow_transfer_to_parent(mut self, disallow: bool) -> Self {
         self.disallow_transfer_to_parent = disallow;
         self
     }
 
     /// Prevent this agent from transferring control to peer agents.
+    ///
+    /// The model is not offered its parent's other sub-agents as targets, and the runner
+    /// refuses a transfer to one of them that a tool of this agent requests.
     pub fn disallow_transfer_to_peers(mut self, disallow: bool) -> Self {
         self.disallow_transfer_to_peers = disallow;
         self
@@ -891,6 +1205,13 @@ impl LlmAgentBuilder {
     }
 
     /// Set a state key where the agent's final output will be stored.
+    ///
+    /// The value is the concatenated text of the final model response: the last turn, the
+    /// one without tool calls. Text the model wrote beside a tool call in an earlier turn is
+    /// not included, and each run replaces the value. When a before-agent callback answers
+    /// for the agent, its content is stored instead. When an `output_schema` is set, it is
+    /// written only after the response passes schema validation; a response that exhausts
+    /// `output_max_retries` leaves the key unset.
     pub fn output_key(mut self, key: impl Into<String>) -> Self {
         self.output_key = Some(key.into());
         self
@@ -963,12 +1284,51 @@ impl LlmAgentBuilder {
 
     /// Set the timeout for individual tool executions.
     /// Default is 5 minutes. Tools that exceed this timeout will return an error.
+    ///
+    /// A tool whose [`Tool::timeout_override`] returns `Some` uses that instead,
+    /// so an `AgentTool` delegation is bounded by its own timeout. A
+    /// [`ToolEffect::NonIdempotent`] call that times out is answered with an
+    /// [`outcome_unknown_response`](adk_core::outcome_unknown_response), because
+    /// its side effect may already have happened.
     pub fn tool_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.tool_timeout = timeout;
         self
     }
 
+    /// Sends the full message of a tool or tool-callback error to the model.
+    ///
+    /// By default a call that fails with an [`AdkError`](adk_core::AdkError) is answered with
+    /// its component, category, and code only
+    /// ([`tool_error_response`](adk_core::tool_error_response)), because the message can quote
+    /// credentials, internal hosts, or upstream bodies, and the function response is sent to the
+    /// model provider and stored in the session. The message is logged when
+    /// [`RunConfig::record_payloads`](adk_core::RunConfig::record_payloads) is set. Errors with
+    /// code [`TOOL_INVALID_ARGUMENTS_CODE`](adk_core::TOOL_INVALID_ARGUMENTS_CODE) always keep
+    /// their message, as do timeouts, the agent's own refusals, and a tool's rejections
+    /// ([`ErrorCategory::is_rejection`](adk_core::ErrorCategory::is_rejection)), cut at
+    /// [`TOOL_ERROR_MESSAGE_LIMIT`](adk_core::TOOL_ERROR_MESSAGE_LIMIT) characters.
+    ///
+    /// Enable this only when every tool's error messages are safe to send to the provider. An
+    /// [`on_tool_error`](Self::on_tool_error) callback chooses the text for one failure instead.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let agent = LlmAgentBuilder::new("support")
+    ///     .model(model)
+    ///     .tool(lookup_order)
+    ///     .expose_tool_error_messages(true)
+    ///     .build()?;
+    /// ```
+    pub fn expose_tool_error_messages(mut self, expose: bool) -> Self {
+        self.expose_tool_error_messages = expose;
+        self
+    }
+
     /// Add a tool to this agent's toolbox.
+    ///
+    /// The model calls tools by name, so each tool added here needs a name of
+    /// its own: [`build`](Self::build) fails when two share one.
     pub fn tool(mut self, tool: Arc<dyn Tool>) -> Self {
         self.tools.push(tool);
         self
@@ -976,11 +1336,40 @@ impl LlmAgentBuilder {
 
     /// Register a dynamic toolset for per-invocation tool resolution.
     ///
-    /// Toolsets are resolved at the start of each `run()` call using the
-    /// invocation's `ReadonlyContext`. This enables context-dependent tools
-    /// like per-user browser sessions from a pool.
+    /// Toolsets are resolved at the start of each `run()` call, and again after
+    /// each round of tool calls, using the invocation's `ReadonlyContext`. This
+    /// enables context-dependent tools like per-user browser sessions from a
+    /// pool.
+    ///
+    /// A toolset whose `tools()` call fails is skipped for that resolution with
+    /// a `warn`-level trace naming the toolset and the error, and the turn
+    /// continues with the remaining tools. Use
+    /// [`strict_toolsets`](Self::strict_toolsets) to fail the turn instead.
     pub fn toolset(mut self, toolset: Arc<dyn Toolset>) -> Self {
         self.toolsets.push(toolset);
+        self
+    }
+
+    /// Fail the turn when any toolset cannot resolve its tools.
+    ///
+    /// Off by default: a failing toolset, such as an MCP server that is down,
+    /// is skipped and the model runs with the tools that did resolve. Turn this
+    /// on when the agent must not run without every toolset, for example when
+    /// a toolset supplies the only tools that can complete its task. It applies
+    /// to toolsets registered here and to `RunConfig::runtime_toolsets`.
+    /// Duplicate tool names fail the turn either way.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let agent = LlmAgentBuilder::new("operator")
+    ///     .model(model)
+    ///     .toolset(Arc::new(mcp_toolset))
+    ///     .strict_toolsets(true)
+    ///     .build()?;
+    /// ```
+    pub fn strict_toolsets(mut self, strict: bool) -> Self {
+        self.strict_toolsets = strict;
         self
     }
 
@@ -999,6 +1388,58 @@ impl LlmAgentBuilder {
     /// Add an after-agent callback.
     pub fn after_callback(mut self, callback: AfterAgentCallback) -> Self {
         self.after_callbacks.push(callback);
+        self
+    }
+
+    /// Add a history processor that rewrites the agent's conversation history before each
+    /// model request.
+    ///
+    /// Processors run before every model call of a turn, the first included, in the order
+    /// added, each receiving the previous one's output. The result replaces the history the
+    /// turn continues from: later steps append to it, so a compaction runs once and carries
+    /// over to the rest of the turn. The session keeps every event, and the next turn builds
+    /// its history from the session again.
+    ///
+    /// A processor receives the agent's own history: its instructions as `system` contents,
+    /// the conversation, and the turn's calls and responses, including call IDs the agent
+    /// generated for a provider that sent none. Toolsets, enhanced plugins, invocation hooks
+    /// and [`before_model_callback`](Self::before_model_callback)s apply afterwards, to each
+    /// request, and what they add never enters the history. A processor error ends the turn
+    /// with that error.
+    ///
+    /// A before-model callback shapes one request; a history processor changes what the agent
+    /// works from for the rest of the turn. A cut must keep every function response with its
+    /// call: [`balanced_content_cut`](adk_core::history::balanced_content_cut) moves a cut
+    /// back to the nearest point that does.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use adk_agent::LlmAgentBuilder;
+    /// use adk_core::Content;
+    /// use adk_core::history::balanced_content_cut;
+    ///
+    /// // Past 40 turns, replaces all but about the last 20 with a note. The cut moves earlier
+    /// // when it would separate a function response from its call.
+    /// let builder = LlmAgentBuilder::new("assistant").history_processor(Box::new(
+    ///     |_ctx, history: Vec<Content>| {
+    ///         Box::pin(async move {
+    ///             let (system, turns): (Vec<_>, Vec<_>) =
+    ///                 history.into_iter().partition(|content| content.role == "system");
+    ///             if turns.len() <= 40 {
+    ///                 return Ok(system.into_iter().chain(turns).collect());
+    ///             }
+    ///             let cut = balanced_content_cut(&turns, turns.len() - 20);
+    ///             let note = Content::new("user")
+    ///                 .with_text(format!("({cut} earlier turns were removed.)"));
+    ///             Ok(system.into_iter().chain([note]).chain(turns.into_iter().skip(cut)).collect())
+    ///         })
+    ///     },
+    /// ));
+    /// # let _ = builder;
+    /// ```
+    pub fn history_processor(mut self, processor: adk_core::HistoryProcessor) -> Self {
+        self.history_processors.push(processor);
         self
     }
 
@@ -1048,10 +1489,15 @@ impl LlmAgentBuilder {
     /// Register a callback invoked when a tool execution fails
     /// (after retries are exhausted).
     ///
+    /// The callback receives the error's full message, and
+    /// `ctx.tool_outcome()` carries the structured error in
+    /// [`ToolOutcome::error`](adk_core::ToolOutcome::error).
     /// If the callback returns `Ok(Some(value))`, the value is used as a
     /// fallback function response to the LLM. If it returns `Ok(None)`,
     /// the next callback in the chain is tried. If no callback provides a
-    /// fallback, the original error is reported to the LLM.
+    /// fallback, the LLM receives
+    /// [`tool_error_response`](adk_core::tool_error_response), which omits the message unless
+    /// [`expose_tool_error_messages`](Self::expose_tool_error_messages) is set.
     pub fn on_tool_error(mut self, callback: OnToolErrorCallback) -> Self {
         self.on_tool_error_callbacks.push(callback);
         self
@@ -1061,8 +1507,11 @@ impl LlmAgentBuilder {
     /// a per-tool override.
     ///
     /// When a tool execution fails and a retry budget applies, the agent
-    /// retries up to `budget.max_retries` times with the configured delay
-    /// between attempts.
+    /// retries up to `budget.max_retries` times, with the backoff described on
+    /// [`RetryBudget::backoff_delay`]. Only a tool whose [`Tool::effect`] is
+    /// [`ToolEffect::ReadOnly`] or [`ToolEffect::Idempotent`] is retried, and
+    /// only after a retryable error or a timeout. Each attempt gets a fresh tool
+    /// context, so a retried attempt's state delta and escalation are discarded.
     pub fn default_retry_budget(mut self, budget: RetryBudget) -> Self {
         self.default_retry_budget = Some(budget);
         self
@@ -1089,6 +1538,12 @@ impl LlmAgentBuilder {
     }
 
     /// Configure tool confirmation requirements for this agent.
+    ///
+    /// The effective requirement is the union of this policy and
+    /// [`InvocationContext::requires_tool_confirmation`], so a runtime-injected requirement
+    /// (for example a team relationship with required approval) still pauses the call when
+    /// no decision exists and blocks it when the decision is
+    /// [`ToolConfirmationDecision::Deny`](adk_core::ToolConfirmationDecision::Deny).
     pub fn tool_confirmation_policy(mut self, policy: ToolConfirmationPolicy) -> Self {
         self.tool_confirmation_policy = policy;
         self
@@ -1108,13 +1563,21 @@ impl LlmAgentBuilder {
 
     /// Set the tool execution strategy for this agent.
     ///
-    /// When set, this overrides the `RunConfig`'s `tool_execution_strategy`
-    /// for this agent's dispatch loop. When `None` (the default), the
-    /// `RunConfig` value is used. [`ToolExecutionStrategy::Parallel`] is an
-    /// explicit override that bypasses tool safety metadata, so the caller owns
-    /// concurrency safety.
+    /// Without it, the agent dispatches with [`ToolExecutionStrategy::Sequential`].
+    /// [`ToolExecutionStrategy::Parallel`] is an explicit override that bypasses
+    /// tool safety metadata, so the caller owns concurrency safety.
     pub fn tool_execution_strategy(mut self, strategy: ToolExecutionStrategy) -> Self {
         self.tool_execution_strategy = Some(strategy);
+        self
+    }
+
+    /// Allow consecutive agent-delegation calls to execute concurrently.
+    ///
+    /// Ordinary tools remain sequential and retain their position relative to
+    /// each delegation batch. This setting takes precedence over the general
+    /// tool execution strategy for the agent.
+    pub fn parallelize_agent_delegations(mut self, parallelize: bool) -> Self {
+        self.parallelize_agent_delegations = parallelize;
         self
     }
 
@@ -1138,6 +1601,14 @@ impl LlmAgentBuilder {
     /// - Redact PII from responses
     /// - Block harmful content in responses
     ///
+    /// They screen every model turn before the client or the session sees it: the final
+    /// response through `Guardrail::validate`, and the text of a turn that also calls tools, or
+    /// that the provider paused, through `Guardrail::validate_preamble`, so a transform
+    /// rewrites that text and keeps the calls. A block ends the run with an `InvalidInput`
+    /// error coded `guardrail.output_blocked`, and the blocked turn's calls do not run. A
+    /// tool result that ends the turn is screened too. With output guardrails set, an `SSE`
+    /// or `Bidi` run delivers each model turn as one event.
+    ///
     /// Requires the `guardrails` feature.
     pub fn output_guardrails(mut self, guardrails: GuardrailSet) -> Self {
         self.output_guardrails = guardrails;
@@ -1151,9 +1622,16 @@ impl LlmAgentBuilder {
     /// but not with these arguments". A [`ToolGuardrailSet`] receives the tool name and the
     /// arguments and may allow, deny, or narrow them.
     ///
-    /// Screening runs before the tool executes and before confirmation is resolved, so a denied
-    /// call neither prompts the user nor consumes a concurrency permit. A denial is reported to
-    /// the model as the tool's result, letting it correct the call rather than stalling the run.
+    /// Screening runs on the call's final arguments, after plugin and callback rewrites and the
+    /// run's [`ToolPolicy`](adk_core::ToolPolicy), and before confirmation is resolved, so a
+    /// denied call neither prompts the user nor consumes a concurrency permit. A denial is
+    /// reported to the model as the tool's result, letting it correct the call rather than
+    /// stalling the run.
+    ///
+    /// The set also screens each call's result (`ToolGuardrail::validate_result`) after the
+    /// after-tool callbacks and plugins, before the model, the client, or the session sees it:
+    /// a revision replaces the result, and a withheld result is answered with
+    /// [`result_blocked_response`](adk_core::result_blocked_response).
     ///
     /// Requires the `guardrails` feature.
     ///
@@ -1266,7 +1744,13 @@ impl LlmAgentBuilder {
         self
     }
 
-    /// Build the [`LlmAgent`], returning an error if no model was set.
+    /// Build the [`LlmAgent`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no model was set, when two sub-agents share a
+    /// name, or when two tools added with [`tool`](Self::tool) share a name
+    /// (code `agent.duplicate_tool_name`).
     pub fn build(self) -> Result<LlmAgent> {
         let model = self.model.ok_or_else(|| adk_core::AdkError::agent("Model is required"))?;
 
@@ -1279,6 +1763,7 @@ impl LlmAgentBuilder {
                 )));
             }
         }
+        adk_core::ensure_unique_tool_names(&self.name, &self.tools)?;
 
         // Validate: Gemini Interactions API + client-side sandbox tools conflict.
         // These provide competing filesystems and would produce nondeterministic behavior.
@@ -1328,13 +1813,16 @@ impl LlmAgentBuilder {
             include_contents: self.include_contents,
             tools: self.tools,
             toolsets: self.toolsets,
+            strict_toolsets: self.strict_toolsets,
             sub_agents: self.sub_agents,
             output_key: self.output_key,
             generate_content_config: self.generate_content_config,
             max_iterations: self.max_iterations,
             tool_timeout: self.tool_timeout,
+            expose_tool_error_messages: self.expose_tool_error_messages,
             before_callbacks: Arc::new(self.before_callbacks),
             after_callbacks: Arc::new(self.after_callbacks),
+            history_processors: Arc::new(self.history_processors),
             before_model_callbacks: Arc::new(self.before_model_callbacks),
             after_model_callbacks: Arc::new(self.after_model_callbacks),
             before_tool_callbacks: Arc::new(self.before_tool_callbacks),
@@ -1346,6 +1834,7 @@ impl LlmAgentBuilder {
             circuit_breaker_threshold: self.circuit_breaker_threshold,
             tool_confirmation_policy: self.tool_confirmation_policy,
             tool_execution_strategy: self.tool_execution_strategy,
+            parallelize_agent_delegations: self.parallelize_agent_delegations,
             input_guardrails: Arc::new(self.input_guardrails),
             output_guardrails: Arc::new(self.output_guardrails),
             tool_guardrails: Arc::new(self.tool_guardrails),
@@ -1381,6 +1870,25 @@ const TOOL_PROGRESS_MAX_TOTAL_BYTES: usize = 1024 * 1024;
 /// Text appended in place of progress output that was not forwarded.
 const TOOL_PROGRESS_TRUNCATION_MARKER: &str = "[adk: tool progress truncated]";
 
+/// Progress stream that carries the marker for dropped forwarded events.
+const FORWARDED_EVENTS_STREAM: &str = "events";
+
+/// Text emitted once, ahead of the next forwarded event, after a tool's forwarded partial
+/// events were dropped.
+const FORWARDED_EVENTS_DROPPED_MARKER: &str = "[adk: forwarded events dropped]";
+
+/// Markers that found the progress queue full, delivered by the dispatch loop after the
+/// queued events.
+type ProgressOverflow = Arc<std::sync::Mutex<Vec<Event>>>;
+
+/// Queues `marker`, keeping it in `overflow` when the queue is full: a marker reports a
+/// backlog, so the full queue is exactly when it must not be dropped.
+fn send_marker(tx: &tokio::sync::mpsc::Sender<Event>, overflow: &ProgressOverflow, marker: Event) {
+    if let Err(tokio::sync::mpsc::error::TrySendError::Full(marker)) = tx.try_send(marker) {
+        overflow.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(marker);
+    }
+}
+
 /// Truncates `text` to at most `max_bytes`, never splitting a character.
 fn truncate_on_char_boundary(text: &str, max_bytes: usize) -> &str {
     if text.len() <= max_bytes {
@@ -1399,12 +1907,42 @@ struct AgentToolContext {
     /// The tool this context was built for, recorded by the dispatcher so secret
     /// requests carry an identity the tool cannot choose.
     tool_name: Option<String>,
+    /// The key of the held call this context resumes, shared by every run that resumes
+    /// it; `None` for a call made in this invocation (spec 3.1 §7.12).
+    idempotency_key: Option<String>,
+    /// The names of the calling agent's tools, recorded by the dispatcher.
+    agent_tools: Option<Vec<String>>,
     actions: Mutex<EventActions>,
     progress_tx: Option<tokio::sync::mpsc::Sender<Event>>,
+    /// Where a marker goes when the progress queue is full.
+    progress_overflow: ProgressOverflow,
     /// Progress bytes forwarded so far for this call.
     progress_bytes: std::sync::atomic::AtomicUsize,
     /// Set once the truncation marker has been emitted, so it is emitted once.
     progress_truncated: std::sync::atomic::AtomicBool,
+    /// Forwarded partial events dropped because the consumer did not keep up.
+    events_dropped: std::sync::atomic::AtomicUsize,
+    /// Set once the marker for dropped forwarded events has been sent.
+    events_drop_marked: std::sync::atomic::AtomicBool,
+}
+
+impl Drop for AgentToolContext {
+    fn drop(&mut self) {
+        let dropped = *self.events_dropped.get_mut();
+        if dropped == 0 {
+            return;
+        }
+        tracing::warn!(
+            function_call.id = %self.function_call_id,
+            events.dropped = dropped,
+            "forwarded partial events were dropped for this tool call"
+        );
+        if !*self.events_drop_marked.get_mut()
+            && let Some(tx) = &self.progress_tx
+        {
+            send_marker(tx, &self.progress_overflow, self.events_dropped_marker());
+        }
+    }
 }
 
 impl AgentToolContext {
@@ -1413,10 +1951,15 @@ impl AgentToolContext {
             parent_ctx,
             function_call_id,
             tool_name: None,
+            idempotency_key: None,
+            agent_tools: None,
             actions: Mutex::new(EventActions::default()),
             progress_tx: None,
+            progress_overflow: ProgressOverflow::default(),
             progress_bytes: std::sync::atomic::AtomicUsize::new(0),
             progress_truncated: std::sync::atomic::AtomicBool::new(false),
+            events_dropped: std::sync::atomic::AtomicUsize::new(0),
+            events_drop_marked: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -1426,10 +1969,27 @@ impl AgentToolContext {
         self
     }
 
+    /// Keys the call by `key` instead of this invocation and its call ID.
+    fn with_idempotency_key(mut self, key: Option<String>) -> Self {
+        self.idempotency_key = key;
+        self
+    }
+
+    /// Record the names of the calling agent's tools.
+    fn with_agent_tools(mut self, tools: impl IntoIterator<Item = String>) -> Self {
+        self.agent_tools = Some(tools.into_iter().collect());
+        self
+    }
+
     /// Attach a progress sink so [`ToolContext::emit_progress`] forwards chunks
     /// as partial [`Event`]s onto the agent's `EventStream`.
-    fn with_progress(mut self, tx: tokio::sync::mpsc::Sender<Event>) -> Self {
+    fn with_progress(
+        mut self,
+        tx: tokio::sync::mpsc::Sender<Event>,
+        overflow: ProgressOverflow,
+    ) -> Self {
         self.progress_tx = Some(tx);
+        self.progress_overflow = overflow;
         self
     }
 
@@ -1504,6 +2064,17 @@ impl AgentToolContext {
         }
     }
 
+    /// The marker that stands in for forwarded partial events this call dropped.
+    fn events_dropped_marker(&self) -> Event {
+        Event::tool_progress(
+            self.parent_ctx.invocation_id(),
+            self.parent_ctx.agent_name(),
+            &self.function_call_id,
+            FORWARDED_EVENTS_STREAM,
+            FORWARDED_EVENTS_DROPPED_MARKER,
+        )
+    }
+
     /// Emits the truncation marker once for this call.
     async fn mark_progress_truncated(&self, tx: &tokio::sync::mpsc::Sender<Event>, stream: &str) {
         use std::sync::atomic::Ordering;
@@ -1522,7 +2093,7 @@ impl AgentToolContext {
             stream,
             TOOL_PROGRESS_TRUNCATION_MARKER,
         );
-        let _ = tx.try_send(marker);
+        send_marker(tx, &self.progress_overflow, marker);
     }
 
     fn actions_guard(&self) -> std::sync::MutexGuard<'_, EventActions> {
@@ -1562,6 +2133,14 @@ impl ReadonlyContext for AgentToolContext {
     fn user_content(&self) -> &Content {
         self.parent_ctx.user_content()
     }
+
+    fn acting_context(&self) -> adk_core::ActingContext {
+        self.parent_ctx.acting_context()
+    }
+
+    fn is_authenticated(&self) -> bool {
+        self.parent_ctx.is_authenticated()
+    }
 }
 
 #[async_trait]
@@ -1580,6 +2159,26 @@ impl CallbackContext for AgentToolContext {
 impl ToolContext for AgentToolContext {
     fn function_call_id(&self) -> &str {
         &self.function_call_id
+    }
+
+    fn agent_tool_names(&self) -> Option<Vec<String>> {
+        self.agent_tools.clone()
+    }
+
+    /// A resumed held call keeps the key it was first dispatched under, so a payment or
+    /// another downstream idempotency key is the same in every run that resumes it
+    /// (spec 3.1 §7.12). Any other call uses the trait's default form.
+    fn idempotency_key(&self) -> String {
+        self.idempotency_key.clone().unwrap_or_else(|| {
+            format!(
+                "{}/{}/{}/{}/{}",
+                self.app_name(),
+                self.user_id(),
+                self.session_id(),
+                self.invocation_id(),
+                self.function_call_id
+            )
+        })
     }
 
     fn actions(&self) -> EventActions {
@@ -1636,10 +2235,40 @@ impl ToolContext for AgentToolContext {
     }
 
     async fn emit_event(&self, event: Event) {
-        if let Some(tx) = &self.progress_tx
-            && !tx.is_closed()
+        use std::sync::atomic::Ordering;
+
+        let Some(tx) = &self.progress_tx else {
+            return;
+        };
+        if tx.is_closed() {
+            return;
+        }
+        // A complete event becomes session history, so it waits for the consumer as a tool
+        // result does. Only a partial event, which is never persisted, may be dropped.
+        if !event.llm_response.partial {
+            let _ = tx.send(event).await;
+            return;
+        }
+        // A consumer that missed partial events is told so before the next one reaches it.
+        if self.events_dropped.load(Ordering::Relaxed) > 0
+            && !self.events_drop_marked.load(Ordering::Relaxed)
+            && tokio::time::timeout(
+                TOOL_PROGRESS_SEND_TIMEOUT,
+                tx.send(self.events_dropped_marker()),
+            )
+            .await
+            .is_ok_and(|sent| sent.is_ok())
         {
-            let _ = tokio::time::timeout(TOOL_PROGRESS_SEND_TIMEOUT, tx.send(event)).await;
+            self.events_drop_marked.store(true, Ordering::Relaxed);
+        }
+        if tokio::time::timeout(TOOL_PROGRESS_SEND_TIMEOUT, tx.send(event)).await.is_ok() {
+            return;
+        }
+        if self.events_dropped.fetch_add(1, Ordering::Relaxed) == 0 {
+            tracing::warn!(
+                function_call.id = %self.function_call_id,
+                "consumer is not keeping up; forwarded partial events are being dropped"
+            );
         }
     }
 
@@ -1711,6 +2340,14 @@ impl ReadonlyContext for ToolOutcomeCallbackContext {
     fn user_content(&self) -> &Content {
         self.inner.user_content()
     }
+
+    fn acting_context(&self) -> adk_core::ActingContext {
+        self.inner.acting_context()
+    }
+
+    fn is_authenticated(&self) -> bool {
+        self.inner.is_authenticated()
+    }
 }
 
 #[async_trait]
@@ -1721,6 +2358,10 @@ impl CallbackContext for ToolOutcomeCallbackContext {
 
     fn tool_outcome(&self) -> Option<ToolOutcome> {
         Some(self.outcome.clone())
+    }
+
+    fn shared_state(&self) -> Option<Arc<adk_core::SharedState>> {
+        self.inner.shared_state()
     }
 }
 
@@ -1765,10 +2406,118 @@ struct ToolExecutionResult {
     content: Content,
     actions: EventActions,
     escalate_or_skip: bool,
+    /// Set when the call is held for a confirmation decision that does not exist yet.
+    pending: Option<ToolConfirmationRequest>,
+    /// Whether the tool's `execute` was entered in this dispatch.
+    executed: bool,
+}
+
+/// Runs output guardrails on the function responses of a result that ends the turn.
+///
+/// Guardrails read text parts, so each response is screened as its JSON text. A transformed
+/// text replaces the response, parsed back to JSON when it still parses and wrapped as
+/// `{"result": text}` when it does not.
+async fn screen_terminal_tool_output(
+    guardrails: &GuardrailSet,
+    mut content: Content,
+) -> Result<Screened> {
+    let mut warnings = Warnings::default();
+    for part in &mut content.parts {
+        if let Part::FunctionResponse { function_response, .. } = part {
+            let text = function_response.response.to_string();
+            let screened = enforce_guardrails(
+                guardrails,
+                &Content::new("model").with_text(&text),
+                Phase::Output,
+            )
+            .await?;
+            let screened_text: String =
+                screened.content.parts.iter().filter_map(Part::text).collect();
+            if screened_text != text {
+                function_response.response = serde_json::from_str(&screened_text)
+                    .unwrap_or_else(|_| serde_json::json!({ "result": screened_text }));
+            }
+            warnings.extend(screened.warnings);
+        }
+    }
+    Ok(Screened { content, warnings })
+}
+
+/// Turns a tool callback's substitute content into the response to the call it replaces.
+///
+/// Providers reject a request whose function call has no function response with the same id,
+/// so a function response part is re-addressed to this call, keeping the annotations the
+/// callback set, and text-only content is wrapped as one by `wrap_text`, with `text_status`.
+/// Only the function response is kept, as OpenAI Chat reads the first part of a tool message
+/// and nothing else.
+fn callback_tool_response(
+    content: Content,
+    name: &str,
+    id: Option<&String>,
+    wrap_text: impl FnOnce(String) -> serde_json::Value,
+    text_status: Option<ToolResultStatus>,
+) -> Content {
+    let mut text = String::new();
+    let mut response = None;
+    for part in content.parts {
+        match part {
+            Part::FunctionResponse { mut function_response, annotations, .. }
+                if response.is_none() =>
+            {
+                function_response.name = name.to_string();
+                response = Some(Part::FunctionResponse {
+                    function_response,
+                    id: id.cloned(),
+                    annotations,
+                });
+            }
+            other => {
+                if let Some(chunk) = other.text() {
+                    text.push_str(chunk);
+                }
+            }
+        }
+    }
+    let response = response.unwrap_or_else(|| {
+        let mut part = Part::FunctionResponse {
+            function_response: FunctionResponseData::new(name, wrap_text(text)),
+            id: id.cloned(),
+            annotations: None,
+        };
+        if let Some(status) = text_status {
+            part.set_tool_result_status(status, None);
+        }
+        part
+    });
+    Content { role: "function".to_string(), parts: vec![response] }
+}
+
+#[derive(Clone, Copy)]
+enum ToolDispatchMode {
+    Sequential,
+    Parallel,
+    ParallelDelegations,
+    Auto,
+}
+
+impl ToolDispatchMode {
+    fn resolve(strategy: ToolExecutionStrategy, parallelize_agent_delegations: bool) -> Self {
+        if parallelize_agent_delegations {
+            return Self::ParallelDelegations;
+        }
+        match strategy {
+            ToolExecutionStrategy::Sequential => Self::Sequential,
+            ToolExecutionStrategy::Parallel => Self::Parallel,
+            ToolExecutionStrategy::Auto => Self::Auto,
+        }
+    }
 }
 
 struct ToolExecutor<'a> {
     ctx: Arc<dyn InvocationContext>,
+    /// The agent the results are authored by. Under a workflow parent the context names the
+    /// parent, but a call's response belongs to the agent that issued it, as its hold does.
+    agent_name: &'a str,
     tool_map: &'a std::collections::HashMap<String, Arc<dyn Tool>>,
     tool_retry_budgets: &'a std::collections::HashMap<String, RetryBudget>,
     default_retry_budget: &'a Option<RetryBudget>,
@@ -1776,138 +2525,325 @@ struct ToolExecutor<'a> {
     after_tool_callbacks: &'a Arc<Vec<AfterToolCallback>>,
     after_tool_callbacks_full: &'a Arc<Vec<AfterToolCallbackFull>>,
     on_tool_error_callbacks: &'a Arc<Vec<OnToolErrorCallback>>,
+    /// The run's invocation hooks, iterated ahead of the agent's own tool callbacks.
+    hook_callbacks: &'a HookCallbacks,
     tool_confirmation_policy: &'a ToolConfirmationPolicy,
+    tool_guardrails: &'a ToolGuardrailSet,
+    /// Screens a result that ends the turn, since that result is the final response.
+    output_guardrails: &'a GuardrailSet,
     cb_mutex: &'a std::sync::Mutex<Option<CircuitBreakerState>>,
     invocation_id: &'a str,
     concurrency_manager: &'a adk_core::ToolConcurrencyManager,
     progress_tx: tokio::sync::mpsc::Sender<Event>,
+    progress_overflow: ProgressOverflow,
     tool_timeout: std::time::Duration,
-    confirmation_decisions: &'a std::collections::HashMap<String, ToolConfirmationDecision>,
-    confirmation_fingerprints: &'a std::collections::HashMap<String, String>,
-    live_confirmation_decisions: &'a std::collections::HashMap<String, ToolConfirmationDecision>,
+    expose_tool_error_messages: bool,
+    /// Set when an approval fails, so calls still waiting for theirs stop waiting.
+    approval_failed: tokio::sync::watch::Sender<bool>,
     #[cfg(feature = "enhanced-plugins")]
     enhanced_plugin_manager: &'a Option<Arc<EnhancedPluginManager>>,
 }
 
 impl ToolExecutor<'_> {
-    async fn execute(&self, call: PendingToolCall) -> ToolExecutionResult {
-        let PendingToolCall { index, name, args, id, function_call_id, guardrail_denial } = call;
+    /// Runs one batch of calls under `strategy`, returning results in completion order.
+    async fn dispatch(
+        &self,
+        strategy: ToolDispatchMode,
+        fc_parts: Vec<PendingToolCall>,
+    ) -> Result<Vec<ToolExecutionResult>> {
+        let results: Vec<ToolExecutionResult> = match strategy {
+            ToolDispatchMode::Sequential => {
+                let mut results = Vec::with_capacity(fc_parts.len());
+                for call in fc_parts {
+                    results.push(self.execute(call).await?);
+                }
+                results
+            }
+            ToolDispatchMode::Parallel => {
+                use futures::StreamExt as _;
+                // Parallel is an explicit caller override. Tool
+                // safety metadata is intentionally not inspected.
+                // All concurrency enforcement is handled by the
+                // ToolConcurrencyManager semaphore inside ToolExecutor.
+                // Use fc_parts.len() as buffer so all futures can start
+                // and queue on the semaphore for proper per-tool limiting.
+                let buffer_size = fc_parts.len().max(1);
+                futures::stream::iter(fc_parts.into_iter().map(|call| self.execute(call)))
+                    .buffer_unordered(buffer_size)
+                    // Running tools finish before an approval error ends the turn.
+                    .collect::<Vec<_>>()
+                    .await
+                    .into_iter()
+                    .collect::<Result<Vec<_>>>()?
+            }
+            ToolDispatchMode::ParallelDelegations => {
+                use futures::StreamExt as _;
+
+                let mut all_results = Vec::with_capacity(fc_parts.len());
+                let mut calls = fc_parts.into_iter().peekable();
+                while let Some(call) = calls.next() {
+                    let is_delegation = self
+                        .tool_map
+                        .get(&call.name)
+                        .is_some_and(|tool| tool.is_agent_delegation());
+                    if !is_delegation {
+                        all_results.push(self.execute(call).await?);
+                        continue;
+                    }
+
+                    let mut delegation_batch = vec![call];
+                    while calls.peek().is_some_and(|next| {
+                        self.tool_map.get(&next.name).is_some_and(|tool| tool.is_agent_delegation())
+                    }) {
+                        if let Some(next) = calls.next() {
+                            delegation_batch.push(next);
+                        }
+                    }
+
+                    let buffer_size = delegation_batch.len();
+                    all_results.extend(
+                        futures::stream::iter(
+                            delegation_batch.into_iter().map(|call| self.execute(call)),
+                        )
+                        .buffer_unordered(buffer_size)
+                        .collect::<Vec<_>>()
+                        .await
+                        .into_iter()
+                        .collect::<Result<Vec<_>>>()?,
+                    );
+                }
+                all_results
+            }
+            ToolDispatchMode::Auto => {
+                use futures::StreamExt as _;
+
+                // A call may overlap another only when its tool is read-only *and* declares
+                // concurrency safety. Only a run of adjacent such calls overlaps; any other
+                // call runs alone, in the model's order, so it starts only after every call
+                // listed before it has finished.
+                let is_concurrent = |call: &PendingToolCall| {
+                    self.tool_map
+                        .get(&call.name)
+                        .is_some_and(|tool| tool.is_read_only() && tool.is_concurrency_safe())
+                };
+                let mut all_results = Vec::with_capacity(fc_parts.len());
+                let mut calls = fc_parts.into_iter().peekable();
+                while let Some(call) = calls.next() {
+                    if !is_concurrent(&call) {
+                        all_results.push(self.execute(call).await?);
+                        continue;
+                    }
+
+                    let mut concurrent_batch = vec![call];
+                    while calls.peek().is_some_and(is_concurrent) {
+                        if let Some(next) = calls.next() {
+                            concurrent_batch.push(next);
+                        }
+                    }
+
+                    // Concurrency enforcement is handled by the semaphore inside ToolExecutor.
+                    let buffer_size = concurrent_batch.len();
+                    all_results.extend(
+                        futures::stream::iter(
+                            concurrent_batch.into_iter().map(|call| self.execute(call)),
+                        )
+                        .buffer_unordered(buffer_size)
+                        .collect::<Vec<_>>()
+                        .await
+                        .into_iter()
+                        .collect::<Result<Vec<_>>>()?,
+                    );
+                }
+                all_results
+            }
+        };
+        Ok(results)
+    }
+
+    async fn execute(&self, call: PendingToolCall) -> Result<ToolExecutionResult> {
+        let screened_call =
+            (!self.tool_guardrails.is_empty()).then(|| (call.name.clone(), call.args.clone()));
+        // The run's call a person asked for: its answer carries the mark, as its call does.
+        let requested = self
+            .ctx
+            .run_config()
+            .requested_call
+            .as_ref()
+            .filter(|requested| requested.function_call_id == call.function_call_id);
+        let mut result = self.execute_inner(call).await?;
+        // Tool guardrails see the result the model is about to be sent, after every after-tool
+        // stage. A held call's pending response is not a result.
+        if let Some((name, args)) = screened_call
+            && result.pending.is_none()
+        {
+            let (content, withheld) = screen_tool_result(
+                self.tool_guardrails,
+                &name,
+                &args,
+                result.executed,
+                result.content,
+            )
+            .await;
+            result.content = content;
+            for reason in withheld {
+                // A guardrail's reason can describe the result it withheld.
+                tracing::debug!(
+                    tool.name = %name,
+                    reason = %self.logged_message(&reason),
+                    "tool result withheld"
+                );
+            }
+        }
+        // A result that ends the turn is the final response, so it is screened like one,
+        // before the client or the session sees it.
+        let mut warnings = Warnings::default();
+        if result.escalate_or_skip && result.pending.is_none() && !self.output_guardrails.is_empty()
+        {
+            let screened =
+                screen_terminal_tool_output(self.output_guardrails, result.content).await?;
+            result.content = screened.content;
+            warnings = screened.warnings;
+        }
+        let mut event = Event::new(self.invocation_id);
+        event.author = self.agent_name.to_owned();
+        event.branch = self.ctx.branch().to_owned();
+        warnings.record_on(&mut event);
+        event.actions = result.actions.clone();
+        event.llm_response.content = Some(result.content.clone());
+        if let Some(requested) = requested {
+            requested.mark(&mut event);
+        }
+        // Runner commits each result while other calls are still awaiting approval.
+        let _ = self.progress_tx.send(event).await;
+        Ok(result)
+    }
+
+    /// The text logged for an error message, see [`traced_message`].
+    fn logged_message(&self, message: &str) -> String {
+        traced_message(self.ctx.run_config(), message)
+    }
+
+    /// Records, through the run's audit trail, a call that `answered_by` answered before
+    /// the governed path saw it, so the trail shows every call that skipped authorization.
+    ///
+    /// # Errors
+    ///
+    /// Returns `audit.record_failed`, which ends the turn, when the record cannot be
+    /// written under [`AuditFailureMode::Block`](adk_core::audit_log::AuditFailureMode::Block).
+    async fn record_short_circuit(
+        &self,
+        name: &str,
+        function_call_id: &str,
+        args: &serde_json::Value,
+        answered_by: &str,
+    ) -> Result<()> {
+        tracing::debug!(
+            tool.name = %name,
+            tool.answered_by = %answered_by,
+            "tool call answered before authorization; the tool was not run"
+        );
+        let Some(trail) = &self.ctx.run_config().audit else {
+            return Ok(());
+        };
+        let mut draft = AuditRecordDraft::new(AuditRecordKind::ToolCall, SHORT_CIRCUIT_ACTION)
+            .actor(AuditActor::for_context(self.ctx.as_ref()))
+            .args_digest(trail.digest(args))
+            .outcome(AuditRecordOutcome::NotRun)
+            .ext("toolName", serde_json::Value::String(name.to_string()))
+            .ext("agentName", serde_json::Value::String(self.agent_name.to_string()))
+            .ext("answeredBy", serde_json::Value::String(answered_by.to_string()))
+            .ext("functionCallId", serde_json::Value::String(function_call_id.to_string()))
+            .ext("sessionId", serde_json::Value::String(self.ctx.session_id().to_string()));
+        if let Some(tool) = self.tool_map.get(name) {
+            let origin = adk_core::ToolOrigin::of(tool.as_ref());
+            draft = draft
+                .ext("toolSource", serde_json::Value::String(origin.source))
+                .ext("declarationDigest", serde_json::Value::String(origin.declaration_digest));
+        }
+        if let Err(error) = trail.record(draft).await {
+            self.approval_failed.send_replace(true);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    async fn execute_inner(&self, call: PendingToolCall) -> Result<ToolExecutionResult> {
+        let PendingToolCall { index, name, args, id, function_call_id, resumes } = call;
+        // A resumed held call runs under a later invocation, so it is ledgered under its
+        // original identity, which every resumption of it shares (spec 3.1 §7.12, I37).
+        let resumed_ledger_key = resumes.as_ref().map(|held| {
+            crate::tool_ledger::held_call_ledger_key(
+                self.ctx.app_name(),
+                self.ctx.user_id(),
+                self.ctx.session_id(),
+                &function_call_id,
+                &held.fingerprint(),
+            )
+        });
         let mut tool_actions = EventActions::default();
         let mut response_content: Option<Content> = None;
         let mut run_after_tool_callbacks = true;
         let mut tool_outcome_for_callback: Option<ToolOutcome> = None;
         let mut executed_tool: Option<Arc<dyn Tool>> = None;
         let mut executed_tool_response: Option<serde_json::Value> = None;
-
-        if let Some(reason) = guardrail_denial {
-            // Screening happened before confirmation. Report a denial as the tool's result so the
-            // model can correct the call instead of the run stalling.
-            let denied_content = Content {
-                role: "function".to_string(),
-                parts: vec![Part::FunctionResponse {
-                    function_response: FunctionResponseData::new(
-                        name.clone(),
-                        serde_json::json!({ "error": reason }),
-                    ),
-                    id: id.clone(),
-                    annotations: None,
-                }],
+        // Set once `execute` was called, so its side effect may have happened.
+        let mut tool_executed = false;
+        let mut pending_confirmation: Option<ToolConfirmationRequest> = None;
+        // Set when a call that ran ended with an unknown outcome: no later stage settles it.
+        let mut unknown_outcome: Option<Arc<adk_core::AdkError>> = None;
+        // An answer the agent writes in place of the tool's result, with its status.
+        let answer = |response: serde_json::Value,
+                      status: Option<ToolResultStatus>,
+                      cause: Option<&adk_core::AdkError>| {
+            let mut part = Part::FunctionResponse {
+                function_response: FunctionResponseData::from_tool_result(name.clone(), response),
+                id: id.clone(),
+                annotations: None,
             };
-            return ToolExecutionResult {
-                index,
-                content: denied_content,
-                actions: tool_actions,
-                escalate_or_skip: false,
-            };
-        }
-
-        // Acquire concurrency permit before tool execution.
-        // The permit is held for the entire duration of this tool call
-        // and released on drop when this async block completes.
-        let _concurrency_permit = match self.concurrency_manager.acquire(&name).await {
-            Ok(permit) => Some(permit),
-            Err(e) => {
-                // Concurrency limit reached with Fail policy — return error
-                let error_content = Content {
-                    role: "function".to_string(),
-                    parts: vec![Part::FunctionResponse {
-                        function_response: FunctionResponseData::new(
-                            name.clone(),
-                            serde_json::json!({ "error": e.to_string() }),
-                        ),
-                        id: id.clone(),
-                        annotations: None,
-                    }],
-                };
-                return ToolExecutionResult {
-                    index,
-                    content: error_content,
-                    actions: tool_actions,
-                    escalate_or_skip: false,
-                };
+            if let Some(status) = status {
+                part.set_tool_result_status(status, cause);
             }
+            Content { role: "function".to_string(), parts: vec![part] }
+        };
+        let not_run = |message: String, cause: Option<&adk_core::AdkError>| {
+            answer(serde_json::json!({ "error": message }), Some(ToolResultStatus::NotRun), cause)
+        };
+        // A callback's error message stays local unless the agent exposes error messages.
+        let callback_failure = |error: &adk_core::AdkError| {
+            if self.expose_tool_error_messages { error.to_string() } else { error.redacted() }
         };
 
-        // Tool confirmation (deny case; None handled by pre-check)
-        if self.tool_confirmation_policy.requires_confirmation(&name) {
-            match self.live_confirmation_decisions.get(&function_call_id).copied().or_else(|| {
-                static_confirmation_decision(
-                    self.confirmation_decisions,
-                    self.confirmation_fingerprints,
-                    &function_call_id,
-                    &name,
-                    &args,
-                )
-            }) {
-                Some(ToolConfirmationDecision::Approve) => {
-                    tool_actions.tool_confirmation_decision =
-                        Some(ToolConfirmationDecision::Approve);
-                }
-                Some(ToolConfirmationDecision::Deny) => {
-                    tool_actions.tool_confirmation_decision = Some(ToolConfirmationDecision::Deny);
-                    response_content = Some(Content {
-                        role: "function".to_string(),
-                        parts: vec![Part::FunctionResponse {
-                            function_response: FunctionResponseData::new(
-                                name.clone(),
-                                serde_json::json!({
-                                    "error": format!("Tool '{}' execution denied by confirmation policy", name)
-                                }),
-                            ),
-                            id: id.clone(),
-                            annotations: None,
-                        }],
-                    });
-                    run_after_tool_callbacks = false;
-                }
-                None => {
-                    response_content = Some(Content {
-                        role: "function".to_string(),
-                        parts: vec![Part::FunctionResponse {
-                            function_response: FunctionResponseData::new(
-                                name.clone(),
-                                serde_json::json!({
-                                    "error": format!("Tool '{}' requires confirmation", name)
-                                }),
-                            ),
-                            id: id.clone(),
-                            annotations: None,
-                        }],
-                    });
-                    run_after_tool_callbacks = false;
-                }
-            }
+        // The provider could not decode the model's arguments into an object, so there is
+        // nothing to authorize or execute; the model is asked to send the call again.
+        if let Some(reason) = adk_core::invalid_tool_arguments_reason(&args) {
+            tracing::warn!(
+                tool.name = %name,
+                reason = %reason,
+                "tool call arguments are not a JSON object; answering without executing"
+            );
+            return Ok(ToolExecutionResult {
+                index,
+                content: not_run(
+                    format!(
+                        "tool '{name}' was not run: {reason}. Call it again with arguments that \
+                         are one JSON object matching its parameters."
+                    ),
+                    None,
+                ),
+                actions: tool_actions,
+                escalate_or_skip: false,
+                pending: None,
+                executed: false,
+            });
         }
 
-        // Before-tool callbacks
-        // Track potentially modified args for enhanced plugin after-hook
-        #[allow(unused_mut)]
-        let mut final_args = args.clone();
+        // Before-tool hooks run first and may rewrite the arguments. Governance below sees
+        // only the final arguments, so nothing can change a call after it is authorized.
+        let mut final_args = args;
 
         // ===== ENHANCED PLUGIN: BEFORE TOOL CALL =====
         #[cfg(feature = "enhanced-plugins")]
-        if response_content.is_none()
-            && let Some(epm) = self.enhanced_plugin_manager.as_ref()
+        if let Some(epm) = self.enhanced_plugin_manager.as_ref()
             && let Some(tool_ref) = self.tool_map.get(&name)
         {
             match epm
@@ -1923,6 +2859,13 @@ impl ToolExecutor<'_> {
                 }
                 Ok(BeforeToolCallResult::ShortCircuit(synthetic_result)) => {
                     // Short-circuit: use synthetic result, skip tool execution
+                    self.record_short_circuit(
+                        &name,
+                        &function_call_id,
+                        &final_args,
+                        SHORT_CIRCUIT_BY_ENHANCED_PLUGIN,
+                    )
+                    .await?;
                     response_content = Some(Content {
                         role: "function".to_string(),
                         parts: vec![Part::FunctionResponse {
@@ -1937,17 +2880,20 @@ impl ToolExecutor<'_> {
                     executed_tool = Some(tool_ref.clone());
                 }
                 Err(e) => {
-                    response_content = Some(Content {
-                        role: "function".to_string(),
-                        parts: vec![Part::FunctionResponse {
-                            function_response: FunctionResponseData::new(
-                                name.clone(),
-                                serde_json::json!({ "error": e.to_string() }),
-                            ),
-                            id: id.clone(),
-                            annotations: None,
-                        }],
-                    });
+                    tracing::warn!(
+                        tool.name = %name,
+                        error.code = %e.code,
+                        error.category = %e.category,
+                        error.message = %self.logged_message(&e.message),
+                        "before-tool plugin failed; the tool was not run"
+                    );
+                    response_content = Some(not_run(
+                        format!(
+                            "tool '{name}' was not run: a before-tool plugin failed with {}",
+                            callback_failure(&e)
+                        ),
+                        Some(&e),
+                    ));
                     run_after_tool_callbacks = false;
                 }
             }
@@ -1959,25 +2905,54 @@ impl ToolExecutor<'_> {
                 name.clone(),
                 final_args.clone(),
             ));
-            for callback in self.before_tool_callbacks.as_ref() {
+            let hooks = self.hook_callbacks.before_tool.len();
+            for (position, callback) in self
+                .hook_callbacks
+                .before_tool
+                .iter()
+                .chain(self.before_tool_callbacks.iter())
+                .enumerate()
+            {
                 match callback(tool_ctx.clone() as Arc<dyn CallbackContext>).await {
                     Ok(Some(c)) => {
-                        response_content = Some(c);
+                        let answered_by = if position < hooks {
+                            SHORT_CIRCUIT_BY_INVOCATION_HOOK
+                        } else {
+                            SHORT_CIRCUIT_BY_BEFORE_TOOL_CALLBACK
+                        };
+                        self.record_short_circuit(
+                            &name,
+                            &function_call_id,
+                            &final_args,
+                            answered_by,
+                        )
+                        .await?;
+                        // The tool did not run, so text is reported as the call's error.
+                        response_content = Some(callback_tool_response(
+                            c,
+                            &name,
+                            id.as_ref(),
+                            |text| serde_json::json!({ "error": text }),
+                            Some(ToolResultStatus::NotRun),
+                        ));
                         break;
                     }
                     Ok(None) => continue,
                     Err(e) => {
-                        response_content = Some(Content {
-                            role: "function".to_string(),
-                            parts: vec![Part::FunctionResponse {
-                                function_response: FunctionResponseData::new(
-                                    name.clone(),
-                                    serde_json::json!({ "error": e.to_string() }),
-                                ),
-                                id: id.clone(),
-                                annotations: None,
-                            }],
-                        });
+                        tracing::warn!(
+                            tool.name = %name,
+                            error.code = %e.code,
+                            error.category = %e.category,
+                            error.message = %self.logged_message(&e.message),
+                            "before-tool callback failed; the tool was not run"
+                        );
+                        response_content = Some(not_run(
+                            format!(
+                                "tool '{name}' was not run: a before-tool callback failed with {}",
+                                callback_failure(&e)
+                            ),
+                            Some(&e),
+                        ));
                         run_after_tool_callbacks = false;
                         break;
                     }
@@ -1996,30 +2971,206 @@ impl ToolExecutor<'_> {
                     name, cb_state.threshold
                 );
                 tracing::warn!(tool.name = %name, "circuit breaker open, skipping tool execution");
-                response_content = Some(Content {
-                    role: "function".to_string(),
-                    parts: vec![Part::FunctionResponse {
-                        function_response: FunctionResponseData::new(
-                            name.clone(),
-                            serde_json::json!({ "error": msg }),
-                        ),
-                        id: id.clone(),
-                        annotations: None,
-                    }],
-                });
+                response_content = Some(not_run(msg, None));
                 run_after_tool_callbacks = false;
             }
             drop(guard);
         }
 
+        // ===== GOVERNED PATH: POLICY, GUARDRAILS, CONFIRMATION =====
+        // Runtime-injected requirements such as team relationship approval gate execution
+        // exactly like the agent's own confirmation policy.
+        if response_content.is_none()
+            && let Some(tool) = self.tool_map.get(&name)
+        {
+            let screen = GuardrailScreen(self.tool_guardrails);
+            let mut gate = ToolGate::for_context(self.ctx.as_ref())
+                .with_abandon_signal(self.approval_failed.subscribe());
+            if !self.tool_guardrails.is_empty() {
+                gate = gate.with_screen(&screen);
+            }
+            let mut call =
+                GovernedCall::for_tool(tool.as_ref(), function_call_id.clone(), final_args.clone())
+                    .requiring_confirmation(
+                        self.tool_confirmation_policy.requires_confirmation(&name)
+                            || self.ctx.requires_tool_confirmation(&name),
+                    );
+            // The governed path resumes a held call only for the agent and tool it was held
+            // for. A request naming another tool belongs to a delegate the tool runs, whose
+            // own governed path binds it.
+            let resumed = resumes.filter(|held| held.tool_name == name);
+            if let Some(held) = resumed.clone() {
+                call = call.resuming(held);
+            }
+            // A call a person asked for is held for them however the agent is configured,
+            // and runs only on their decision when it resumes (spec 3.3 §7.4 rule 5).
+            call = call.requested(adk_core::RequestedCall::is_requested_id(&function_call_id));
+            match authorize_tool_call(&gate, call).await {
+                Ok(ToolAuthorization::Execute { args, confirmation }) => {
+                    final_args = args;
+                    tool_actions.tool_confirmation_decision = confirmation;
+                }
+                Ok(ToolAuthorization::Refuse { reason, confirmation }) => {
+                    // A guardrail's reason can quote the arguments it refused.
+                    tracing::debug!(
+                        tool.name = %name,
+                        reason = %self.logged_message(&reason),
+                        "tool call refused"
+                    );
+                    tool_actions.tool_confirmation_decision = confirmation;
+                    response_content = Some(answer(
+                        serde_json::json!({ "error": reason }),
+                        Some(ToolResultStatus::Refused),
+                        None,
+                    ));
+                    run_after_tool_callbacks = false;
+                }
+                Ok(ToolAuthorization::Pending { request, reason }) => {
+                    response_content = Some(answer(
+                        adk_core::confirmation_pending_response(reason),
+                        Some(ToolResultStatus::Held),
+                        None,
+                    ));
+                    pending_confirmation = Some(request);
+                    run_after_tool_callbacks = false;
+                }
+                // The kill switch refused the call mid-turn: it is answered `not run`, the
+                // batch's remaining calls meet the same refusal, and the turn ends at the
+                // next model call, where a durable worker parks the run (spec 3.2 §10 S3).
+                Err(error)
+                    if error.code == adk_core::GOVERNANCE_FROZEN_CODE
+                        || error.code == adk_core::GOVERNANCE_STALE_CODE =>
+                {
+                    tracing::info!(
+                        tool.name = %name,
+                        error = %error.diagnostics(),
+                        "tool call not run: the governance control refuses work"
+                    );
+                    // The answer releases a resumed call's hold, so the decision it was
+                    // resumed on is spent with it: after an unfreeze it cannot run an
+                    // identical call that nobody decided (spec 3.3 §7.3).
+                    if let Some(held) = &resumed {
+                        adk_core::withdraw_held_call(&gate, held).await?;
+                    }
+                    response_content = Some(not_run(adk_core::not_run_text(&error), Some(&error)));
+                    run_after_tool_callbacks = false;
+                }
+                Err(error) => {
+                    self.approval_failed.send_replace(true);
+                    return Err(error);
+                }
+            }
+        }
+
+        // Acquire concurrency permit after confirmation, so an approval waiting on a person
+        // does not hold the tool's slot, and a call that will not run takes none.
+        // The permit is held for the entire duration of this tool call
+        // and released on drop when this async block completes.
+        let _concurrency_permit = if response_content.is_some() {
+            None
+        } else {
+            match self.concurrency_manager.acquire(&name).await {
+                Ok(permit) => Some(permit),
+                Err(e) => {
+                    // Concurrency limit reached with Fail policy — return error
+                    return Ok(ToolExecutionResult {
+                        index,
+                        content: not_run(e.to_string(), Some(&e)),
+                        actions: tool_actions,
+                        escalate_or_skip: false,
+                        pending: None,
+                        executed: false,
+                    });
+                }
+            }
+        };
+
         // Execute tool with retry budget and tracing
         if response_content.is_none() {
             if let Some(tool) = self.tool_map.get(&name) {
-                let tool_ctx: Arc<dyn ToolContext> = Arc::new(
-                    AgentToolContext::new(self.ctx.clone(), function_call_id.clone())
-                        .with_tool_name(tool.name())
-                        .with_progress(self.progress_tx.clone()),
-                );
+                // Each attempt gets its own context, so the state delta and escalation of an
+                // attempt that is retried are never committed.
+                let attempt_context = || -> Arc<dyn ToolContext> {
+                    Arc::new(
+                        AgentToolContext::new(self.ctx.clone(), function_call_id.clone())
+                            .with_tool_name(tool.name())
+                            .with_agent_tools(self.tool_map.keys().cloned())
+                            .with_idempotency_key(resumed_ledger_key.clone())
+                            .with_progress(
+                                self.progress_tx.clone(),
+                                self.progress_overflow.clone(),
+                            ),
+                    )
+                };
+                let mut tool_ctx = attempt_context();
+                let effect = tool.effect();
+
+                // A non-idempotent call executes at most once per idempotency key. A record
+                // that exists answers the call; a ledger that cannot be read or written
+                // fails the call closed.
+                let ledgered = match crate::tool_ledger::begin_ledgered_call(
+                    self.ctx.as_ref(),
+                    effect,
+                    // A resumed call's context answers its held call's key.
+                    tool_ctx.idempotency_key(),
+                    &name,
+                    &final_args,
+                )
+                .await?
+                {
+                    Ok(ledgered) => ledgered,
+                    Err(recorded) => {
+                        return Ok(ToolExecutionResult {
+                            index,
+                            content: answer(
+                                recorded.response,
+                                Some(recorded.status),
+                                recorded.cause.as_ref(),
+                            ),
+                            actions: tool_actions,
+                            escalate_or_skip: false,
+                            pending: None,
+                            executed: false,
+                        });
+                    }
+                };
+
+                // The kill switch again, after the ledger write, which can take long enough
+                // for a freeze to arrive: a call it refuses now never starts (spec 3.1 I20).
+                // It is answered as at authorization, and its begun record is completed
+                // with that answer, so a replay is answered the same way.
+                if let Err(refusal) = self.ctx.run_config().check_governance() {
+                    let text = adk_core::not_run_text(&refusal);
+                    tracing::info!(
+                        tool.name = %name,
+                        error = %refusal.diagnostics(),
+                        "tool call not run: the governance control refused it before it started"
+                    );
+                    if let Some(trail) = &self.ctx.run_config().audit {
+                        let draft = AuditRecordDraft::new(AuditRecordKind::ToolCall, &name)
+                            .actor(AuditActor::for_context(self.ctx.as_ref()))
+                            .args_digest(trail.digest(&final_args))
+                            .outcome(AuditRecordOutcome::NotRun)
+                            .ext("reason", serde_json::Value::String(text.clone()))
+                            .ext(
+                                "sessionId",
+                                serde_json::Value::String(self.ctx.session_id().to_string()),
+                            );
+                        trail.record(draft).await?;
+                    }
+                    if let Some(ledgered) = ledgered {
+                        ledgered.complete(&name, None, &text).await;
+                    }
+                    return Ok(ToolExecutionResult {
+                        index,
+                        content: not_run(text, Some(&refusal)),
+                        actions: tool_actions,
+                        escalate_or_skip: false,
+                        pending: None,
+                        executed: false,
+                    });
+                }
+
                 let span_name = format!("execute_tool {name}");
                 let tool_span = tracing::info_span!(
                     "",
@@ -2031,45 +3182,100 @@ impl ToolExecutor<'_> {
                     "gen_ai.conversation.id" = %self.ctx.session_id()
                 );
 
-                let budget =
-                    self.tool_retry_budgets.get(&name).or(self.default_retry_budget.as_ref());
+                // Only a call that cannot repeat a side effect is retried.
+                let budget = self
+                    .tool_retry_budgets
+                    .get(&name)
+                    .or(self.default_retry_budget.as_ref())
+                    .filter(|_| effect.is_retry_safe());
                 let max_attempts = budget.map(|b| b.max_retries + 1).unwrap_or(1);
-                let retry_delay = budget.map(|b| b.delay).unwrap_or_default();
+                let timeout = tool.timeout_override().unwrap_or(Some(self.tool_timeout));
 
+                let mut started = Event::new(self.invocation_id);
+                started.author = self.agent_name.to_owned();
+                started.branch = self.ctx.branch().to_owned();
+                // Partial, as tool progress is: never persisted, never a final response.
+                started.llm_response.partial = true;
+                started.provider_metadata.insert(
+                    "adk_tool_started".into(),
+                    serde_json::json!({"id": id, "name": name}).to_string(),
+                );
+                let _ = self.progress_tx.send(started).await;
+                tool_executed = true;
                 let tool_clone = tool.clone();
                 let tool_start = std::time::Instant::now();
-                let mut last_error = String::new();
+                let mut last_error: Option<Arc<adk_core::AdkError>> = None;
+                // Set when the last attempt ended mid-flight (timeout or panic), so its side
+                // effect may or may not have happened. Such an error is the agent's own, and
+                // its message is always shown to the model.
+                let mut interrupted = false;
                 let mut final_attempt: u32 = 0;
                 let mut retry_result: Option<serde_json::Value> = None;
 
                 for attempt in 0..max_attempts {
-                    final_attempt = attempt;
                     if attempt > 0 {
-                        tokio::time::sleep(retry_delay).await;
+                        if let Some(budget) = budget {
+                            tokio::time::sleep(budget.backoff_delay(attempt)).await;
+                        }
+                        // A retry is a new start, and none begins once a freeze is observed;
+                        // the last attempt's failure stands.
+                        if self.ctx.run_config().check_governance().is_err() {
+                            break;
+                        }
+                        tool_ctx = attempt_context();
                     }
-                    match async {
+                    final_attempt = attempt;
+                    let attempt_result = async {
                         let args_payload = trace_json_payload(
                             &final_args,
                             self.ctx.run_config().record_payloads,
                             self.ctx.run_config().trace_payload_max_bytes,
                         );
                         tracing::debug!(tool.name = %name, tool.args = %args_payload, attempt = attempt, "tool_call");
-                        let exec_future = tool_clone.execute(tool_ctx.clone(), final_args.clone());
-                        let unwind_safe_future = std::panic::AssertUnwindSafe(
-                            tokio::time::timeout(self.tool_timeout, exec_future),
+                        let exec_future = execute_tool(
+                            Arc::clone(&tool_clone),
+                            tool_ctx.clone(),
+                            final_args.clone(),
                         );
-                        match futures::FutureExt::catch_unwind(unwind_safe_future).await {
-                            Ok(result) => result,
-                            Err(_panic) => Ok(Err(adk_core::AdkError::tool(format!(
-                                "tool '{}' panicked during execution",
-                                name
-                            )))),
+                        let bounded = async {
+                            match timeout {
+                                Some(limit) => tokio::time::timeout(limit, exec_future)
+                                    .await
+                                    .map_err(|_| limit),
+                                None => Ok(exec_future.await),
+                            }
+                        };
+                        match futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(bounded)).await {
+                            Ok(Ok(result)) => result.map_err(|error| {
+                                let retryable = error.is_retryable();
+                                (error, retryable, false)
+                            }),
+                            Ok(Err(limit)) => Err((
+                                adk_core::AdkError::new(
+                                    adk_core::ErrorComponent::Tool,
+                                    adk_core::ErrorCategory::Timeout,
+                                    "tool.timeout",
+                                    format!("Tool '{name}' timed out after {limit:?}"),
+                                ),
+                                true,
+                                true,
+                            )),
+                            Err(_panic) => Err((
+                                adk_core::AdkError::new(
+                                    adk_core::ErrorComponent::Tool,
+                                    adk_core::ErrorCategory::Internal,
+                                    "tool.panicked",
+                                    format!("tool '{name}' panicked during execution"),
+                                ),
+                                false,
+                                true,
+                            )),
                         }
                     }
                     .instrument(tool_span.clone())
-                    .await
-                    {
-                        Ok(Ok(value)) => {
+                    .await;
+                    match attempt_result {
+                        Ok(value) => {
                             let result_payload = trace_json_payload(
                                 &value,
                                 self.ctx.run_config().record_payloads,
@@ -2079,36 +3285,88 @@ impl ToolExecutor<'_> {
                             retry_result = Some(value);
                             break;
                         }
-                        Ok(Err(e)) => {
-                            last_error = e.to_string();
-                            if attempt + 1 < max_attempts {
-                                tracing::warn!(tool.name = %name, attempt = attempt, error = %last_error, "tool execution failed, retrying");
+                        Err((error, retryable, mid_flight)) => {
+                            interrupted = mid_flight;
+                            let message = if mid_flight {
+                                error.message.clone()
                             } else {
-                                tracing::warn!(tool.name = %name, error = %last_error, "tool_error");
+                                self.logged_message(&error.message)
+                            };
+                            if retryable && attempt + 1 < max_attempts {
+                                tracing::warn!(tool.name = %name, attempt = attempt, error.code = %error.code, error.category = %error.category, error.message = %message, "tool execution failed, retrying");
+                            } else {
+                                tracing::warn!(tool.name = %name, error.code = %error.code, error.category = %error.category, error.message = %message, "tool_error");
                             }
-                        }
-                        Err(_) => {
-                            last_error = format!(
-                                "Tool '{}' timed out after {} seconds",
-                                name,
-                                self.tool_timeout.as_secs()
-                            );
-                            if attempt + 1 < max_attempts {
-                                tracing::warn!(tool.name = %name, attempt = attempt, timeout_secs = self.tool_timeout.as_secs(), "tool timed out, retrying");
-                            } else {
-                                tracing::warn!(tool.name = %name, timeout_secs = self.tool_timeout.as_secs(), "tool_timeout");
+                            let retry = retryable && attempt + 1 < max_attempts;
+                            last_error = Some(Arc::new(error));
+                            if !retry {
+                                break;
                             }
                         }
                     }
                 }
 
+                let outcome_unknown = interrupted && effect == ToolEffect::NonIdempotent;
+                // What the model is told about the failure: the agent's own timeout and panic
+                // messages, or the tool error without its message by default.
+                let failure_response = match (&retry_result, &last_error) {
+                    (None, Some(error)) if outcome_unknown => {
+                        Some(crate::tool_ledger::interrupted_call_response(&error.message))
+                    }
+                    (None, Some(error)) if interrupted => {
+                        Some(serde_json::json!({ "error": error.message }))
+                    }
+                    (None, Some(error)) => Some(adk_core::tool_error_response(
+                        &name,
+                        error,
+                        self.expose_tool_error_messages,
+                    )),
+                    (None, None) | (Some(_), _) => None,
+                };
+                if outcome_unknown {
+                    crate::tool_ledger::record_outcome_unknown(
+                        self.ctx.as_ref(),
+                        &name,
+                        &final_args,
+                        "interrupted",
+                    )
+                    .await?;
+                }
+                // A call that ended mid-flight keeps its begun record, so a replay is answered
+                // with an unknown outcome instead of executing again. The ledger records what
+                // the model was told, since a replay answers with it.
+                if let Some(ledgered) = ledgered
+                    && !outcome_unknown
+                {
+                    let failure_text = failure_response
+                        .as_ref()
+                        .and_then(|response| response.get("error"))
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default();
+                    ledgered.complete(&name, retry_result.as_ref(), failure_text).await;
+                }
+
                 let tool_duration = tool_start.elapsed();
-                let (tool_success, tool_error_message, function_response) = match retry_result {
-                    Some(value) => (true, None, value),
-                    None => (
-                        false,
-                        Some(last_error.clone()),
-                        serde_json::json!({ "error": last_error }),
+                // Callbacks run in this process, so they see the full message.
+                let error_message =
+                    last_error.as_ref().filter(|_| retry_result.is_none()).map(|error| {
+                        if interrupted { error.message.clone() } else { error.to_string() }
+                    });
+                let tool_success = retry_result.is_some();
+                // What the answer reports when the tool did not return a result.
+                let mut status = match last_error.as_deref() {
+                    _ if tool_success => None,
+                    _ if outcome_unknown => Some(ToolResultStatus::OutcomeUnknown),
+                    Some(error) => Some(ToolResultStatus::of_tool_error(error)),
+                    None => Some(ToolResultStatus::Failed),
+                };
+                if outcome_unknown {
+                    unknown_outcome = last_error.clone();
+                }
+                let function_response = match retry_result {
+                    Some(value) => value,
+                    None => failure_response.unwrap_or_else(
+                        || serde_json::json!({ "error": format!("tool '{name}' failed") }),
                     ),
                 };
 
@@ -2117,26 +3375,36 @@ impl ToolExecutor<'_> {
                     tool_args: final_args.clone(),
                     success: tool_success,
                     duration: tool_duration,
-                    error_message: tool_error_message.clone(),
+                    error_message: error_message.clone(),
+                    error: if tool_success { None } else { last_error.clone() },
                     attempt: final_attempt,
                 };
-                tool_outcome_for_callback = Some(outcome);
 
                 // Circuit breaker recording
                 {
                     let mut guard = self.cb_mutex.lock().unwrap_or_else(|e| e.into_inner());
                     if let Some(ref mut cb_state) = *guard {
-                        cb_state.record(tool_outcome_for_callback.as_ref().unwrap());
+                        cb_state.record(&outcome);
                     }
                 }
 
                 // On-tool-error callbacks
                 let final_function_response = if !tool_success {
+                    let error_ctx: Arc<dyn CallbackContext> =
+                        Arc::new(ToolOutcomeCallbackContext {
+                            inner: self.ctx.clone() as Arc<dyn CallbackContext>,
+                            outcome: outcome.clone(),
+                        });
                     let mut fallback_result = None;
-                    let error_msg = tool_error_message.clone().unwrap_or_default();
-                    for callback in self.on_tool_error_callbacks.as_ref() {
+                    let error_msg = error_message.unwrap_or_default();
+                    for callback in self
+                        .hook_callbacks
+                        .on_tool_error
+                        .iter()
+                        .chain(self.on_tool_error_callbacks.iter())
+                    {
                         match callback(
-                            self.ctx.clone() as Arc<dyn CallbackContext>,
+                            error_ctx.clone(),
                             tool.clone(),
                             final_args.clone(),
                             error_msg.clone(),
@@ -2149,54 +3417,84 @@ impl ToolExecutor<'_> {
                             }
                             Ok(None) => continue,
                             Err(e) => {
-                                tracing::warn!(error = %e, "on_tool_error callback failed");
+                                tracing::warn!(error.code = %e.code, error.message = %self.logged_message(&e.message), "on_tool_error callback failed");
                                 break;
                             }
                         }
                     }
-                    fallback_result.unwrap_or(function_response)
+                    match fallback_result {
+                        // The fallback is the answer the model reads; only an unknown outcome,
+                        // which no fallback settles, keeps its status.
+                        Some(result) => {
+                            if !outcome_unknown {
+                                status = None;
+                            }
+                            result
+                        }
+                        None => function_response,
+                    }
                 } else {
                     function_response
                 };
+                tool_outcome_for_callback = Some(outcome);
 
                 let confirmation_decision = tool_actions.tool_confirmation_decision;
                 tool_actions = tool_ctx.actions();
                 if tool_actions.tool_confirmation_decision.is_none() {
                     tool_actions.tool_confirmation_decision = confirmation_decision;
                 }
+                // An agent tool whose delegate held a call of its own holds this call with it:
+                // the run ends on the delegate's request, and this call resumes once that
+                // request has a decision.
+                let final_function_response = match tool_actions.tool_confirmation.take() {
+                    // A call that may have taken effect is not held to run again on a decision.
+                    // Its request is withdrawn, so no decision on it authorizes an identical
+                    // call, and the call is answered with its unknown outcome.
+                    Some(request) if outcome_unknown => {
+                        tracing::warn!(
+                            tool.name = %name,
+                            "a call with an unknown outcome asked for a confirmation; withdrawing the request"
+                        );
+                        let gate = ToolGate::for_context(self.ctx.as_ref());
+                        if let Err(error) = adk_core::withdraw_held_call(&gate, &request).await {
+                            self.approval_failed.send_replace(true);
+                            return Err(error);
+                        }
+                        final_function_response
+                    }
+                    Some(request) => {
+                        tool_actions.skip_summarization = false;
+                        tool_actions.escalate = false;
+                        pending_confirmation = Some(request);
+                        run_after_tool_callbacks = false;
+                        status = Some(ToolResultStatus::Held);
+                        if adk_core::is_confirmation_pending(&final_function_response) {
+                            final_function_response
+                        } else {
+                            adk_core::confirmation_pending_response(format!(
+                                "Tool '{name}' is waiting for a confirmation"
+                            ))
+                        }
+                    }
+                    None => final_function_response,
+                };
                 executed_tool = Some(tool.clone());
                 executed_tool_response = Some(final_function_response.clone());
-                response_content = Some(Content {
-                    role: "function".to_string(),
-                    parts: vec![Part::FunctionResponse {
-                        function_response: FunctionResponseData::from_tool_result(
-                            name.clone(),
-                            final_function_response,
-                        ),
-                        id: id.clone(),
-                        annotations: None,
-                    }],
-                });
+                let cause =
+                    last_error.as_deref().filter(|_| status != Some(ToolResultStatus::Held));
+                response_content = Some(answer(final_function_response, status, cause));
             } else {
-                response_content = Some(Content {
-                    role: "function".to_string(),
-                    parts: vec![Part::FunctionResponse {
-                        function_response: FunctionResponseData::new(
-                            name.clone(),
-                            serde_json::json!({
-                                "error": format!("Tool {} not found", name)
-                            }),
-                        ),
-                        id: id.clone(),
-                        annotations: None,
-                    }],
-                });
+                response_content = Some(not_run(format!("Tool {name} not found"), None));
             }
         }
 
-        // After-tool callbacks
+        // ===== AFTER-TOOL PIPELINE =====
+        // Runner hooks and `after_tool_callback`s, then `after_tool_callback_full`s, then
+        // enhanced plugins. The first failure ends the pipeline: a later stage may be handed the
+        // unscreened result, so none runs once a redaction or screening stage has failed.
         let mut response_content = response_content.expect("tool response content is set");
         if run_after_tool_callbacks {
+            let mut failure: Option<adk_core::AdkError> = None;
             let outcome_ctx: Arc<dyn CallbackContext> = match tool_outcome_for_callback {
                 Some(outcome) => Arc::new(ToolOutcomeCallbackContext {
                     inner: self.ctx.clone() as Arc<dyn CallbackContext>,
@@ -2206,30 +3504,30 @@ impl ToolExecutor<'_> {
             };
             let cb_ctx: Arc<dyn CallbackContext> =
                 Arc::new(ToolCallbackContext::new(outcome_ctx, name.clone(), final_args.clone()));
-            for callback in self.after_tool_callbacks.as_ref() {
+            for callback in
+                self.hook_callbacks.after_tool.iter().chain(self.after_tool_callbacks.iter())
+            {
                 match callback(cb_ctx.clone()).await {
                     Ok(Some(modified)) => {
-                        response_content = modified;
+                        response_content = callback_tool_response(
+                            modified,
+                            &name,
+                            id.as_ref(),
+                            |text| serde_json::json!({ "result": text }),
+                            None,
+                        );
                         break;
                     }
                     Ok(None) => continue,
                     Err(e) => {
-                        response_content = Content {
-                            role: "function".to_string(),
-                            parts: vec![Part::FunctionResponse {
-                                function_response: FunctionResponseData::new(
-                                    name.clone(),
-                                    serde_json::json!({ "error": e.to_string() }),
-                                ),
-                                id: id.clone(),
-                                annotations: None,
-                            }],
-                        };
+                        failure = Some(e);
                         break;
                     }
                 }
             }
-            if let (Some(tool_ref), Some(tool_resp)) = (&executed_tool, executed_tool_response) {
+            if failure.is_none()
+                && let (Some(tool_ref), Some(tool_resp)) = (&executed_tool, executed_tool_response)
+            {
                 for callback in self.after_tool_callbacks_full.as_ref() {
                     match callback(
                         cb_ctx.clone(),
@@ -2240,32 +3538,12 @@ impl ToolExecutor<'_> {
                     .await
                     {
                         Ok(Some(modified_value)) => {
-                            response_content = Content {
-                                role: "function".to_string(),
-                                parts: vec![Part::FunctionResponse {
-                                    function_response: FunctionResponseData::from_tool_result(
-                                        name.clone(),
-                                        modified_value,
-                                    ),
-                                    id: id.clone(),
-                                    annotations: None,
-                                }],
-                            };
+                            response_content = answer(modified_value, None, None);
                             break;
                         }
                         Ok(None) => continue,
                         Err(e) => {
-                            response_content = Content {
-                                role: "function".to_string(),
-                                parts: vec![Part::FunctionResponse {
-                                    function_response: FunctionResponseData::new(
-                                        name.clone(),
-                                        serde_json::json!({ "error": e.to_string() }),
-                                    ),
-                                    id: id.clone(),
-                                    annotations: None,
-                                }],
-                            };
+                            failure = Some(e);
                             break;
                         }
                     }
@@ -2275,7 +3553,8 @@ impl ToolExecutor<'_> {
             // ===== ENHANCED PLUGIN: AFTER TOOL CALL =====
             // Enhanced plugins can modify the tool result after legacy callbacks.
             #[cfg(feature = "enhanced-plugins")]
-            if let Some(epm) = self.enhanced_plugin_manager.as_ref()
+            if failure.is_none()
+                && let Some(epm) = self.enhanced_plugin_manager.as_ref()
                 && let Some(tool_ref) = &executed_tool
             {
                 // Extract the result value from the response content
@@ -2291,52 +3570,75 @@ impl ToolExecutor<'_> {
                     })
                     .unwrap_or(serde_json::json!(null));
 
+                // The outcome context carries the full error message, which the function
+                // response no longer does, so plugins can still classify the failure.
                 match epm
                     .run_after_tool_call(
                         tool_ref.clone(),
                         &final_args,
-                        result_value,
-                        self.ctx.clone() as Arc<dyn CallbackContext>,
+                        result_value.clone(),
+                        cb_ctx.clone(),
                     )
                     .await
                 {
+                    // A result the plugins passed through stays the answer, with its status.
                     Ok(adk_plugin::AfterToolCallResult::Continue(modified_result)) => {
-                        response_content = Content {
-                            role: "function".to_string(),
-                            parts: vec![Part::FunctionResponse {
-                                function_response: FunctionResponseData::from_tool_result(
-                                    name.clone(),
-                                    modified_result,
-                                ),
-                                id: id.clone(),
-                                annotations: None,
-                            }],
-                        };
+                        if modified_result != result_value {
+                            response_content = answer(modified_result, None, None);
+                        }
                     }
-                    Err(e) => {
-                        response_content = Content {
-                            role: "function".to_string(),
-                            parts: vec![Part::FunctionResponse {
-                                function_response: FunctionResponseData::new(
-                                    name.clone(),
-                                    serde_json::json!({ "error": e.to_string() }),
-                                ),
-                                id: id.clone(),
-                                annotations: None,
-                            }],
-                        };
-                    }
+                    Err(e) => failure = Some(e),
+                }
+            }
+
+            if let Some(error) = failure {
+                tracing::error!(
+                    tool.name = %name,
+                    tool.executed = tool_executed,
+                    error.code = %error.code,
+                    error.category = %error.category,
+                    error.message = %self.logged_message(&error.message),
+                    "after-tool pipeline failed; withholding the tool result"
+                );
+                // The tool's side effect stands and its ledger record says so; the model is
+                // told not to repeat it, since a new call has a new idempotency key.
+                response_content = if tool_executed {
+                    answer(
+                        adk_core::result_withheld_response(
+                            &name,
+                            &error,
+                            self.expose_tool_error_messages,
+                        ),
+                        Some(ToolResultStatus::Withheld),
+                        Some(&error),
+                    )
+                } else {
+                    not_run(
+                        format!(
+                            "tool '{name}' was not run, and its after-tool pipeline failed with {}",
+                            callback_failure(&error)
+                        ),
+                        Some(&error),
+                    )
+                };
+            }
+            // A stage that replaced or withheld the answer did not settle an unknown outcome.
+            if let Some(cause) = &unknown_outcome {
+                for part in &mut response_content.parts {
+                    part.set_tool_result_status(ToolResultStatus::OutcomeUnknown, Some(cause));
                 }
             }
         }
 
         let escalate_or_skip = tool_actions.escalate || tool_actions.skip_summarization;
-        ToolExecutionResult {
+        Ok(ToolExecutionResult {
             index,
             content: response_content,
             actions: tool_actions,
             escalate_or_skip,
-        }
+            pending: pending_confirmation,
+            executed: tool_executed,
+        })
     }
 }
 
@@ -2354,6 +3656,27 @@ impl Agent for LlmAgent {
         &self.sub_agents
     }
 
+    fn allows_transfer_to_parent(&self) -> bool {
+        !self.disallow_transfer_to_parent
+    }
+
+    fn allows_transfer_to_peers(&self) -> bool {
+        !self.disallow_transfer_to_peers
+    }
+
+    async fn close(&self) {
+        for toolset in &self.toolsets {
+            toolset.close().await;
+        }
+        #[cfg(feature = "enhanced-plugins")]
+        if let Some(manager) = &self.enhanced_plugin_manager {
+            manager.close().await;
+        }
+        for agent in &self.sub_agents {
+            agent.close().await;
+        }
+    }
+
     fn capabilities(&self) -> adk_core::AgentCapabilities {
         adk_core::AgentCapabilities {
             runtime_tools: true,
@@ -2363,6 +3686,22 @@ impl Agent for LlmAgent {
             shared_state: true,
             invocation_metadata: true,
         }
+    }
+
+    async fn screen_user_input(&self, content: &Content) -> Result<Option<Content>> {
+        let own = if self.input_guardrails.is_empty() {
+            None
+        } else {
+            Some(
+                enforce_guardrails(self.input_guardrails.as_ref(), content, Phase::Input)
+                    .await?
+                    .content,
+            )
+        };
+        let below =
+            adk_core::screen_user_input_with(&self.sub_agents, own.as_ref().unwrap_or(content))
+                .await?;
+        Ok(below.or(own))
     }
 
     #[adk_telemetry::instrument(
@@ -2377,6 +3716,11 @@ impl Agent for LlmAgent {
     )]
     async fn run(&self, ctx: Arc<dyn InvocationContext>) -> Result<adk_core::EventStream> {
         adk_telemetry::info!("Starting agent execution");
+        // A call a person asked for is taken by the agent the run starts with (spec 3.3 §7.4
+        // rule 5), never by a workflow or team member.
+        let starts_run = ctx.agent_name() == self.name;
+        // Under a workflow or team parent, the agent still acts as itself.
+        let ctx = crate::acting_agent_context::ActingAgentContext::scope(ctx, &self.name);
         let ctx = Self::apply_input_guardrails(ctx, self.input_guardrails.clone()).await?;
 
         let agent_name = self.name.clone();
@@ -2389,9 +3733,11 @@ impl Agent for LlmAgent {
         let generate_content_config = self.generate_content_config.clone();
         let max_iterations = self.max_iterations;
         let tool_timeout = self.tool_timeout;
+        let expose_tool_error_messages = self.expose_tool_error_messages;
         // Clone Arc references (cheap)
         let before_agent_callbacks = self.before_callbacks.clone();
         let after_agent_callbacks = self.after_callbacks.clone();
+        let history_processors = self.history_processors.clone();
         let before_model_callbacks = self.before_model_callbacks.clone();
         let after_model_callbacks = self.after_model_callbacks.clone();
         let before_tool_callbacks = self.before_tool_callbacks.clone();
@@ -2405,61 +3751,24 @@ impl Agent for LlmAgent {
         let tool_guardrails = Arc::clone(&self.tool_guardrails);
         let output_guardrails = self.output_guardrails.clone();
         let agent_tool_execution_strategy = self.tool_execution_strategy;
+        let parallelize_agent_delegations = self.parallelize_agent_delegations;
         #[cfg(feature = "enhanced-plugins")]
         let enhanced_plugin_manager = self.enhanced_plugin_manager.clone();
+        // Runner plugins and other run-wide hooks reach this agent through the run config.
+        let mut hook_callbacks = HookCallbacks::new(&ctx.run_config().invocation_hooks);
+        // The before- and after-agent stages run around `body`, which runs the model and tools.
+        let hook_before_agent = std::mem::take(&mut hook_callbacks.before_agent);
+        let hook_after_agent = Arc::new(std::mem::take(&mut hook_callbacks.after_agent));
+        let stage_ctx = ctx.clone();
+        let stage_invocation_id = invocation_id.clone();
+        let stage_agent_name = agent_name.clone();
+        let stage_output_key = output_key.clone();
+        let structured_output = self.output_schema.is_some();
 
-        let s = stream! {
-            let confirmation_decisions =
-                ctx.run_config().tool_confirmation_decisions.clone();
-            let confirmation_fingerprints =
-                ctx.run_config().tool_confirmation_fingerprints.clone();
-            let mut live_confirmation_decisions =
-                std::collections::HashMap::<String, ToolConfirmationDecision>::new();
-            let confirmation_handler = ctx.run_config().tool_confirmation_handler.clone();
-
-            // ===== BEFORE AGENT CALLBACKS =====
-            // Execute before the agent starts running
-            // If any returns content, skip agent execution
-            for callback in before_agent_callbacks.as_ref() {
-                match callback(ctx.clone() as Arc<dyn CallbackContext>).await {
-                    Ok(Some(content)) => {
-                        // Callback returned content - yield it and skip agent execution
-                        let mut early_event = Event::new(&invocation_id);
-                        early_event.author = agent_name.clone();
-                        early_event.llm_response.content = Some(content);
-                        yield Ok(early_event);
-
-                        // Skip rest of agent execution and go to after callbacks
-                        for after_callback in after_agent_callbacks.as_ref() {
-                            match after_callback(ctx.clone() as Arc<dyn CallbackContext>).await {
-                                Ok(Some(after_content)) => {
-                                    let mut after_event = Event::new(&invocation_id);
-                                    after_event.author = agent_name.clone();
-                                    after_event.llm_response.content = Some(after_content);
-                                    yield Ok(after_event);
-                                    return;
-                                }
-                                Ok(None) => continue,
-                                Err(e) => {
-                                    yield Err(e);
-                                    return;
-                                }
-                            }
-                        }
-                        return;
-                    }
-                    Ok(None) => {
-                        // Continue to next callback
-                        continue;
-                    }
-                    Err(e) => {
-                        // Callback failed - propagate error
-                        yield Err(e);
-                        return;
-                    }
-                }
-            }
-
+        // Boxed where it is built, so the stage stream below holds a pointer: a body moved
+        // into it would put a copy of the whole body state on the stack of every poll, once
+        // per nested agent behind an `AgentTool`.
+        let body: adk_core::EventStream = Box::pin(stream! {
             // ===== MAIN AGENT EXECUTION =====
             let mut conversation_history = match prompt_config
                 .prepare_conversation(&ctx, &agent_name)
@@ -2479,26 +3788,9 @@ impl Agent for LlmAgent {
                     return;
                 }
             };
-            let tool_map = resolved_tools.map;
-            let tool_declarations = resolved_tools.declarations;
-            let valid_transfer_targets = resolved_tools.transfer_targets;
-
-            let collect_long_running_ids = |content: &Content| -> Vec<String> {
-                content
-                    .parts
-                    .iter()
-                    .filter_map(|part| {
-                        if let Part::FunctionCall { name, .. } = part
-                            && let Some(tool) = tool_map.get(name)
-                            && tool.is_long_running()
-                        {
-                            return Some(name.clone());
-                        }
-                        None
-                    })
-                    .collect()
-            };
-
+            let mut tool_map = resolved_tools.map;
+            let mut tool_declarations = resolved_tools.declarations;
+            let mut valid_transfer_targets = resolved_tools.transfer_targets;
 
             // ===== CIRCUIT BREAKER STATE =====
             // Created fresh per invocation so it resets between runs.
@@ -2514,6 +3806,304 @@ impl Agent for LlmAgent {
             // (a no-op for generateContent and all other providers).
             let mut last_interaction_id: Option<String> = None;
 
+            // Shared with sub-agents, transfer targets and agent tools through the run config.
+            let budget_tracker = ctx.run_config().budget_tracker.clone();
+            // Provider-executed built-in tools never reach the governed call path, so the
+            // policy and budget decide before each request whether they are attached.
+            let mut builtin_governor = adk_core::BuiltinToolGovernor::new();
+
+            // ===== RESUME HELD CALLS =====
+            // A call held for confirmation in an earlier run, with a decision now, is
+            // dispatched again as the same call before the first model call, so the
+            // decision applies whether or not the model would issue the call again. It
+            // runs the whole tool path, where the governed path finds the decision.
+            let mut resumed_calls = Vec::<PendingToolCall>::new();
+            // The run ends once its held calls and a person's call are dealt with: a resumed
+            // call ended the turn, or one was held again.
+            let mut ends_here = false;
+            // Set by each tool step, so the next model call is preceded by a safe point.
+            let mut steering_due = false;
+            {
+                let gate = ToolGate::for_context(ctx.as_ref());
+                for held in ctx.session().held_tool_calls(&agent_name, ctx.branch()) {
+                    let Some(function_call_id) = held.request.function_call_id.clone() else {
+                        continue;
+                    };
+                    match adk_core::confirmation_decision_available(&gate, &held.request).await {
+                        // An agent tool holds its one call for every call its delegate holds,
+                        // so the call runs once, for its latest request with a decision, and
+                        // the delegate resumes each of its calls that has one (spec 3.1 §10 F4).
+                        Ok(true) => match resumed_calls
+                            .iter_mut()
+                            .find(|resumed| resumed.function_call_id == function_call_id)
+                        {
+                            Some(resumed) => resumed.resumes = Some(held.request),
+                            None => resumed_calls.push(PendingToolCall {
+                                index: resumed_calls.len(),
+                                name: held.name,
+                                args: held.args,
+                                id: held.id,
+                                function_call_id,
+                                resumes: Some(held.request),
+                            }),
+                        },
+                        Ok(false) => {}
+                        Err(error) => {
+                            yield Err(error);
+                            return;
+                        }
+                    }
+                }
+            }
+            // Sources the run's tool calls recorded, which the final answer may cite.
+            let mut retrieved: Vec<adk_core::GroundingSource> = Vec::new();
+            if !resumed_calls.is_empty() {
+                if ctx.is_cancelled() {
+                    return;
+                }
+                // The held calls keep their pending responses, so a refused batch leaves
+                // them held for a later run.
+                if let Some(tracker) = budget_tracker.as_ref()
+                    && let Err(exceeded) = tracker.begin_tool_calls(resumed_calls.len() as u64)
+                {
+                    yield Err(exceeded.into());
+                    return;
+                }
+                tracing::info!(
+                    agent.name = %agent_name,
+                    tool.calls = resumed_calls.len(),
+                    "resuming tool calls held for confirmation"
+                );
+                let strategy = ToolDispatchMode::resolve(
+                    agent_tool_execution_strategy.unwrap_or(ToolExecutionStrategy::Sequential),
+                    parallelize_agent_delegations,
+                );
+                let cb_mutex = std::sync::Mutex::new(circuit_breaker_state.take());
+                let concurrency_manager =
+                    adk_core::ToolConcurrencyManager::new(&ctx.run_config().tool_concurrency);
+                let (progress_tx, mut progress_rx) =
+                    tokio::sync::mpsc::channel::<Event>(TOOL_PROGRESS_CAPACITY);
+                let progress_overflow = ProgressOverflow::default();
+                let executor = ToolExecutor {
+                    ctx: ctx.clone(),
+                    agent_name: &agent_name,
+                    tool_map: &tool_map,
+                    tool_retry_budgets: &tool_retry_budgets,
+                    default_retry_budget: &default_retry_budget,
+                    output_guardrails: output_guardrails.as_ref(),
+                    before_tool_callbacks: &before_tool_callbacks,
+                    after_tool_callbacks: &after_tool_callbacks,
+                    after_tool_callbacks_full: &after_tool_callbacks_full,
+                    on_tool_error_callbacks: &on_tool_error_callbacks,
+                    hook_callbacks: &hook_callbacks,
+                    tool_confirmation_policy: &tool_confirmation_policy,
+                    tool_guardrails: tool_guardrails.as_ref(),
+                    cb_mutex: &cb_mutex,
+                    invocation_id: &invocation_id,
+                    concurrency_manager: &concurrency_manager,
+                    progress_tx,
+                    progress_overflow: progress_overflow.clone(),
+                    tool_timeout,
+                    expose_tool_error_messages,
+                    approval_failed: tokio::sync::watch::channel(false).0,
+                    #[cfg(feature = "enhanced-plugins")]
+                    enhanced_plugin_manager: &enhanced_plugin_manager,
+                };
+                let mut results = {
+                    let dispatch = executor.dispatch(strategy, resumed_calls);
+                    tokio::pin!(dispatch);
+                    let results = loop {
+                        tokio::select! {
+                            biased;
+                            Some(progress_event) = progress_rx.recv() => {
+                                yield Ok(progress_event);
+                            }
+                            done = &mut dispatch => break done,
+                        }
+                    };
+                    while let Ok(progress_event) = progress_rx.try_recv() {
+                        yield Ok(progress_event);
+                    }
+                    let markers = std::mem::take(
+                        &mut *progress_overflow.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+                    );
+                    for marker in markers {
+                        yield Ok(marker);
+                    }
+                    match results {
+                        Ok(results) => results,
+                        Err(error) => {
+                            yield Err(error);
+                            return;
+                        }
+                    }
+                };
+                results.sort_by_key(|r| r.index);
+                drop(executor);
+                circuit_breaker_state = cb_mutex.into_inner().unwrap_or_else(|e| e.into_inner());
+
+                // A call held again has not run, and counts when a later run resumes it.
+                if let Some(tracker) = budget_tracker.as_ref() {
+                    let held = results.iter().filter(|result| result.pending.is_some()).count();
+                    tracker.release_tool_calls(held as u64);
+                }
+                let mut held_again = Vec::new();
+                for result in results {
+                    if result.escalate_or_skip {
+                        // The call ends the turn before any model call, so a message this
+                        // run brought would otherwise go unanswered without a word.
+                        if ctx.user_content().carries_user_input() {
+                            yield Err(adk_core::AdkError::new(
+                                adk_core::ErrorComponent::Agent,
+                                adk_core::ErrorCategory::InvalidInput,
+                                "agent.resume_ended_turn",
+                                "a resumed tool call ended the turn, so the message sent with \
+                                 this run is saved but was not answered; run again with an \
+                                 empty message to answer it, or resume held calls with an \
+                                 empty message before sending a new one",
+                            ));
+                            return;
+                        }
+                        ends_here = true;
+                        break;
+                    }
+                    held_again.extend(result.pending);
+                    retrieved.extend(result.actions.grounding_sources);
+                    // Each result takes the place of its call's pending response, matched by
+                    // call ID, so the model sees one response per call.
+                    let _ = adk_core::supersede_pending_responses(
+                        &mut conversation_history,
+                        result.content,
+                    );
+                }
+                if !ends_here && !held_again.is_empty() {
+                    for request in held_again {
+                        yield Ok(confirmation_event(&invocation_id, &agent_name, request));
+                    }
+                    ends_here = true;
+                }
+
+                if !ends_here {
+                    let refreshed_tools = match tool_setup.resolve(&ctx).await {
+                        Ok(tools) => tools,
+                        Err(error) => {
+                            yield Err(error);
+                            return;
+                        }
+                    };
+                    tool_map = refreshed_tools.map;
+                    tool_declarations = refreshed_tools.declarations;
+                    valid_transfer_targets = refreshed_tools.transfer_targets;
+                    steering_due = true;
+                }
+            }
+
+            // ===== A CALL A PERSON ASKED FOR =====
+            // Held for the person's decision as this agent, or refused, before any model
+            // call; the run ends either way (spec 3.3 §7.4 rule 5). It takes the tool path
+            // a model's call takes, so a before-tool plugin, hook or callback and the circuit
+            // breaker see it before it is authorized as requested.
+            if starts_run
+                && let Some(requested) = ctx.run_config().requested_call.as_ref()
+                && !crate::requested_call::taken(ctx.as_ref(), requested)
+            {
+                if let Some(reason) =
+                    crate::requested_call::refusal(ctx.as_ref(), &tool_map, requested)
+                {
+                    for event in crate::requested_call::refusal_events(
+                        ctx.as_ref(),
+                        &agent_name,
+                        requested,
+                        &reason,
+                    ) {
+                        yield Ok(event);
+                    }
+                    return;
+                }
+                for event in crate::requested_call::asked_events(ctx.as_ref(), &agent_name, requested) {
+                    yield Ok(event);
+                }
+                let cb_mutex = std::sync::Mutex::new(circuit_breaker_state.take());
+                let concurrency_manager =
+                    adk_core::ToolConcurrencyManager::new(&ctx.run_config().tool_concurrency);
+                let (progress_tx, mut progress_rx) =
+                    tokio::sync::mpsc::channel::<Event>(TOOL_PROGRESS_CAPACITY);
+                let progress_overflow = ProgressOverflow::default();
+                let executor = ToolExecutor {
+                    ctx: ctx.clone(),
+                    agent_name: &agent_name,
+                    tool_map: &tool_map,
+                    tool_retry_budgets: &tool_retry_budgets,
+                    default_retry_budget: &default_retry_budget,
+                    output_guardrails: output_guardrails.as_ref(),
+                    before_tool_callbacks: &before_tool_callbacks,
+                    after_tool_callbacks: &after_tool_callbacks,
+                    after_tool_callbacks_full: &after_tool_callbacks_full,
+                    on_tool_error_callbacks: &on_tool_error_callbacks,
+                    hook_callbacks: &hook_callbacks,
+                    tool_confirmation_policy: &tool_confirmation_policy,
+                    tool_guardrails: tool_guardrails.as_ref(),
+                    cb_mutex: &cb_mutex,
+                    invocation_id: &invocation_id,
+                    concurrency_manager: &concurrency_manager,
+                    progress_tx,
+                    progress_overflow: progress_overflow.clone(),
+                    tool_timeout,
+                    expose_tool_error_messages,
+                    approval_failed: tokio::sync::watch::channel(false).0,
+                    #[cfg(feature = "enhanced-plugins")]
+                    enhanced_plugin_manager: &enhanced_plugin_manager,
+                };
+                let call = PendingToolCall {
+                    index: 0,
+                    name: requested.tool_name.clone(),
+                    args: requested.args.clone(),
+                    id: Some(requested.function_call_id.clone()),
+                    function_call_id: requested.function_call_id.clone(),
+                    resumes: None,
+                };
+                let results = {
+                    let dispatch = executor.dispatch(ToolDispatchMode::Sequential, vec![call]);
+                    tokio::pin!(dispatch);
+                    let results = loop {
+                        tokio::select! {
+                            biased;
+                            Some(progress_event) = progress_rx.recv() => {
+                                yield Ok(progress_event);
+                            }
+                            done = &mut dispatch => break done,
+                        }
+                    };
+                    while let Ok(progress_event) = progress_rx.try_recv() {
+                        yield Ok(progress_event);
+                    }
+                    let markers = std::mem::take(
+                        &mut *progress_overflow.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+                    );
+                    for marker in markers {
+                        yield Ok(marker);
+                    }
+                    results
+                };
+                match results {
+                    Ok(results) => {
+                        for request in results.into_iter().filter_map(|result| result.pending) {
+                            yield Ok(crate::requested_call::held_event(
+                                ctx.as_ref(),
+                                &agent_name,
+                                requested,
+                                request,
+                            ));
+                        }
+                    }
+                    Err(error) => yield Err(error),
+                }
+                return;
+            }
+            if ends_here {
+                return;
+            }
+
             // Multi-turn loop with max iterations
             let mut iteration = 0;
             let mut schema_retry_count: usize = 0;
@@ -2525,6 +4115,11 @@ impl Agent for LlmAgent {
                     tracing::info!(agent.name = %agent_name, "invocation cancelled — stopping agent loop");
                     return;
                 }
+                // The kill switch is checked before every model call.
+                if let Err(error) = ctx.run_config().check_governance() {
+                    yield Err(error);
+                    return;
+                }
                 iteration += 1;
                 if iteration > max_iterations {
                     yield Err(adk_core::AdkError::agent(
@@ -2533,15 +4128,70 @@ impl Agent for LlmAgent {
                     return;
                 }
 
+                // ===== STEERING =====
+                // The safe point: the last tool step's results are in the history and the next
+                // request is not built yet, so a steering message lands after them. It is taken
+                // only once the checks above pass, so a run they end returns its queued
+                // messages to their senders instead of saving one no model call will carry.
+                if std::mem::take(&mut steering_due)
+                    && let Some(inbox) = ctx.steering_inbox()
+                {
+                    for message in inbox.drain() {
+                        tracing::debug!(
+                            agent.name = %agent_name,
+                            steer.id = %message.marker.steer_id,
+                            "steering message added to the history"
+                        );
+                        yield Ok(message.to_event(&invocation_id, ctx.branch()));
+                        conversation_history.push(message.content);
+                    }
+                }
+
                 let config = build_generation_config(
                     generate_content_config.as_ref(),
                     prompt_config.output_schema.as_ref(),
                     ctx.run_config().cached_content.as_deref(),
                 );
 
-                let request = LlmRequest {
+                // The processors own the agent's history; what toolsets, plugins, run hooks
+                // and before-model callbacks add below stays in this one request.
+                let history_len = conversation_history.len();
+                for processor in history_processors.iter() {
+                    match processor(
+                        ctx.clone() as Arc<dyn CallbackContext>,
+                        std::mem::take(&mut conversation_history),
+                    )
+                    .await
+                    {
+                        Ok(history) => conversation_history = history,
+                        Err(error) => {
+                            yield Err(error);
+                            return;
+                        }
+                    }
+                }
+                if conversation_history.len() != history_len {
+                    tracing::debug!(
+                        agent.name = %agent_name,
+                        history.before = history_len,
+                        history.after = conversation_history.len(),
+                        "history processors rewrote the history"
+                    );
+                }
+
+                // Call IDs the agent generated for a provider that sent none stay out of
+                // what the provider receives.
+                let mut contents = crate::requested_call::for_model(conversation_history.clone());
+                contents.iter_mut().for_each(Content::strip_generated_call_ids);
+                // Only the agent's own model turns carry provider-native items; a user turn
+                // (A2A input included) or a tool result never hands a provider one.
+                contents
+                    .iter_mut()
+                    .filter(|content| !matches!(content.role.as_str(), "model" | "assistant"))
+                    .for_each(adk_core::history::strip_native);
+                let mut request = LlmRequest {
                     model: model.name().to_string(),
-                    contents: conversation_history.clone(),
+                    contents,
                     tools: tool_declarations.clone(),
                     config,
                     // Provider-neutral continuity: carry the most recent
@@ -2552,6 +4202,11 @@ impl Agent for LlmAgent {
                     // for providers that never populate `interaction_id`.
                     previous_response_id: last_interaction_id.clone(),
                 };
+
+                if let Err(error) = tool_setup.process_llm_request(&ctx, &mut request).await {
+                    yield Err(error);
+                    return;
+                }
 
                 // ===== ENHANCED PLUGIN: BEFORE MODEL CALL =====
                 // Enhanced plugins can modify the request or short-circuit the model call.
@@ -2584,7 +4239,9 @@ impl Agent for LlmAgent {
                 let mut current_request = request;
                 let mut model_response_override = model_response_override_from_plugin;
                 if model_response_override.is_none() {
-                    for callback in before_model_callbacks.as_ref() {
+                    for callback in
+                        hook_callbacks.before_model.iter().chain(before_model_callbacks.iter())
+                    {
                         match callback(ctx.clone() as Arc<dyn CallbackContext>, current_request.clone()).await {
                             Ok(BeforeModelResult::Continue(modified_request)) => {
                                 // Callback may have modified the request, continue with it
@@ -2603,53 +4260,95 @@ impl Agent for LlmAgent {
                         }
                     }
                 }
-                let request = current_request;
+                let mut request = current_request;
+                // Governed after every request rewrite, so a callback cannot re-attach a
+                // withheld tool. A skipped model call sends nothing, so it is not governed.
+                let withheld_builtins = if model_response_override.is_none() {
+                    let gate = ToolGate::for_context(ctx.as_ref());
+                    match builtin_governor.govern(&gate, &mut request.tools, &tool_map).await {
+                        Ok(withheld) => withheld,
+                        Err(error) => {
+                            yield Err(error);
+                            return;
+                        }
+                    }
+                } else {
+                    Vec::new()
+                };
+                let withheld_builtins = (!withheld_builtins.is_empty())
+                    .then(|| serde_json::to_string(&withheld_builtins).unwrap_or_default());
+                let request = request;
 
                 // Determine streaming source: cached response or real model
                 let mut accumulated_content: Option<Content> = None;
                 let mut final_provider_metadata: Option<serde_json::Value> = None;
 
+                let produced_by_model = model_response_override.is_none();
+                let mut last_turn_finish_reason = None;
                 if let Some(cached_response) = model_response_override {
                     // Use callback-provided response (e.g., from cache)
                     // Yield it as an event
                     accumulated_content = cached_response.content.clone();
                     final_provider_metadata = cached_response.provider_metadata.clone();
                     normalize_option_content(&mut accumulated_content);
+                    // Text beside a tool call, or in a paused turn, reaches the client and the
+                    // session as the final text does, so it is screened too.
+                    let mut output_warnings = Warnings::default();
+                    let mut citations = cached_response.citation_metadata.clone();
                     if let Some(content) = accumulated_content.take() {
-                        let has_function_calls = content
+                        let preamble = content
                             .parts
                             .iter()
-                            .any(|part| matches!(part, Part::FunctionCall { .. }));
-                        let content = if has_function_calls {
-                            content
-                        } else {
-                            Self::apply_output_guardrails(output_guardrails.as_ref(), content).await?
-                        };
-                        accumulated_content = Some(content);
+                            .any(|part| matches!(part, Part::FunctionCall { .. }))
+                            || Self::continues_turn(final_provider_metadata.as_ref());
+                        let shown_citations = (!preamble)
+                            .then(|| answer_citations(&content, &retrieved, citations.as_ref()))
+                            .flatten();
+                        let grounding =
+                            Grounding { retrieved: &retrieved, citations: shown_citations.as_ref() };
+                        let screened =
+                            screen_model_output(output_guardrails.as_ref(), content, preamble, grounding).await?;
+                        if !preamble {
+                            citations =
+                                answer_citations(&screened.content, &retrieved, citations.as_ref());
+                        }
+                        accumulated_content = Some(screened.content);
+                        output_warnings = screened.warnings;
                     }
 
                     let mut cached_event = Event::new(&invocation_id);
                     cached_event.author = agent_name.clone();
+                    output_warnings.record_on(&mut cached_event);
                     cached_event.llm_response.content = accumulated_content.clone();
+                    cached_event.llm_response.turn_complete = cached_response.turn_complete;
+                    cached_event.llm_response.citation_metadata = citations;
                     cached_event.llm_response.provider_metadata = cached_response.provider_metadata.clone();
                     // Surface and track the response id for provider-neutral continuity.
                     cached_event.llm_response.interaction_id = cached_response.interaction_id.clone();
                     if cached_response.interaction_id.is_some() {
                         last_interaction_id = cached_response.interaction_id.clone();
                     }
-                    cached_event.llm_request = Some(serde_json::to_string(&request).unwrap_or_default());
-                    cached_event.provider_metadata.insert("gcp.vertex.agent.llm_request".to_string(), serde_json::to_string(&request).unwrap_or_default());
-                    cached_event.provider_metadata.insert("gcp.vertex.agent.llm_response".to_string(), serde_json::to_string(&cached_response).unwrap_or_default());
+                    cached_event.llm_request = Some(trace_json_payload(
+                        &request,
+                        ctx.run_config().record_payloads,
+                        ctx.run_config().trace_payload_max_bytes,
+                    ));
+                    // The debug copy carries the screened content, not what the guardrails replaced.
+                    let mut debug_response = cached_response.clone();
+                    if !output_guardrails.is_empty() {
+                        debug_response.content = accumulated_content.clone();
+                    }
+                    cached_event.provider_metadata.insert("gcp.vertex.agent.llm_response".to_string(), serde_json::to_string(&debug_response).unwrap_or_default());
 
                     // Populate long_running_tool_ids for function calls from long-running tools
                     if let Some(ref content) = accumulated_content {
-                        cached_event.long_running_tool_ids = collect_long_running_ids(content);
+                        cached_event.long_running_tool_ids =
+                            collect_long_running_tool_ids(&tool_map, content);
                     }
 
                     yield Ok(cached_event);
                 } else {
-                    // Record LLM request for tracing
-                    let request_json = serde_json::to_string(&request).unwrap_or_default();
+                    // One bounded copy of the request serves the span and the event.
                     let trace_request_json = trace_json_payload(
                         &request,
                         ctx.run_config().record_payloads,
@@ -2671,7 +4370,16 @@ impl Agent for LlmAgent {
                         "gcp.vertex.agent.llm_request" = %trace_request_json,
                         "gcp.vertex.agent.llm_response" = tracing::field::Empty  // Placeholder for later recording
                     );
-                    let _llm_guard = llm_span.enter();
+                    // NOTE: do not `llm_span.enter()` here. This is an
+                    // `async_stream` generator body: an entered guard is tied to the
+                    // current thread, not the task, so it is neither exited when the
+                    // generator suspends at an `.await`/`yield` nor re-entered when
+                    // it resumes (possibly on another worker thread). That both
+                    // detaches everything after the first suspension point from
+                    // `call_llm` and leaks the entry onto the worker thread, where
+                    // unrelated tasks then inherit it as a parent. Instrument the
+                    // individual futures instead — `Instrumented::poll` enters the
+                    // span per poll, so it is correct across suspension.
 
                     // Check streaming mode from run config
                     use adk_core::StreamingMode;
@@ -2679,8 +4387,55 @@ impl Agent for LlmAgent {
                     let should_stream_to_client = matches!(streaming_mode, StreamingMode::SSE | StreamingMode::Bidi)
                         && output_guardrails.is_empty();
 
+                    // Reserves the call's upper-bound cost in the spend ledger and one model
+                    // call in the run budget before it starts; the stream records the call's
+                    // usage once, from its first non-partial response carrying usage, and
+                    // commits its cost. A refusal stops the run before anything is sent.
+                    let call_scope = adk_core::ModelCallScope::for_run(
+                        ctx.run_config(),
+                        ctx.app_name(),
+                        &agent_name,
+                    );
+                    let call_metered = call_scope.budget().is_some();
+                    // Kept for the run's `on_model_error` hooks, which see what the model was sent.
+                    let failed_request = (!ctx.run_config().invocation_hooks.is_empty())
+                        .then(|| request.clone());
                     // Always use streaming internally for LLM calls
-                    let mut response_stream = model.generate_content(request, true).await?;
+                    let mut response_stream = match call_scope
+                        .generate(model.as_ref(), request, true)
+                        .instrument(llm_span.clone())
+                        .await
+                    {
+                        Ok(stream) => stream,
+                        Err(error) => {
+                            // Provider errors can echo the prompt, so the message follows the
+                            // payload rule.
+                            llm_span.in_scope(|| {
+                                tracing::warn!(
+                                    agent.name = %agent_name,
+                                    error = %error.diagnostics(),
+                                    error.message = %traced_message(ctx.run_config(), &error.message),
+                                    "model call failed"
+                                )
+                            });
+                            // A hook's response, from a fallback model for example, answers
+                            // the turn in the failed call's place.
+                            match recover_model_error(&ctx, failed_request.as_ref(), &error).await {
+                                Ok(Some(response)) => {
+                                    Box::pin(futures::stream::iter([Ok(response)]))
+                                        as adk_core::LlmResponseStream
+                                }
+                                Ok(None) => {
+                                    yield Err(error);
+                                    return;
+                                }
+                                Err(hook_error) => {
+                                    yield Err(hook_error);
+                                    return;
+                                }
+                            }
+                        }
+                    };
 
                     use futures::StreamExt;
 
@@ -2688,29 +4443,59 @@ impl Agent for LlmAgent {
                     let mut last_chunk: Option<LlmResponse> = None;
 
                     // Stream and process chunks with AfterModel callbacks
-                    while let Some(chunk_result) = response_stream.next().await {
+                    while let Some(chunk_result) =
+                        response_stream.next().instrument(llm_span.clone()).await
+                    {
                         // Cooperative cancellation: stop consuming the model
                         // stream promptly when the invocation is cancelled. This
                         // drops `response_stream`, releasing the provider connection.
                         if ctx.is_cancelled() {
-                            tracing::info!(agent.name = %agent_name, "invocation cancelled during LLM streaming");
+                            llm_span.in_scope(|| {
+                                tracing::info!(agent.name = %agent_name, "invocation cancelled during LLM streaming")
+                            });
                             return;
                         }
                         let mut chunk = match chunk_result {
                             Ok(c) => c,
                             Err(e) => {
-                                yield Err(e);
-                                return;
+                                llm_span.in_scope(|| {
+                                    tracing::warn!(
+                                        agent.name = %agent_name,
+                                        error = %e.diagnostics(),
+                                        error.message = %traced_message(ctx.run_config(), &e.message),
+                                        "model stream failed"
+                                    )
+                                });
+                                // A hook's response replaces the whole failed response, so
+                                // the deltas already received are dropped.
+                                match recover_model_error(&ctx, failed_request.as_ref(), &e).await {
+                                    Ok(Some(response)) => {
+                                        accumulated_content = None;
+                                        response_stream = Box::pin(futures::stream::iter([Ok(response)]));
+                                        continue;
+                                    }
+                                    Ok(None) => {
+                                        yield Err(e);
+                                        return;
+                                    }
+                                    Err(hook_error) => {
+                                        yield Err(hook_error);
+                                        return;
+                                    }
+                                }
                             }
                         };
-
                         // ===== AFTER MODEL CALLBACKS (per chunk) =====
                         // Callbacks can modify each streaming chunk
-                        for callback in after_model_callbacks.as_ref() {
-                            match callback(ctx.clone() as Arc<dyn CallbackContext>, chunk.clone()).await {
+                        for callback in
+                            hook_callbacks.after_model.iter().chain(after_model_callbacks.iter())
+                        {
+                            match callback(ctx.clone() as Arc<dyn CallbackContext>, chunk.clone())
+                                .instrument(llm_span.clone())
+                                .await
+                            {
                                 Ok(Some(modified_chunk)) => {
-                                    // Callback modified this chunk
-                                    chunk = modified_chunk;
+                                    chunk = replace_chunk(&chunk, modified_chunk);
                                     break;
                                 }
                                 Ok(None) => {
@@ -2729,11 +4514,21 @@ impl Agent for LlmAgent {
 
                         // Accumulate content for conversation history (always needed)
                         if let Some(chunk_content) = chunk.content.clone() {
-                            if let Some(ref mut acc) = accumulated_content {
-                                acc.parts.extend(chunk_content.parts);
+                            if !chunk.partial && chunk.provider_metadata.as_ref()
+                                .and_then(|metadata| metadata.get("content_complete"))
+                                .and_then(serde_json::Value::as_bool) == Some(true)
+                            {
+                                accumulated_content = Some(chunk_content);
+                            } else if let Some(ref mut acc) = accumulated_content {
+                                append_streamed_parts(&mut acc.parts, chunk_content.parts);
                             } else {
                                 accumulated_content = Some(chunk_content);
                             }
+                        }
+                        // Tool-call markup can span deltas, so it is parsed again once the
+                        // text is complete.
+                        if !chunk.partial {
+                            normalize_option_content(&mut accumulated_content);
                         }
 
                         // For SSE/Bidi mode: yield each chunk immediately with stable event ID
@@ -2741,16 +4536,43 @@ impl Agent for LlmAgent {
                             let long_running_tool_ids = chunk
                                 .content
                                 .as_ref()
-                                .map(&collect_long_running_ids)
+                                .map(|content| collect_long_running_tool_ids(&tool_map, content))
                                 .unwrap_or_default();
-                            yield Ok(build_partial_llm_event(
+                            let mut event = build_partial_llm_event(
                                 &llm_event_id,
                                 &invocation_id,
                                 &agent_name,
-                                &request_json,
+                                &trace_request_json,
                                 &chunk,
                                 long_running_tool_ids,
-                            ));
+                            );
+                            if call_metered {
+                                event.provider_metadata.insert(
+                                    adk_core::BUDGET_RECORDED_KEY.to_string(),
+                                    "true".to_string(),
+                                );
+                            }
+                            if !chunk.partial
+                                && let Some(withheld) = &withheld_builtins
+                            {
+                                event.provider_metadata.insert(
+                                    adk_core::BUILTIN_TOOLS_WITHHELD_KEY.to_string(),
+                                    withheld.clone(),
+                                );
+                            }
+                            // Runner persists terminal events as complete content.
+                            // Providers can finish with tools/metadata after text
+                            // deltas, so the last chunk alone is insufficient.
+                            if !chunk.partial {
+                                event.llm_response.content = accumulated_content.clone();
+                                if let Some(metadata) = event.llm_response.provider_metadata
+                                    .get_or_insert_with(|| serde_json::json!({}))
+                                    .as_object_mut()
+                                {
+                                    metadata.insert("content_complete".into(), true.into());
+                                }
+                            }
+                            yield Ok(event);
                         }
 
                         // Track the response id for provider-neutral continuity.
@@ -2760,6 +4582,9 @@ impl Agent for LlmAgent {
                             last_interaction_id = chunk.interaction_id.clone();
                         }
 
+                        if chunk.finish_reason.is_some() {
+                            last_turn_finish_reason = chunk.finish_reason;
+                        }
                         // Store last chunk for final event metadata
                         last_chunk = Some(chunk.clone());
 
@@ -2769,37 +4594,142 @@ impl Agent for LlmAgent {
                         }
                     }
 
-                    // For None mode: yield single final event with accumulated content
-                    if !should_stream_to_client {
-                        if let Some(content) = accumulated_content.take() {
-                            let has_function_calls = content
-                                .parts
-                                .iter()
-                                .any(|part| matches!(part, Part::FunctionCall { .. }));
-                            let content = if has_function_calls {
-                                content
-                            } else {
-                                Self::apply_output_guardrails(output_guardrails.as_ref(), content).await?
-                            };
-                            accumulated_content = Some(content);
-                        }
+                    if let Some(last) = &last_chunk {
+                        final_provider_metadata = last.provider_metadata.clone();
+                    }
+                    normalize_option_content(&mut accumulated_content);
 
-                        if let Some(last) = &last_chunk {
-                            final_provider_metadata = last.provider_metadata.clone();
-                        }
-                        let long_running_tool_ids = accumulated_content
+                    // A stream whose last chunk is partial never produced the complete event
+                    // the runner persists, so one is emitted here with the whole response.
+                    if should_stream_to_client
+                        && let Some(last) = last_chunk.as_ref().filter(|chunk| chunk.partial)
+                        && accumulated_content.is_some()
+                    {
+                        let mut closing = last.clone();
+                        closing.partial = false;
+                        closing.content = accumulated_content.clone();
+                        closing.turn_complete = !closing
+                            .content
                             .as_ref()
-                            .map(&collect_long_running_ids)
+                            .is_some_and(|content| {
+                                content.parts.iter().any(|part| matches!(part, Part::FunctionCall { .. }))
+                            });
+                        let long_running_tool_ids = closing
+                            .content
+                            .as_ref()
+                            .map(|content| collect_long_running_tool_ids(&tool_map, content))
                             .unwrap_or_default();
-                        yield Ok(build_final_llm_event(
+                        let mut event = build_partial_llm_event(
                             &llm_event_id,
                             &invocation_id,
                             &agent_name,
-                            &request_json,
+                            &trace_request_json,
+                            &closing,
+                            long_running_tool_ids,
+                        );
+                        if call_metered {
+                            event.provider_metadata.insert(
+                                adk_core::BUDGET_RECORDED_KEY.to_string(),
+                                "true".to_string(),
+                            );
+                        }
+                        if let Some(withheld) = &withheld_builtins {
+                            event.provider_metadata.insert(
+                                adk_core::BUILTIN_TOOLS_WITHHELD_KEY.to_string(),
+                                withheld.clone(),
+                            );
+                        }
+                        if let Some(metadata) = event.llm_response.provider_metadata
+                            .get_or_insert_with(|| serde_json::json!({}))
+                            .as_object_mut()
+                        {
+                            metadata.insert("content_complete".into(), true.into());
+                        }
+                        yield Ok(event);
+                    }
+                    // A stream that ended without a non-partial usage report is settled
+                    // here, before any tool runs, from the best usage it carried.
+                    drop(response_stream);
+                    let metered = call_metered;
+
+                    // For None mode: yield single final event with accumulated content
+                    if !should_stream_to_client {
+                        // Text beside a tool call, or in a paused turn, reaches the client and
+                        // the session as the final text does, so it is screened too.
+                        let mut output_warnings = Warnings::default();
+                        let provider_citations =
+                            last_chunk.as_ref().and_then(|chunk| chunk.citation_metadata.clone());
+                        let mut citations = provider_citations.clone();
+                        if let Some(content) = accumulated_content.take() {
+                            let preamble = content
+                                .parts
+                                .iter()
+                                .any(|part| matches!(part, Part::FunctionCall { .. }))
+                                || Self::continues_turn(final_provider_metadata.as_ref());
+                            let shown_citations = (!preamble)
+                                .then(|| {
+                                    answer_citations(&content, &retrieved, provider_citations.as_ref())
+                                })
+                                .flatten();
+                            let grounding = Grounding {
+                                retrieved: &retrieved,
+                                citations: shown_citations.as_ref(),
+                            };
+                            let screened = screen_model_output(
+                                output_guardrails.as_ref(),
+                                content,
+                                preamble,
+                                grounding,
+                            )
+                            .instrument(llm_span.clone())
+                            .await?;
+                            if !preamble {
+                                citations = answer_citations(
+                                    &screened.content,
+                                    &retrieved,
+                                    provider_citations.as_ref(),
+                                );
+                            }
+                            accumulated_content = Some(screened.content);
+                            output_warnings = screened.warnings;
+                        }
+                        // The debug copy of the last chunk carries the screened content, not
+                        // what the guardrails replaced.
+                        if !output_guardrails.is_empty()
+                            && let Some(last) = last_chunk.as_mut()
+                            && last.content.is_some()
+                        {
+                            last.content = accumulated_content.clone();
+                        }
+
+                        let long_running_tool_ids = accumulated_content
+                            .as_ref()
+                            .map(|content| collect_long_running_tool_ids(&tool_map, content))
+                            .unwrap_or_default();
+                        let mut final_event = build_final_llm_event(
+                            &llm_event_id,
+                            &invocation_id,
+                            &agent_name,
+                            &trace_request_json,
                             accumulated_content.as_ref(),
                             last_chunk.as_ref(),
                             long_running_tool_ids,
-                        ));
+                        );
+                        output_warnings.record_on(&mut final_event);
+                        final_event.llm_response.citation_metadata = citations;
+                        if metered {
+                            final_event.provider_metadata.insert(
+                                adk_core::BUDGET_RECORDED_KEY.to_string(),
+                                "true".to_string(),
+                            );
+                        }
+                        if let Some(withheld) = &withheld_builtins {
+                            final_event.provider_metadata.insert(
+                                adk_core::BUILTIN_TOOLS_WITHHELD_KEY.to_string(),
+                                withheld.clone(),
+                            );
+                        }
+                        yield Ok(final_event);
                     }
 
                     // A provider that reports a terminal error inside an `Ok`
@@ -2815,16 +4745,13 @@ impl Agent for LlmAgent {
                     if let Some(ref last) = last_chunk
                         && let Some(ref code) = last.error_code
                     {
+                        // Provider text can echo the request, so the caller gets a bounded
+                        // excerpt and the log follows the payload rule.
                         let message = last
                             .error_message
-                            .clone()
-                            .unwrap_or_else(|| "provider reported a terminal error".to_string());
-                        tracing::error!(
-                            error.code = %code,
-                            error.message = %message,
-                            agent = %agent_name,
-                            "model reported a terminal error"
-                        );
+                            .as_deref()
+                            .map(adk_core::upstream_excerpt)
+                            .unwrap_or("provider reported a terminal error");
                         // The provider's own code is preserved in the ADK error code
                         // so retry policy and telemetry can key on it.
                         // Built before the yield point: a borrow may not cross it.
@@ -2842,6 +4769,14 @@ impl Agent for LlmAgent {
                             format!("{code}: {message}"),
                         )
                         .with_details(details);
+                        llm_span.in_scope(|| {
+                            tracing::error!(
+                                error = %provider_error.diagnostics(),
+                                error.message = %traced_message(ctx.run_config(), message),
+                                agent = %agent_name,
+                                "model reported a terminal error"
+                            )
+                        });
                         yield Err(provider_error);
                         return;
                     }
@@ -2896,6 +4831,7 @@ impl Agent for LlmAgent {
                     .unwrap_or_default();
 
                 let has_function_calls = !function_call_names.is_empty();
+                let continues_turn = Self::continues_turn(final_provider_metadata.as_ref());
 
                 // Check if ALL function calls are from long-running tools
                 // If so, we should NOT continue the loop - the tool returned a pending status
@@ -2912,31 +4848,26 @@ impl Agent for LlmAgent {
                         content,
                         final_provider_metadata.as_ref(),
                     ));
+                }
 
-                    // Handle output_key: save final agent output to state_delta
-                    if let Some(ref output_key) = output_key
-                        && !has_function_calls
-                    {
-                        let mut text_parts = String::new();
-                        for part in &content.parts {
-                            if let Part::Text { text } = part {
-                                text_parts.push_str(text);
-                            }
-                        }
-                        if !text_parts.is_empty() {
-                            // Yield a final state update event
-                            let mut state_event = Event::new(&invocation_id);
-                            state_event.author = agent_name.clone();
-                            state_event.actions.state_delta.insert(
-                                output_key.clone(),
-                                serde_json::Value::String(text_parts),
-                            );
-                            yield Ok(state_event);
-                        }
-                    }
+                // Native server tools can pause a turn without calling a client
+                // tool. Continue through this same bounded, cancellable loop.
+                if !has_function_calls && continues_turn {
+                    continue;
                 }
 
                 if !has_function_calls {
+                    // ===== EMPTY MODEL TURN =====
+                    // A turn the model ended with no answer — no parts, only thinking, or only
+                    // whitespace — fails the run, so callers and retry policy can tell it from
+                    // an answer. A callback that answered instead of the model is not checked.
+                    if produced_by_model
+                        && !accumulated_content.as_ref().is_some_and(has_answer_content)
+                    {
+                        yield Err(empty_response_error(last_turn_finish_reason));
+                        return;
+                    }
+
                     // ===== OUTPUT SCHEMA VALIDATION =====
                     // When output_schema is set, validate the response text against
                     // the schema. If invalid, retry with a correction prompt up to
@@ -2984,6 +4915,25 @@ impl Agent for LlmAgent {
                         }
                     }
 
+                    // Persist the final output only once it has passed schema validation, so a
+                    // rejected attempt never lands in `state[output_key]`.
+                    if let Some(ref output_key) = output_key
+                        && let Some(ref content) = accumulated_content
+                    {
+                        // Structured output is stored as the JSON it validated as.
+                        let text_parts =
+                            output_text(content, prompt_config.output_schema.is_some());
+                        if !text_parts.is_empty() {
+                            let mut state_event = Event::new(&invocation_id);
+                            state_event.author = agent_name.clone();
+                            state_event.actions.state_delta.insert(
+                                output_key.clone(),
+                                serde_json::Value::String(text_parts),
+                            );
+                            yield Ok(state_event);
+                        }
+                    }
+
                     // No function calls, we're done
                     // Record LLM response for tracing
                     if let Some(ref content) = accumulated_content {
@@ -3003,15 +4953,25 @@ impl Agent for LlmAgent {
                 if let Some(content) = &accumulated_content {
                     // ===== RESOLVE TOOL EXECUTION STRATEGY =====
                     // Per-agent override; defaults to Sequential if not set.
-                    let strategy = agent_tool_execution_strategy
-                        .unwrap_or(ToolExecutionStrategy::Sequential);
+                    let strategy = ToolDispatchMode::resolve(
+                        agent_tool_execution_strategy.unwrap_or(ToolExecutionStrategy::Sequential),
+                        parallelize_agent_delegations,
+                    );
 
-                    let fc_parts = collect_function_calls(content, &invocation_id);
+                    // Providers that omit call IDs get one unique to this model turn, so two
+                    // turns of one invocation never share an idempotency key.
+                    let fc_parts = collect_function_calls(
+                        content,
+                        &format!("{invocation_id}_{}", uuid::Uuid::new_v4().simple()),
+                    );
 
                     // ===== HANDLE transfer_to_agent BEFORE DISPATCH =====
                     // Transfer calls cause an immediate return from the stream,
                     // so they must be handled inline regardless of strategy.
                     let mut transfer_handled = false;
+                    // Calls already answered by an invalid-target error, so a later valid
+                    // transfer does not answer them a second time.
+                    let mut answered_calls = HashSet::new();
                     for call in &fc_parts {
                         if call.name == "transfer_to_agent" {
                             let target_agent = call
@@ -3023,32 +4983,63 @@ impl Agent for LlmAgent {
 
                             let valid_target = valid_transfer_targets.iter().any(|n| n == &target_agent);
                             if !valid_target {
-                                let error_content = Content {
-                                    role: "function".to_string(),
-                                    parts: vec![Part::FunctionResponse {
-                                        function_response: FunctionResponseData::new(
-                                            call.name.clone(),
-                                            serde_json::json!({
-                                                "error": format!(
-                                                    "Agent '{}' not found. Available agents: {:?}",
-                                                    target_agent, valid_transfer_targets
-                                                )
-                                            }),
-                                        ),
-                                        id: call.id.clone(),
-                                        annotations: None,
-                                    }],
+                                let mut refusal = Part::FunctionResponse {
+                                    function_response: FunctionResponseData::new(
+                                        call.name.clone(),
+                                        serde_json::json!({
+                                            "error": format!(
+                                                "Agent '{}' not found. Available agents: {:?}",
+                                                target_agent, valid_transfer_targets
+                                            )
+                                        }),
+                                    ),
+                                    id: call.id.clone(),
+                                    annotations: None,
                                 };
+                                refusal.set_tool_result_status(ToolResultStatus::NotRun, None);
+                                let error_content =
+                                    Content { role: "function".to_string(), parts: vec![refusal] };
                                 conversation_history.push(error_content.clone());
                                 let mut error_event = Event::new(&invocation_id);
                                 error_event.author = agent_name.clone();
                                 error_event.llm_response.content = Some(error_content);
                                 yield Ok(error_event);
+                                answered_calls.insert(call.index);
                                 continue;
                             }
 
+                            // Every call in this model turn gets exactly one response, so providers
+                            // that require one per call accept any later history containing it.
+                            let responses = fc_parts
+                                .iter()
+                                .filter(|other| !answered_calls.contains(&other.index))
+                                .map(|other| {
+                                    let transfers = other.index == call.index;
+                                    let response = if transfers {
+                                        serde_json::json!({ "transferred_to": target_agent })
+                                    } else {
+                                        serde_json::json!({
+                                            "error": format!("not run: control transferred to {target_agent}")
+                                        })
+                                    };
+                                    let mut part = Part::FunctionResponse {
+                                        function_response: FunctionResponseData::new(
+                                            other.name.clone(),
+                                            response,
+                                        ),
+                                        id: other.id.clone(),
+                                        annotations: None,
+                                    };
+                                    if !transfers {
+                                        part.set_tool_result_status(ToolResultStatus::NotRun, None);
+                                    }
+                                    part
+                                })
+                                .collect();
                             let mut transfer_event = Event::new(&invocation_id);
                             transfer_event.author = agent_name.clone();
+                            transfer_event.llm_response.content =
+                                Some(Content { role: "function".to_string(), parts: responses });
                             transfer_event.actions.transfer_to_agent = Some(target_agent);
                             yield Ok(transfer_event);
                             transfer_handled = true;
@@ -3060,7 +5051,7 @@ impl Agent for LlmAgent {
                     }
 
                     // Filter out transfer_to_agent and built-in tools
-                    let mut fc_parts: Vec<_> = fc_parts
+                    let fc_parts: Vec<_> = fc_parts
                         .into_iter()
                         .filter(|call| {
                             if call.name == "transfer_to_agent" {
@@ -3076,79 +5067,63 @@ impl Agent for LlmAgent {
                         })
                         .collect();
 
-                    // Guardrails must run before confirmation requests are constructed. This also
-                    // makes a revised call's arguments the ones shown to the approver and included
-                    // in its confirmation fingerprint.
-                    for call in &mut fc_parts {
-                        match screen_tool_call(&tool_guardrails, &call.name, &call.args).await {
-                            ToolScreening::Allow(args) => call.args = args,
-                            ToolScreening::Deny(reason) => {
-                                call.guardrail_denial = Some(reason);
-                            }
-                        }
-                    }
-
-                    // ===== TOOL CONFIRMATION PRE-CHECK =====
-                    // Tool confirmation interrupts cause an immediate return,
-                    // so check before parallel dispatch.
-                    let mut confirmation_interrupted = false;
-                    for call in &fc_parts {
-                        if call.guardrail_denial.is_none()
-                            && (tool_confirmation_policy.requires_confirmation(&call.name)
-                                || ctx.requires_tool_confirmation(&call.name))
-                            && static_confirmation_decision(
-                                &confirmation_decisions,
-                                &confirmation_fingerprints,
-                                &call.function_call_id,
-                                &call.name,
-                                &call.args,
-                            )
-                            .is_none()
-                            && live_confirmation_decisions
-                                .get(&call.function_call_id)
-                                .copied()
-                                .is_none()
-                        {
-                            let request = ToolConfirmationRequest {
-                                tool_name: call.name.clone(),
-                                function_call_id: Some(call.function_call_id.clone()),
-                                args: call.args.clone(),
-                            };
-                            if let Some(handler) = confirmation_handler.as_ref() {
-                                match handler.decide(&request).await {
-                                    Ok(decision) => {
-                                        live_confirmation_decisions
-                                            .insert(call.function_call_id.clone(), decision);
-                                        continue;
-                                    }
-                                    Err(error) => {
-                                        yield Err(error);
-                                        return;
-                                    }
-                                }
-                            }
-
-                                let mut ce = Event::new(&invocation_id);
-                                ce.author = agent_name.clone();
-                                ce.llm_response.interrupted = true;
-                                ce.llm_response.turn_complete = true;
-                                ce.llm_response.content = Some(Content {
-                                    role: "model".to_string(),
-                                    parts: vec![Part::Text {
-                                        text: format!(
-                                            "Tool confirmation required for '{}'. Provide approve/deny decision to continue.",
-                                            call.name
-                                        ),
-                                    }],
-                                });
-                                ce.actions.tool_confirmation = Some(request);
-                                yield Ok(ce);
-                                confirmation_interrupted = true;
-                                break;
-                        }
-                    }
-                    if confirmation_interrupted {
+                    // ===== RUN BUDGET: TOOL CALLS =====
+                    // The whole batch is reserved before any call starts. A batch that does
+                    // not fit is answered with "not run" responses, so the history keeps one
+                    // response per call, and the run ends with the budget error.
+                    if let Some(tracker) = budget_tracker.as_ref()
+                        && let Err(exceeded) = tracker.begin_tool_calls(fc_parts.len() as u64)
+                    {
+                        let cause = adk_core::AdkError::from(exceeded.clone());
+                        let parts = fc_parts
+                            .iter()
+                            .map(|call| {
+                                let mut part = Part::FunctionResponse {
+                                    function_response: FunctionResponseData::new(
+                                        call.name.clone(),
+                                        serde_json::json!({ "error": format!("not run: {exceeded}") }),
+                                    ),
+                                    id: call.id.clone(),
+                                    annotations: None,
+                                };
+                                part.set_tool_result_status(ToolResultStatus::NotRun, Some(&cause));
+                                part
+                            })
+                            .collect();
+                        let mut budget_event = Event::new(&invocation_id);
+                        budget_event.author = agent_name.clone();
+                        budget_event.llm_response.content =
+                            Some(Content { role: "function".to_string(), parts });
+                        yield Ok(budget_event);
+                        yield Err(exceeded.into());
                         return;
+                    }
+
+                    // ===== THE BATCH, BEFORE DISPATCH =====
+                    // The confirmation handler sees the turn's calls once, so it can review
+                    // several held edits as one change set (spec 3.1 §7.26, §10 A2).
+                    if !fc_parts.is_empty()
+                        && let Some(handler) = ctx.run_config().tool_confirmation_handler.clone()
+                    {
+                        let origins: Vec<Option<adk_core::ToolOrigin>> = fc_parts
+                            .iter()
+                            .map(|call| {
+                                tool_map.get(&call.name).map(|tool| adk_core::ToolOrigin::of(tool.as_ref()))
+                            })
+                            .collect();
+                        let batch: Vec<adk_core::BatchCall<'_>> = fc_parts
+                            .iter()
+                            .zip(&origins)
+                            .map(|(call, origin)| {
+                                let entry = adk_core::BatchCall::new(&call.name, &call.args)
+                                    .with_function_call_id(&call.function_call_id);
+                                match origin {
+                                    Some(origin) => entry.with_origin(origin),
+                                    None => entry,
+                                }
+                            })
+                            .collect();
+                        handler.batch_started(&batch).await;
                     }
 
                     // Wrap circuit breaker in Mutex for shared access across parallel futures.
@@ -3166,25 +5141,30 @@ impl Agent for LlmAgent {
                     // it concurrently and yields progress events to the client.
                     let (progress_tx, mut progress_rx) =
                         tokio::sync::mpsc::channel::<Event>(TOOL_PROGRESS_CAPACITY);
+                    let progress_overflow = ProgressOverflow::default();
 
                     let executor = ToolExecutor {
                         ctx: ctx.clone(),
+                        agent_name: &agent_name,
                         tool_map: &tool_map,
                         tool_retry_budgets: &tool_retry_budgets,
                         default_retry_budget: &default_retry_budget,
+                        output_guardrails: output_guardrails.as_ref(),
                         before_tool_callbacks: &before_tool_callbacks,
                         after_tool_callbacks: &after_tool_callbacks,
                         after_tool_callbacks_full: &after_tool_callbacks_full,
                         on_tool_error_callbacks: &on_tool_error_callbacks,
+                        hook_callbacks: &hook_callbacks,
                         tool_confirmation_policy: &tool_confirmation_policy,
+                        tool_guardrails: tool_guardrails.as_ref(),
                         cb_mutex: &cb_mutex,
                         invocation_id: &invocation_id,
                         concurrency_manager: &concurrency_manager,
                         progress_tx: progress_tx.clone(),
+                        progress_overflow: progress_overflow.clone(),
                         tool_timeout,
-                        confirmation_decisions: &confirmation_decisions,
-                        confirmation_fingerprints: &confirmation_fingerprints,
-                        live_confirmation_decisions: &live_confirmation_decisions,
+                        expose_tool_error_messages,
+                        approval_failed: tokio::sync::watch::channel(false).0,
                         #[cfg(feature = "enhanced-plugins")]
                         enhanced_plugin_manager: &enhanced_plugin_manager,
                     };
@@ -3201,68 +5181,7 @@ impl Agent for LlmAgent {
                     // and circuit-breaker mutex) is dropped before we reclaim
                     // `cb_mutex` below.
                     let mut results = {
-                        let dispatch = async {
-                            let results: Vec<ToolExecutionResult> = match strategy {
-                                ToolExecutionStrategy::Sequential => {
-                                    let mut results = Vec::with_capacity(fc_parts.len());
-                                    for call in fc_parts {
-                                        results.push(executor.execute(call).await);
-                                    }
-                                    results
-                                }
-                                ToolExecutionStrategy::Parallel => {
-                                    use futures::StreamExt as _;
-                                    // Parallel is an explicit caller override. Tool
-                                    // safety metadata is intentionally not inspected.
-                                    // All concurrency enforcement is handled by the
-                                    // ToolConcurrencyManager semaphore inside ToolExecutor.
-                                    // Use fc_parts.len() as buffer so all futures can start
-                                    // and queue on the semaphore for proper per-tool limiting.
-                                    let buffer_size = fc_parts.len().max(1);
-                                    futures::stream::iter(
-                                        fc_parts.into_iter().map(|call| executor.execute(call)),
-                                    )
-                                    .buffer_unordered(buffer_size)
-                                    .collect()
-                                    .await
-                                }
-                                ToolExecutionStrategy::Auto => {
-                                    // A call may overlap another only when its tool is
-                                    // read-only *and* declares concurrency safety.
-                                    let (concurrent_fcs, sequential_fcs): (Vec<_>, Vec<_>) =
-                                        fc_parts.into_iter().partition(|call| {
-                                            tool_map.get(&call.name).is_some_and(|tool| {
-                                                tool.is_read_only() && tool.is_concurrency_safe()
-                                            })
-                                        });
-                                    let mut all_results = Vec::new();
-
-                                    // Concurrency enforcement is handled by the semaphore
-                                    // inside ToolExecutor.
-                                    if !concurrent_fcs.is_empty() {
-                                        use futures::StreamExt as _;
-                                        let buffer_size = concurrent_fcs.len().max(1);
-                                        all_results.extend(
-                                            futures::stream::iter(
-                                                concurrent_fcs
-                                                    .into_iter()
-                                                    .map(|call| executor.execute(call)),
-                                            )
-                                            .buffer_unordered(buffer_size)
-                                            .collect::<Vec<_>>()
-                                            .await,
-                                        );
-                                    }
-
-                                    // Everything else runs one at a time.
-                                    for call in sequential_fcs {
-                                        all_results.push(executor.execute(call).await);
-                                    }
-                                    all_results
-                                }
-                            };
-                            results
-                        };
+                        let dispatch = executor.dispatch(strategy, fc_parts);
 
                         // Drain tool progress concurrently with execution, yielding
                         // each chunk as a partial Event the moment it arrives. The
@@ -3283,7 +5202,22 @@ impl Agent for LlmAgent {
                         while let Ok(progress_event) = progress_rx.try_recv() {
                             yield Ok(progress_event);
                         }
-                        results
+                        // Then the markers that found the queue full.
+                        let markers = std::mem::take(
+                            &mut *progress_overflow
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner),
+                        );
+                        for marker in markers {
+                            yield Ok(marker);
+                        }
+                        match results {
+                            Ok(results) => results,
+                            Err(error) => {
+                                yield Err(error);
+                                return;
+                            }
+                        }
                     };
                     // Preserve LLM-returned order even when tool futures finish out of order.
                     results.sort_by_key(|r| r.index);
@@ -3291,20 +5225,49 @@ impl Agent for LlmAgent {
                     // Restore circuit breaker state from the mutex
                     circuit_breaker_state = cb_mutex.into_inner().unwrap_or_else(|e| e.into_inner());
 
-                    // Yield results in original order
+                    // Events were already emitted on completion. Only model context
+                    // is assembled in call order; never emit a second result event.
+                    // A held call has not run; it counts once, when a later run resumes it.
+                    if let Some(tracker) = budget_tracker.as_ref() {
+                        let held = results.iter().filter(|result| result.pending.is_some()).count();
+                        tracker.release_tool_calls(held as u64);
+                    }
+                    let mut held_for_confirmation = Vec::new();
                     for result in results {
-                        let mut tool_event = Event::new(&invocation_id);
-                        tool_event.author = agent_name.clone();
-                        tool_event.actions = result.actions;
-                        tool_event.llm_response.content = Some(result.content.clone());
-                        yield Ok(tool_event);
-
                         if result.escalate_or_skip {
                             return;
                         }
-
+                        held_for_confirmation.extend(result.pending);
+                        retrieved.extend(result.actions.grounding_sources);
                         conversation_history.push(result.content);
                     }
+
+                    // ===== TOOL CONFIRMATION INTERRUPT =====
+                    // A call held for a decision ends the run. Its request carries the final
+                    // arguments, and the next run that has a decision for it resumes the call
+                    // before its first model call.
+                    if !held_for_confirmation.is_empty() {
+                        for request in held_for_confirmation {
+                            yield Ok(confirmation_event(&invocation_id, &agent_name, request));
+                        }
+                        return;
+                    }
+
+                    // A tool can update session state as part of its response. Resolve
+                    // toolsets again before the next model turn so context-sensitive
+                    // toolsets (notably progressive skills) can expose newly activated
+                    // capabilities in the same invocation.
+                    let refreshed_tools = match tool_setup.resolve(&ctx).await {
+                        Ok(tools) => tools,
+                        Err(error) => {
+                            yield Err(error);
+                            return;
+                        }
+                    };
+                    tool_map = refreshed_tools.map;
+                    tool_declarations = refreshed_tools.declarations;
+                    valid_transfer_targets = refreshed_tools.transfer_targets;
+                    steering_due = true;
                 }
 
                 // If all function calls were from long-running tools, we need ONE more model call
@@ -3316,25 +5279,94 @@ impl Agent for LlmAgent {
                     // On next iteration, there won't be function calls, so we'll break naturally
                 }
             }
+        });
 
-            // ===== AFTER AGENT CALLBACKS =====
-            // Execute after the agent completes
-            for callback in after_agent_callbacks.as_ref() {
+        let s = stream! {
+            use futures::StreamExt;
+            let ctx = stage_ctx;
+            let invocation_id = stage_invocation_id;
+            let agent_name = stage_agent_name;
+
+            // ===== BEFORE AGENT CALLBACKS =====
+            // The first callback that returns content answers for the agent, which then skips
+            // its body and goes to the after-agent stage.
+            let mut answered = false;
+            for callback in hook_before_agent.iter().chain(before_agent_callbacks.iter()) {
                 match callback(ctx.clone() as Arc<dyn CallbackContext>).await {
                     Ok(Some(content)) => {
-                        // Callback returned content - yield it
+                        let mut early_event = Event::new(&invocation_id);
+                        early_event.author = agent_name.clone();
+                        // The callback's answer is the agent's output, so `output_key` keeps it.
+                        if let Some(key) = &stage_output_key {
+                            let text = output_text(&content, structured_output);
+                            if !text.is_empty() {
+                                early_event
+                                    .actions
+                                    .state_delta
+                                    .insert(key.clone(), serde_json::Value::String(text));
+                            }
+                        }
+                        early_event.llm_response.content = Some(content);
+                        yield Ok(early_event);
+                        answered = true;
+                        break;
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        yield Err(e);
+                        return;
+                    }
+                }
+            }
+
+            if !answered {
+                // A body that is dropped before it finishes — the run cancelled, the client
+                // gone, a parallel sibling escalated — still runs the after-agent stage. A
+                // durable attempt dropped by its worker is resumed by the worker that
+                // recovers the run, which runs the stage then.
+                let mut on_drop = AfterAgentOnDrop::armed(
+                    Arc::clone(&hook_after_agent),
+                    Arc::clone(&after_agent_callbacks),
+                    ctx.clone() as Arc<dyn CallbackContext>,
+                );
+                if ctx.run_config().durable_run_id.is_some() {
+                    on_drop.disarm();
+                }
+                let mut body = body;
+                let mut finished = true;
+                while let Some(item) = body.next().await {
+                    // A failed agent has not completed, and a held call resumes the agent in a
+                    // later run, which runs the stage then.
+                    let pauses = match &item {
+                        Err(_) => true,
+                        Ok(event) => event.actions.tool_confirmation.is_some(),
+                    };
+                    if pauses {
+                        finished = false;
+                        on_drop.disarm();
+                    }
+                    yield item;
+                }
+                on_drop.disarm();
+                if !finished {
+                    return;
+                }
+            }
+
+            // ===== AFTER AGENT CALLBACKS =====
+            // Runs on every other exit: an answer, a transfer, a turn-ending tool result, and
+            // a cancellation the agent observed. The first callback that returns content wins.
+            for callback in hook_after_agent.iter().chain(after_agent_callbacks.iter()) {
+                match callback(ctx.clone() as Arc<dyn CallbackContext>).await {
+                    Ok(Some(content)) => {
                         let mut after_event = Event::new(&invocation_id);
                         after_event.author = agent_name.clone();
                         after_event.llm_response.content = Some(content);
                         yield Ok(after_event);
-                        break; // First callback that returns content wins
+                        break;
                     }
-                    Ok(None) => {
-                        // Continue to next callback
-                        continue;
-                    }
+                    Ok(None) => {}
                     Err(e) => {
-                        // Callback failed - propagate error
                         yield Err(e);
                         return;
                     }
@@ -3344,6 +5376,153 @@ impl Agent for LlmAgent {
 
         Ok(Box::pin(s))
     }
+}
+
+/// Runs an agent's after-agent callbacks when its stream is dropped before the agent
+/// finishes, on the current Tokio runtime.
+///
+/// Nothing reads the stream any more, so content a callback returns is discarded.
+struct AfterAgentOnDrop {
+    hooks: Arc<Vec<AfterAgentCallback>>,
+    callbacks: Arc<Vec<AfterAgentCallback>>,
+    ctx: Arc<dyn CallbackContext>,
+    armed: bool,
+}
+
+impl AfterAgentOnDrop {
+    fn armed(
+        hooks: Arc<Vec<AfterAgentCallback>>,
+        callbacks: Arc<Vec<AfterAgentCallback>>,
+        ctx: Arc<dyn CallbackContext>,
+    ) -> Self {
+        Self { hooks, callbacks, ctx, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for AfterAgentOnDrop {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            tracing::warn!(
+                agent.name = %self.ctx.agent_name(),
+                "no Tokio runtime to run after-agent callbacks on; they are skipped"
+            );
+            return;
+        };
+        let (hooks, callbacks, ctx) =
+            (Arc::clone(&self.hooks), Arc::clone(&self.callbacks), Arc::clone(&self.ctx));
+        runtime.spawn(async move {
+            for callback in hooks.iter().chain(callbacks.iter()) {
+                match callback(ctx.clone()).await {
+                    Ok(Some(_)) => break,
+                    Ok(None) => {}
+                    Err(error) => {
+                        tracing::warn!(
+                            agent.name = %ctx.agent_name(),
+                            error.code = %error.code,
+                            "after-agent callback failed after the agent stopped"
+                        );
+                        break;
+                    }
+                }
+            }
+        });
+    }
+}
+
+/// Runs one tool call. An agent-delegation tool, such as an `AgentTool`, runs on a Tokio task
+/// of its own.
+///
+/// A delegate's agent is polled from inside this agent's tool call, and its own delegates from
+/// inside its tool calls, so without a task boundary every level of delegation stacks another
+/// agent's frames on one thread's stack — several hundred KiB per level in debug builds,
+/// enough for three levels to overflow a 2 MiB worker thread. The task is aborted when this
+/// call is dropped, by cancellation or a timeout, and a panic in it resumes here.
+async fn execute_tool(
+    tool: Arc<dyn Tool>,
+    ctx: Arc<dyn ToolContext>,
+    args: serde_json::Value,
+) -> Result<serde_json::Value> {
+    let runtime = tokio::runtime::Handle::try_current().ok().filter(|_| tool.is_agent_delegation());
+    // The run's scope is current inside the tool, so media calls it makes count against the run.
+    let Some(runtime) = runtime else {
+        return adk_core::ModelCallScope::within_tool(
+            ctx.as_ref(),
+            tool.execute(ctx.clone(), args),
+        )
+        .await;
+    };
+    let call = async move {
+        adk_core::ModelCallScope::within_tool(ctx.as_ref(), tool.execute(ctx.clone(), args)).await
+    };
+    let mut task = AbortOnDrop(runtime.spawn(call.in_current_span()));
+    match (&mut task.0).await {
+        Ok(result) => result,
+        Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+        Err(_) => Err(adk_core::AdkError::new(
+            adk_core::ErrorComponent::Tool,
+            adk_core::ErrorCategory::Cancelled,
+            "tool.cancelled",
+            "the delegated call's task was cancelled before it finished",
+        )),
+    }
+}
+
+/// Aborts a spawned task when it is dropped unfinished.
+struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// The text `output_key` stores for `content`: its text parts, and for structured output
+/// the JSON inside a surrounding code fence.
+fn output_text(content: &Content, structured: bool) -> String {
+    let text: String = content.parts.iter().filter_map(Part::text).collect();
+    if structured { strip_json_code_fence(&text).to_string() } else { text }
+}
+
+/// Whether `error` is the run's own budget or spend ledger refusing a model call, which no
+/// fallback may answer.
+fn is_run_limit_refusal(error: &adk_core::AdkError) -> bool {
+    error.component == adk_core::ErrorComponent::Guardrail
+        || (error.component == adk_core::ErrorComponent::Agent
+            && error.category == adk_core::ErrorCategory::ResourceExhausted)
+}
+
+/// Asks the run's hooks for a response to a failed model call; the first response wins.
+///
+/// # Errors
+///
+/// Returns the error of a hook that fails.
+async fn recover_model_error(
+    ctx: &Arc<dyn InvocationContext>,
+    request: Option<&LlmRequest>,
+    error: &adk_core::AdkError,
+) -> Result<Option<LlmResponse>> {
+    let Some(request) = request else {
+        return Ok(None);
+    };
+    if is_run_limit_refusal(error) {
+        return Ok(None);
+    }
+    for hook in &ctx.run_config().invocation_hooks {
+        if let Some(response) = hook
+            .on_model_error(ctx.clone() as Arc<dyn CallbackContext>, request.clone(), error)
+            .await?
+        {
+            return Ok(Some(response));
+        }
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -3394,5 +5573,40 @@ mod run_helper_tests {
         assert_eq!(calls[1].index, 1);
         assert_eq!(calls[1].name, "second");
         assert_eq!(calls[1].function_call_id, "provider-id");
+    }
+
+    #[test]
+    fn partial_stream_events_do_not_repeat_large_payloads() {
+        let marker = "PRIVATE-REQUEST-PAYLOAD";
+        let request_json = format!("{marker}{}", "x".repeat(128 * 1024));
+        let chunk = LlmResponse {
+            content: Some(Content::new("model").with_text("x")),
+            partial: true,
+            ..Default::default()
+        };
+        let mut serialized_bytes = 0;
+
+        for index in 0..64 {
+            let event = build_partial_llm_event(
+                &format!("event-{index}"),
+                "invocation",
+                "agent",
+                &request_json,
+                &chunk,
+                Vec::new(),
+            );
+            let serialized = serde_json::to_string(&event).expect("event should serialize");
+
+            assert!(!serialized.contains(marker));
+            assert!(event.llm_request.is_none());
+            assert!(!event.provider_metadata.contains_key("gcp.vertex.agent.llm_request"));
+            assert!(!event.provider_metadata.contains_key("gcp.vertex.agent.llm_response"));
+            serialized_bytes += serialized.len();
+        }
+
+        assert!(
+            serialized_bytes < 1024 * 1024,
+            "64 tiny chunks unexpectedly serialized to {serialized_bytes} bytes"
+        );
     }
 }
