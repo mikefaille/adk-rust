@@ -417,7 +417,7 @@ impl RealtimeAgentBuilder {
     /// category, and code only ([`tool_error_response`](adk_core::tool_error_response)), because
     /// the message can quote credentials, internal hosts, or upstream bodies, and the result is
     /// sent to the provider, can be spoken to the user, and is stored in the session. The
-    /// message is logged when [`RunConfig::record_payloads`](adk_core::RunConfig) is set.
+    /// message is never logged; logs carry only the fixed category and code.
     /// Timeouts and the agent's own refusals keep their message.
     ///
     /// # Example
@@ -897,7 +897,7 @@ impl Agent for RealtimeAgent {
                         Err(e) => {
                             // Graceful degradation: log warning, continue audio-only
                             tracing::warn!(
-                                error = %e,
+                                error.kind = e.kind(),
                                 "avatar session creation failed, falling back to audio-only"
                             );
                             None
@@ -1084,7 +1084,7 @@ impl Agent for RealtimeAgent {
                                 #[cfg(feature = "video-avatar")]
                                 if let (Some(provider), Some(sess_id)) = (&avatar_provider, &avatar_session_id) {
                                     if let Err(e) = provider.send_audio(sess_id, &delta).await {
-                                        tracing::warn!(error = %e, "avatar send_audio failed");
+                                        tracing::warn!(error.kind = e.kind(), "avatar send_audio failed");
                                     }
                                     // Don't yield raw audio to client — avatar provides video+audio
                                     // Still call the on_audio callback for monitoring
@@ -1536,7 +1536,7 @@ impl Agent for RealtimeAgent {
                 #[allow(clippy::collapsible_if)]
                 if let (Some(provider), Some(sess_id)) = (&avatar_provider, &avatar_session_id) {
                     if let Err(e) = provider.stop_session(sess_id).await {
-                        tracing::warn!(error = %e, "avatar session cleanup failed");
+                        tracing::warn!(error.kind = e.kind(), "avatar session cleanup failed");
                     }
                 }
             }
@@ -1746,29 +1746,19 @@ async fn dispatch_tool(
     let cb_ctx: Arc<dyn CallbackContext> =
         Arc::new(ToolCallbackContext::new(ctx.clone(), name.clone(), args.clone()));
     let hooks = &ctx.run_config().invocation_hooks;
-    let record_payloads = ctx.run_config().record_payloads;
     // A message can quote credentials or internal hosts, so it is shown to the model only when
-    // the agent exposes error messages, and logged only when payloads are recorded.
+    // the agent exposes error messages; logs carry only the fixed category and code.
     let failure = |error: &AdkError| {
         if policy.expose_error_messages { error.to_string() } else { error.redacted() }
     };
     let log_failure = |error: &AdkError, stage: &str| {
-        if record_payloads {
-            tracing::warn!(
-                tool.name = %name,
-                error = %error.diagnostics(),
-                error.message = %error.message,
-                stage,
-                "realtime tool call failed"
-            );
-        } else {
-            tracing::warn!(
-                tool.name = %name,
-                error = %error.diagnostics(),
-                stage,
-                "realtime tool call failed"
-            );
-        }
+        tracing::warn!(
+            tool.name = %name,
+            error.kind = %error.category,
+            error.code = error.code,
+            stage,
+            "realtime tool call failed"
+        );
     };
     let not_run = |error: &AdkError| {
         serde_json::json!({
