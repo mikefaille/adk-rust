@@ -62,7 +62,7 @@
 //!
 //! # Per-unit prices
 //!
-//! Models billed in units rather than tokens carry a [`UnitPrice`]: an
+//! Models billed in units rather than tokens carry a [`UnitPrice`](crate::pricing::UnitPrice): an
 //! [`adk_core::UnitRate`] per [`adk_core::UsageUnit`]. [`PricingCatalog::unit_cost_micro_usd`]
 //! prices a [`UsageVector`](adk_core::UsageVector), both the most a call can use (its
 //! spend hold) and what it used.

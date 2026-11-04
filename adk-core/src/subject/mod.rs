@@ -3,14 +3,14 @@
 //!
 //! | Type | Role |
 //! |------|------|
-//! | [`VisitorId`] | A random id a deployment issues to a person it cannot otherwise identify |
-//! | [`ConsentStore`] | Consent records per subject and purpose, read before a lasting write |
-//! | [`SubjectRegistry`] | Each subject's pseudonym, links, and erasure state — never its data |
-//! | [`SubjectDataStore`] | One store family's adapter: export and erase a subject's data |
-//! | [`SubjectRights`] | Fans `export`, `erase`, and `link` out over the registry, the consent store, and every adapter |
-//! | [`ConsentGate`] | Whether a subject may have something lasting written for a purpose; read by the session and memory wrappers, the tool path, and the runner |
-//! | [`PseudonymousRecorder`] | Names subjects in audit records by registry pseudonym |
-//! | [`AuditLogSubjectData`] | The audit log as an adapter: redacts the bodies of records that name a subject by id |
+//! | [`VisitorId`](crate::subject::VisitorId) | A random id a deployment issues to a person it cannot otherwise identify |
+//! | [`ConsentStore`](crate::subject::ConsentStore) | Consent records per subject and purpose, read before a lasting write |
+//! | [`SubjectRegistry`](crate::subject::SubjectRegistry) | Each subject's pseudonym, links, and erasure state — never its data |
+//! | [`SubjectDataStore`](crate::subject::SubjectDataStore) | One store family's adapter: export and erase a subject's data |
+//! | [`SubjectRights`](crate::subject::SubjectRights) | Fans `export`, `erase`, and `link` out over the registry, the consent store, and every adapter |
+//! | [`ConsentGate`](crate::subject::ConsentGate) | Whether a subject may have something lasting written for a purpose; read by the session and memory wrappers, the tool path, and the runner |
+//! | [`PseudonymousRecorder`](crate::subject::PseudonymousRecorder) | Names subjects in audit records by registry pseudonym |
+//! | [`AuditLogSubjectData`](crate::subject::AuditLogSubjectData) | The audit log as an adapter: redacts the bodies of records that name a subject by id |
 //!
 //! Stores keyed by `(app, user)` — sessions, memory, artifacts — find a subject by its
 //! id. The registry holds no index of records, so no second copy of a person's data can
@@ -18,13 +18,13 @@
 //!
 //! # Erasure
 //!
-//! [`SubjectRights::erase`] works in this order, and can be repeated until it completes:
+//! [`SubjectRights::erase`](crate::subject::SubjectRights::erase) works in this order, and can be repeated until it completes:
 //!
-//! 1. The subject and every visitor id linked to it move to [`SubjectState::Erasing`];
+//! 1. The subject and every visitor id linked to it move to [`SubjectState::Erasing`](crate::subject::SubjectState::Erasing);
 //!    consent gates refuse writes for a subject in that state.
 //! 2. Every live consent record is revoked.
-//! 3. Each [`SubjectDataStore`] erases the subject's data, by its
-//!    [`StoreSupport`]: a store that cannot erase is reported, never skipped.
+//! 3. Each [`SubjectDataStore`](crate::subject::SubjectDataStore) erases the subject's data, by its
+//!    [`StoreSupport`](crate::subject::StoreSupport): a store that cannot erase is reported, never skipped.
 //! 4. The consent records are erased.
 //! 5. An [`AuditRecordKind::Erasure`](crate::audit_log::AuditRecordKind::Erasure) record
 //!    names the subject's pseudonym, never its id.
@@ -150,7 +150,7 @@ impl VisitorId {
         &self.0
     }
 
-    /// The subject this id names, of kind [`SubjectKind::Visitor`].
+    /// The subject this id names, of kind [`SubjectKind::Visitor`](crate::principal::SubjectKind::Visitor).
     pub fn subject(&self) -> SubjectRef {
         SubjectRef::visitor(self.0.clone())
     }

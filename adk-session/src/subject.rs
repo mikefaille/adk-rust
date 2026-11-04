@@ -1,4 +1,4 @@
-//! The session family's [`SubjectDataStore`] adapter: a subject's sessions, events, and
+//! The session family's [`SubjectDataStore`](adk_core::subject::SubjectDataStore) adapter: a subject's sessions, events, and
 //! `user:` state, exported and erased through any [`SessionService`].
 
 use std::sync::Arc;

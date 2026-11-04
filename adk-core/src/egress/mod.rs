@@ -1,7 +1,7 @@
 //! Network egress policy: which hosts, ports and addresses a connection may reach.
 //!
-//! An [`EgressPolicy`] is a set of [`EgressRule`]s plus two switches, and [`decide`] is a
-//! pure function from a policy and an [`EgressTarget`] to an allow or an [`EgressDenial`].
+//! An [`EgressPolicy`](crate::egress::EgressPolicy) is a set of [`EgressRule`](crate::egress::EgressRule)s plus two switches, and [`decide`](crate::egress::EgressPolicy::decide) is a
+//! pure function from a policy and an [`EgressTarget`](crate::egress::EgressTarget) to an allow or an [`EgressDenial`](crate::egress::EgressDenial).
 //! A connection by host name passes two checks: the name and port before resolution, and
 //! every address the name resolves to at connect time.
 //!
@@ -14,18 +14,18 @@
 //!
 //! | Address check | Outcome |
 //! |---------------|---------|
-//! | [`AddressClass::Metadata`] (cloud metadata and credential endpoints) | Always refused, whatever the rules say |
-//! | [`AddressClass::Public`] | Admitted |
-//! | Any other class (loopback, private, link-local, ...) | Admitted only inside a CIDR rule, or when [`EgressPolicy::with_private_networks`] is set |
+//! | [`AddressClass::Metadata`](crate::egress::AddressClass::Metadata) (cloud metadata and credential endpoints) | Always refused, whatever the rules say |
+//! | [`AddressClass::Public`](crate::egress::AddressClass::Public) | Admitted |
+//! | Any other class (loopback, private, link-local, ...) | Admitted only inside a CIDR rule, or when [`EgressPolicy::with_private_networks`](crate::egress::EgressPolicy::with_private_networks) is set |
 //!
 //! A rule without a port admits every port. Plain `http` URLs are refused unless
-//! [`EgressPolicy::with_plain_http`] is set. A host name whose last label is numeric, such as
+//! [`EgressPolicy::with_plain_http`](crate::egress::EgressPolicy::with_plain_http) is set. A host name whose last label is numeric, such as
 //! `0x7f.1`, is refused because resolvers read it as an IPv4 address.
 //!
-//! [`EgressPolicy::narrow`] intersects two policies: a destination passes the result only when
+//! [`EgressPolicy::narrow`](crate::egress::EgressPolicy::narrow) intersects two policies: a destination passes the result only when
 //! it passes both. An operator's policy is the ceiling, and every lower layer narrows it.
 //!
-//! [`GuardedClient`] (feature `egress-client`) is an HTTP client that enforces a policy on
+//! [`GuardedClient`](crate::egress::GuardedClient) (feature `egress-client`) is an HTTP client that enforces a policy on
 //! every request URL, every resolved address and every redirect hop, ignores the environment's
 //! proxy settings, and is never replaced by an unguarded client when it cannot be built.
 //!
@@ -59,7 +59,7 @@
 //! );
 //! ```
 //!
-//! [`decide`]: EgressPolicy::decide
+//! [`decide`]: crate::egress::EgressPolicy::decide
 
 mod address;
 #[cfg(feature = "egress-client")]
