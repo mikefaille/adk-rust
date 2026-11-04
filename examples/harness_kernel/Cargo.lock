@@ -386,6 +386,8 @@ dependencies = [
  "bytes",
  "chrono",
  "futures",
+ "futures-core",
+ "futures-util",
  "parking_lot",
  "rustls",
  "secrecy",
@@ -393,7 +395,9 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
+ "tokio-stream",
  "tokio-tungstenite",
+ "tokio-util",
  "tracing",
  "url",
  "uuid",
@@ -435,6 +439,7 @@ version = "3.0.0"
 dependencies = [
  "adk-core",
  "async-trait",
+ "chrono",
  "find-msvc-tools",
  "libc",
  "serde",
@@ -2235,9 +2240,9 @@ checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 
 [[package]]
 name = "opentelemetry"
-version = "0.32.0"
+version = "0.33.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0142c63252a9e054e68a4c61a5778f7b14f576274d593f8ce883d191a099682"
+checksum = "8c1f1a6ac9c875a4941e4c7c085b61e8f4daa326de03b4701768c3491a6ad9ee"
 dependencies = [
  "futures-core",
  "futures-sink",
