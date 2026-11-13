@@ -618,12 +618,19 @@ impl From<RealtimeConfig> for SessionUpdateConfig {
 pub struct TranscriptionConfig {
     /// Transcription model to use.
     pub model: String,
+    /// BCP-47 languages the input transcription may detect. Empty leaves
+    /// automatic detection unconstrained; a non-empty list biases
+    /// recognition toward exactly these languages. Gemini Live sends them
+    /// as `inputAudioTranscription.languageCodes`; other providers ignore
+    /// them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub language_codes: Vec<LanguageCode>,
 }
 
 impl TranscriptionConfig {
     /// Use whisper-1 for transcription.
     pub fn whisper() -> Self {
-        Self { model: "whisper-1".to_string() }
+        Self { model: "whisper-1".to_string(), language_codes: Vec::new() }
     }
 }
 
@@ -710,6 +717,17 @@ impl RealtimeConfig {
     /// Enable input audio transcription.
     pub fn with_transcription(mut self) -> Self {
         self.input_audio_transcription = Some(TranscriptionConfig::whisper());
+        self
+    }
+
+    /// Pin the languages input transcription may detect. Enables input
+    /// transcription if it was not already enabled. An empty list leaves
+    /// automatic detection unconstrained.
+    pub fn with_transcription_language_codes(mut self, language_codes: Vec<LanguageCode>) -> Self {
+        let mut transcription =
+            self.input_audio_transcription.take().unwrap_or_else(TranscriptionConfig::whisper);
+        transcription.language_codes = language_codes;
+        self.input_audio_transcription = Some(transcription);
         self
     }
 

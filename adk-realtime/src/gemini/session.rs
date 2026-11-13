@@ -1405,8 +1405,24 @@ impl GeminiRealtimeSession {
 
         // When transcription is requested, enable both input (user speech) and
         // output (model speech) transcription so consumers get clean text for
-        // native-audio turns. An empty object turns the feature on.
-        let transcription = config.input_audio_transcription.as_ref().map(|_| json!({}));
+        // native-audio turns. An empty object turns the feature on. Pinned
+        // `languageCodes` ride on the input side only: they constrain what
+        // the recogniser may hear the caller as, while the output side (the
+        // model's own speech) stays unconstrained.
+        let input_transcription = config.input_audio_transcription.as_ref().map(|cfg| {
+            if cfg.language_codes.is_empty() {
+                json!({})
+            } else {
+                json!({
+                    "languageCodes": cfg
+                        .language_codes
+                        .iter()
+                        .map(|code| code.as_str())
+                        .collect::<Vec<_>>(),
+                })
+            }
+        });
+        let output_transcription = config.input_audio_transcription.as_ref().map(|_| json!({}));
 
         // Proactive audio filtering. The capability gate above already rejected
         // this knob on models the docs exclude, so reaching here with it set
@@ -1425,8 +1441,8 @@ impl GeminiRealtimeSession {
                 tools: compiled_tools,
                 cached_content: config.cached_content,
                 session_resumption,
-                input_audio_transcription: transcription.clone(),
-                output_audio_transcription: transcription,
+                input_audio_transcription: input_transcription,
+                output_audio_transcription: output_transcription,
                 realtime_input_config,
                 context_window_compression,
                 proactivity,
@@ -3592,6 +3608,21 @@ mod tests {
         let speech = &js["setup"]["generationConfig"]["speechConfig"];
         assert_eq!(speech["languageCode"], json!("en-US"));
         assert_eq!(speech["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"], json!("Aoede"));
+    }
+
+    #[test]
+    fn test_input_transcription_language_codes_land_only_on_input() {
+        let js = setup_json(
+            RealtimeConfig::default().with_audio_only().with_transcription_language_codes(vec![
+                crate::config::LanguageCode::parse("en-US").unwrap(),
+                crate::config::LanguageCode::parse("fr-CA").unwrap(),
+            ]),
+        );
+        assert_eq!(
+            js["setup"]["inputAudioTranscription"]["languageCodes"],
+            json!(["en-US", "fr-CA"])
+        );
+        assert_eq!(js["setup"]["outputAudioTranscription"], json!({}));
     }
 
     #[test]
