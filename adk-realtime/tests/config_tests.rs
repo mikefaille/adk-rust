@@ -36,9 +36,20 @@ fn language_code_parse_accepts_well_formed_tags() {
 }
 
 #[test]
+fn language_code_parse_canonicalizes_casing() {
+    use adk_realtime::config::LanguageCode;
+    assert_eq!(LanguageCode::parse("en-us").unwrap().as_str(), "en-US");
+    assert_eq!(LanguageCode::parse("ZH-hant").unwrap().as_str(), "zh-Hant");
+    assert_eq!(LanguageCode::parse("es-419").unwrap().as_str(), "es-419");
+    assert_eq!(LanguageCode::parse("en-us").unwrap(), LanguageCode::parse("en-US").unwrap());
+}
+
+#[test]
 fn language_code_parse_rejects_malformed_tags() {
     use adk_realtime::config::LanguageCode;
-    for tag in ["", " ", "en US", "en_US", "fr_CA", "héllo", "-en", "en-", "en--US", "e1"] {
+    for tag in
+        ["", " ", "en US", "en_US", "fr_CA", "héllo", "-en", "en-", "en--US", "e1", "engl", "en-x"]
+    {
         assert!(LanguageCode::parse(tag).is_err(), "must reject {tag:?}");
     }
 }

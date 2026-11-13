@@ -360,22 +360,27 @@ pub enum FunctionResponseScheduling {
     Interrupt,
 }
 
-/// A spoken-language tag (RFC 5646 / BCP 47), validated structurally.
+/// A spoken-language tag, validated and stored in BCP 47 display casing.
 ///
-/// The parse checks the tag's shape only — an ASCII primary subtag followed
-/// by hyphen-separated alphanumeric subtags — and keeps no allowlist of
-/// languages or regions, so any well-formed tag (e.g. `fr-CA`) is accepted
-/// while an empty, whitespace-bearing, underscored, or non-ASCII value is
-/// rejected at construction instead of reaching a provider.
+/// The parse checks shape only. There is no allowlist of languages or
+/// regions. A 2–3 letter language subtag may be followed by subtags of 2–8
+/// ASCII letters or digits (`en`, `en-US`, `fr-CA`, `zh-Hant`). The stored
+/// spelling is canonical: language lowercase, a 2-letter region uppercase,
+/// a 4-letter script in title case, and every other subtag lowercase.
+/// `en-us` and `en-US` are the same tag. An empty tag, a non-ASCII tag, an
+/// underscore, an empty subtag, or a one-character subtag is rejected, so
+/// private-use and extension tags never reach a provider.
 ///
-/// Serializes transparently as its string. Deserialization is fail-closed:
-/// a malformed value in a stored config is an error, never a pass-through.
+/// Serializes transparently as its canonical string. Deserialization is
+/// fail-closed: a malformed value in a stored config is an error, never a
+/// pass-through.
 ///
 /// # Example
 ///
 /// ```
 /// use adk_realtime::config::LanguageCode;
 ///
+/// assert_eq!(LanguageCode::parse("en-us").unwrap().as_str(), "en-US");
 /// assert_eq!(LanguageCode::parse("fr-CA").unwrap().as_str(), "fr-CA");
 /// assert!(LanguageCode::parse("fr_CA").is_err());
 /// assert!(LanguageCode::parse("").is_err());
@@ -399,41 +404,59 @@ impl std::fmt::Display for LanguageCodeError {
 impl std::error::Error for LanguageCodeError {}
 
 impl LanguageCode {
-    /// Parse and validate a language tag.
+    /// Parse a language tag and store its BCP 47 display spelling.
     ///
     /// # Errors
     ///
-    /// Returns [`LanguageCodeError`] when the tag is empty, contains
-    /// whitespace, an underscore, or a non-ASCII character, or is not a
-    /// hyphen-separated sequence of subtags whose primary subtag is 2–8
-    /// ASCII letters and whose remaining subtags are 1–8 ASCII
-    /// alphanumerics.
+    /// Returns [`LanguageCodeError`] when the tag is empty or non-ASCII, has
+    /// an empty subtag, does not start with a 2–3 letter language, or has a
+    /// later subtag outside 2–8 ASCII letters or digits.
     pub fn parse(value: impl AsRef<str>) -> std::result::Result<Self, LanguageCodeError> {
         let value = value.as_ref();
         let invalid = || LanguageCodeError { value: value.to_string() };
-        if value.is_empty()
-            || !value.is_ascii()
-            || value.chars().any(|c| c.is_whitespace() || c == '_')
+        if value.is_empty() || !value.is_ascii() {
+            return Err(invalid());
+        }
+        let subtags: Vec<&str> = value.split('-').collect();
+        if subtags.iter().any(|subtag| subtag.is_empty()) {
+            return Err(invalid());
+        }
+        let language = subtags[0];
+        if !(2..=3).contains(&language.len())
+            || !language.bytes().all(|byte| byte.is_ascii_alphabetic())
         {
             return Err(invalid());
         }
-        let mut subtags = value.split('-');
-        let primary = subtags.next().unwrap_or_default();
-        if !(2..=8).contains(&primary.len()) || !primary.chars().all(|c| c.is_ascii_alphabetic()) {
-            return Err(invalid());
-        }
-        for subtag in subtags {
-            if subtag.is_empty()
-                || subtag.len() > 8
-                || !subtag.chars().all(|c| c.is_ascii_alphanumeric())
+        for subtag in &subtags[1..] {
+            if !(2..=8).contains(&subtag.len())
+                || !subtag.bytes().all(|byte| byte.is_ascii_alphanumeric())
             {
                 return Err(invalid());
             }
         }
-        Ok(Self(value.to_string()))
+        let mut canonical = String::with_capacity(value.len());
+        canonical.push_str(&language.to_ascii_lowercase());
+        for subtag in &subtags[1..] {
+            canonical.push('-');
+            if subtag.len() == 2 && subtag.bytes().all(|byte| byte.is_ascii_alphabetic()) {
+                canonical.push_str(&subtag.to_ascii_uppercase());
+            } else if subtag.len() == 4 && subtag.bytes().all(|byte| byte.is_ascii_alphabetic()) {
+                let mut chars = subtag.chars();
+                let Some(first) = chars.next() else {
+                    return Err(invalid());
+                };
+                canonical.push(first.to_ascii_uppercase());
+                for rest in chars {
+                    canonical.push(rest.to_ascii_lowercase());
+                }
+            } else {
+                canonical.push_str(&subtag.to_ascii_lowercase());
+            }
+        }
+        Ok(Self(canonical))
     }
 
-    /// The tag as written.
+    /// The canonical tag (`en-US`, `zh-Hant`).
     pub fn as_str(&self) -> &str {
         &self.0
     }
